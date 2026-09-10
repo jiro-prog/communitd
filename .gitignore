@@ -1,0 +1,31 @@
+node_modules/
+.env
+# 秘密設定 (サーバー ID・ユーザー ID)。policy 側は git 管理する — 分離の理由は
+# docs/social-engineering.md §3.9 (org-apply が policy へ diff を当てるため)
+config.secrets.json
+config.secrets.json.bak
+config.secrets.json.lock
+config.secrets.json.tmp-*
+# add-project が config.policy.json を書き換えるときの副産物 (本体は追跡する)
+config.policy.json.bak
+config.policy.json.lock
+config.policy.json.tmp-*
+# 分離前の旧 config (手元に残っていても誤ってコミットしない)
+config.json
+config.json.bak
+config.json.lock
+config.json.tmp-*
+data/
+sandbox/
+# タスクごとの作業ツリー (§8-2)。無視していないと `prepareWorktree` が起動を拒み
+# (src/worktree.js の isWorktreeDirIgnored)、org-apply が作った枝が本体の
+# untracked として git add -A に巻き込まれる
+.worktrees/
+# codex の調査キャッシュ (2026-08-07、1.8MB — コミットに紛れ込ませない)
+.tmp-openai-docs-cache/
+# 一時置き場 (調査ログ・実行結果の貼り付け)。実サーバーの ID や個人のパスが
+# そのまま落ちてくるので、追跡しない。**リポジトリ直下だけ** — アンカーしないと
+# docs/tmp/ や src/tmp/ まで巻き込む
+/tmp/
+# lint ツールが手元に残す履歴 (機械が書く作業ファイル)
+/.brooks-lint-history.json

@@ -1,0 +1,24 @@
+{
+  "claudeBin": "claude",
+  "bots": {
+    "manager": {
+      "tokenEnv": "MANAGER_DISCORD_TOKEN",
+      "displayName": "Manager",
+      "model": "opus",
+      "rolePromptFile": "roles/manager.md"
+    },
+    "worker": {
+      "tokenEnv": "WORKER_DISCORD_TOKEN",
+      "displayName": "Worker",
+      "model": "sonnet",
+      "rolePromptFile": "roles/worker.md"
+    }
+  },
+  "channels": {
+    "my-project": {
+      "cwd": "C:/path/to/your/project",
+      "tools": "standard",
+      "permissionMode": "acceptEdits"
+    }
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "name": "communitd",
+  "version": "0.1.0",
+  "description": "Discord bridge that dispatches mentions to local Claude Code and Codex agents",
+  "keywords": [
+    "discord",
+    "claude-code",
+    "codex",
+    "agent",
+    "bridge"
+  ],
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node scripts/run.mjs",
+    "add-project": "node --env-file=.env scripts/add-project.mjs",
+    "doctor": "node --env-file=.env scripts/doctor.mjs",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20.6"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.27.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jiro-prog/communitd.git"
+  },
+  "homepage": "https://github.com/jiro-prog/communitd#readme",
+  "bugs": {
+    "url": "https://github.com/jiro-prog/communitd/issues"
+  }
+}
