@@ -1,0 +1,9 @@
+# 作業ツリーの改行を LF で固定する。
+#
+# Git for Windows の既定 (`core.autocrlf=true`) だと clone した作業ツリーが CRLF になり、
+# 行末に敏感な照合が「その人の git 設定次第で落ちる」ようになる — 公開後の windows CI が
+# まさにこれで落ちた (2026-09-11)。Node のプロジェクトで LF 固定はふつうの選択で、
+# Windows のエディタも Git for Windows も LF のまま扱える。
+#
+# `text=auto` は中身を見てテキストかどうかを決めるので、画像などの binary は変換されない。
+* text=auto eol=lf

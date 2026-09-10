@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-11
+
+### Fixed
+
+- **作業ツリーの撤去が「綴りの違う同じ場所」で黙って空振りしていた。** git は必ず実体の綴りで
+  報告するのに、こちらは設定値から組み立てた綴りで照合していたため、**Windows の 8.3 短縮名**
+  (`C:\Users\RUNNER~1\…`)・junction / symlink・macOS の `/var` → `/private/var` では
+  `git worktree list` に居るツリーを「登録されていない」と読み違え、**作業ツリーもタスクの枝も
+  残り続けた**。比較の前に実体で引き直すようにした (`src/worktree.js`)。
+- **テストが `core.autocrlf=true` で clone した作業ツリーで落ちていた。** 行末に敏感な照合を
+  CRLF でも通るようにし、併せて `.gitattributes` (`* text=auto eol=lf`) で作業ツリーの改行を
+  LF に固定した。
+
 ## [0.1.1] - 2026-09-11
 
 ### Added
@@ -54,6 +67,7 @@
 
 <!-- 版どうしの比較リンク ([Unreleased] / [0.1.0]) は publish-snapshot が --repo から生成する -->
 
-[Unreleased]: https://github.com/jiro-prog/communitd/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/jiro-prog/communitd/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/jiro-prog/communitd/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/jiro-prog/communitd/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jiro-prog/communitd/releases/tag/v0.1.0

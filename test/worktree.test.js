@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -14,6 +15,7 @@ import {
   prepareWorktree,
   prepareWorktreeOnce,
   releaseWorktree,
+  sameWorktreePath,
   worktreePathFor,
   worktreeRootFor,
 } from '../src/worktree.js';
@@ -174,6 +176,34 @@ test('planPrepare はパスの大文字小文字が違っても同じ作業ツ�
     branches: ['task/9'],
   });
   assert.equal(plan.reused, true);
+});
+
+test('綴りの違う同じ場所は同じ作業ツリー (8.3 短縮名・junction・symlink)', () => {
+  // git は必ず**実体の綴り**で報告するのに、こちらは設定値から組み立てた綴りを持っている。
+  // 文字列比較だけだったころ、TEMP が 8.3 短縮名の環境 (GitHub Actions の windows runner)
+  // で planRelease が撤去先を「登録されていない」と判断し、作業ツリーも枝も残った (2026-09-11)
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'communitd-wtpath-')));
+  const real = join(root, 'real');
+  const link = join(root, 'link');
+  mkdirSync(join(real, 'task-1'), { recursive: true });
+  try {
+    symlinkSync(real, link, 'junction'); // type は Windows だけで効く (他は普通の symlink)
+  } catch (err) {
+    rmSync(root, { recursive: true, force: true });
+    assert.fail(`symlink を作れない環境: ${err.message}`);
+  }
+  try {
+    assert.equal(
+      sameWorktreePath(join(link, 'task-1'), join(real, 'task-1')),
+      true,
+      '同じ場所を別の作業ツリーと見ている (撤去も再利用も効かなくなる)',
+    );
+    // 別の場所は畳まない (実体で引いても違うものは違う)
+    mkdirSync(join(root, 'other', 'task-1'), { recursive: true });
+    assert.equal(sameWorktreePath(join(root, 'other', 'task-1'), join(real, 'task-1')), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+  }
 });
 
 test('planPrepare は同じパスに別ブランチが残っていたら落ちる (#9 の再発防止)', () => {

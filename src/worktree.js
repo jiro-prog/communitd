@@ -19,6 +19,7 @@
 // 見たいのは「作業ツリーが status に出ないこと」であって、どのファイルに書いてあるかではない。
 
 import { execFile } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 /** 作業ツリーの置き場所 (リポジトリ内)。リポジトリ外へ出すと cwd 固定の禁則 (§6) と揉める */
@@ -107,13 +108,36 @@ function shortBranch(ref) {
 }
 
 /**
+ * 実在するパスを実体の綴りへ直す。**綴りが違うだけの同じ場所**を別物と見ないための下ごしらえ。
+ *
+ * Windows の 8.3 短縮名 (`C:\Users\RUNNER~1\…`) と長い名前、junction / symlink、
+ * macOS の `/var` → `/private/var` はどれも「同じ場所・違う文字列」で、**git は必ず実体の
+ * 綴りで報告する**。こちらは設定値から組み立てた綴りを持っているので、引き直さずに
+ * 比べると `git worktree list` に居るツリーを「登録されていない」と読み違える。
+ *
+ * 実在しないパス (まだ作っていないツリー) は引けないのでそのまま返す — 存在しないものは
+ * git の一覧にも無く、比較の答えは変わらない。
+ */
+function realOrSelf(path) {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
  * パスの同一判定。**Windows でだけ大文字小文字を無視する** — `C:/Users/...` と
  * `c:/users/...` が別の作業ツリーに見えると、同じ場所へ二度 add して git のエラーで
  * 初めて気づくことになる。POSIX では大小が違えば本当に別のパスなので、畳むと逆に壊れる。
+ *
+ * 大小の前に**実体で引き直す** (`realOrSelf`)。ここが文字列比較だけだったころ、TEMP が
+ * 8.3 短縮名の環境 (GitHub Actions の windows runner) で `planRelease` が撤去先を
+ * 「登録されていない」と判断し、**作業ツリーも枝も残り続けた** (2026-09-11)。
  */
 export function sameWorktreePath(a, b) {
-  const left = resolve(String(a ?? ''));
-  const right = resolve(String(b ?? ''));
+  const left = realOrSelf(resolve(String(a ?? '')));
+  const right = realOrSelf(resolve(String(b ?? '')));
   if (process.platform !== 'win32') return left === right;
   return left.toLowerCase() === right.toLowerCase();
 }

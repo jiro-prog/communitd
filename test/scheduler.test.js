@@ -125,8 +125,13 @@ test('pause 中の tick は行動を選ばず、日付の繰越だけ進める',
   assert.ok(running.actions.length > 0, '再開しても動かない');
 });
 
-// 配線の約束は source で固定する (起動しないと読めない層)。関数本体は src/bridge/*.js にある
-const bridgeSource = (name) => readFileSync(fileURLToPath(new URL(`../src/bridge/${name}.js`, import.meta.url)), 'utf8');
+// 配線の約束は source で固定する (起動しないと読めない層)。関数本体は src/bridge/*.js にある。
+// **改行は LF へ正規化して読む** — チェックアウトの設定 (`core.autocrlf=true`) 次第で作業ツリーが
+// CRLF になり、`\n` を書いた照合が環境依存で外れる (windows CI 2026-09-11)。
+// リポジトリには `.gitattributes` で LF を固定してあるが、それより前に clone した
+// 作業ツリーには効かないので、読む側でも畳んでおく
+const bridgeSource = (name) => readFileSync(fileURLToPath(new URL(`../src/bridge/${name}.js`, import.meta.url)), 'utf8')
+  .replaceAll('\r\n', '\n');
 
 test('autonomyTick は pause の状態を読み、自動召喚も止める', () => {
   const source = bridgeSource('scheduler');
