@@ -17,9 +17,18 @@
 //
 // 依存 (platform / env / exists / readFile / nodeBin) はすべて注入できる。doctor は自分の
 // 注入した fs で読む必要があり、テストは実機の PATH に左右されずに判定を固定する必要がある。
+//
+// **パス操作は実行 OS ではなく `path.win32` で行う。** このモジュールが扱うのは
+// Windows のパス文字列 (`;` 区切りの PATH・ドライブレター・`.cmd` シムの中の `%dp0%\…`)
+// だけで、実際に探索するのも `platform === 'win32'` のときだけ。実行 OS の規則で読むと、
+// Linux では `C:/npm` が相対パス扱いになって `join` が cwd を頭に付ける — 本番では通らない
+// 経路なのにテストだけが落ちる (公開後の最初の CI で 9 件 fail 2026-09-11)。
+// win32 の規則は先頭 `/` も絶対と見るので、Linux のパスを渡しても判定は変わらない。
 
 import { existsSync, readFileSync } from 'node:fs';
-import { basename, dirname, extname, isAbsolute, join } from 'node:path';
+import { win32 } from 'node:path';
+
+const { basename, dirname, extname, isAbsolute, join } = win32;
 
 /** 直接 spawn できる拡張子 */
 const NATIVE_EXT = ['.exe', '.com'];

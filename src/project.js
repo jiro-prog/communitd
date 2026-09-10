@@ -1,7 +1,7 @@
 // プロジェクト (チャンネル) 追加の純粋ロジック。
 // 対話と読み書きは scripts/add-project.mjs 側の責務 — ここは検証と組み立てだけ。
 
-import { basename, isAbsolute, resolve } from 'node:path';
+import { basename, resolve, win32 } from 'node:path';
 import { DEFAULT_TOOLS_PRESET, POLICY_FILE, TOOL_PRESETS } from './config.js';
 
 /** tools プリセットの選択肢 (対話の並び順もこれに従う) */
@@ -41,13 +41,18 @@ export function validateChannelName(name, config = {}) {
  * 既存の設定が `C:/Users/...` 形式なので、Windows の `\` は `/` に直す。
  * 相対パスは呼び出し元の cwd 基準で絶対化する。
  *
+ * 「もう絶対パスか」は **win32 の規則**で見る (`win32.isAbsolute`)。先頭 `/` も
+ * ドライブレターも絶対と判るので、どちらの OS で書かれた設定でも同じ答えになる。
+ * 実行 OS の規則だと Linux で `C:/…` が相対扱いになり、cwd を頭に付けた
+ * 意味のないパスができる。
+ *
  * @returns {string|null} 空入力なら null
  */
 export function normalizeCwd(input) {
   if (typeof input !== 'string' || input.trim() === '') return null;
   const trimmed = input.trim().replace(/^["']|["']$/g, ''); // 貼り付けの引用符を許容
   if (trimmed === '') return null;
-  const abs = isAbsolute(trimmed) ? trimmed : resolve(trimmed);
+  const abs = win32.isAbsolute(trimmed) ? trimmed : resolve(trimmed);
   return abs.replaceAll('\\', '/').replace(/(?<=.)\/$/, ''); // 末尾の / は落とす
 }
 

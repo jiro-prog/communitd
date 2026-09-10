@@ -1,6 +1,6 @@
 {
   "name": "communitd",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Discord bridge that dispatches mentions to local Claude Code and Codex agents",
   "keywords": [
     "discord",
@@ -15,7 +15,7 @@
     "start": "node scripts/run.mjs",
     "add-project": "node --env-file=.env scripts/add-project.mjs",
     "doctor": "node --env-file=.env scripts/doctor.mjs",
-    "test": "node --test test/*.test.js"
+    "test": "node scripts/test.mjs"
   },
   "engines": {
     "node": ">=20.6"

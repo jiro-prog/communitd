@@ -5,6 +5,24 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-11
+
+### Added
+
+- **CI に Windows を追加。** `ubuntu-latest` × `windows-latest` × Node 20 / 22 で回す。
+  開発は Windows・CI は ubuntu だけ、という組み合わせだと、パスの意味論の違いが公開してから出る。
+
+### Fixed
+
+- **テストが Linux で通らなかった** (9 件)。`src/clicmd.js` の Windows 向けのパス操作が実行 OS の
+  規則で動き、Linux では `C:/…` が相対パス扱いになっていた。**Windows のパス文字列を読む所は
+  `path.win32` で固定**し、実 OS へ渡す引数を扱う所 (`--add-dir` / パス承認ルール) は実 OS の
+  規則のままにして、事例の側を OS に依らない形へ直した。製品の動作は変わらない。
+- **`npm test` が「1 件も走らないまま成功」しうる書き方だった。** `test/*.test.js` の展開を
+  シェル任せにしていたため、展開できるかがシェルと Node の版に依存し、**展開できなかったときは
+  0 件のまま exit 0** になる (走っていないのに緑)。入口を `scripts/test.mjs` にして、ファイルを
+  自分で並べ、0 件なら落とすようにした。
+
 ## [0.1.0] - 2026-09-11
 
 最初の公開版。
@@ -36,5 +54,6 @@
 
 <!-- 版どうしの比較リンク ([Unreleased] / [0.1.0]) は publish-snapshot が --repo から生成する -->
 
-[Unreleased]: https://github.com/jiro-prog/communitd/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jiro-prog/communitd/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/jiro-prog/communitd/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jiro-prog/communitd/releases/tag/v0.1.0

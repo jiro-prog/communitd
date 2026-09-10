@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { linkSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { canonicalCwd } from '../src/grants.js';
 import {
   collectProposals, describePathRule, proposeGrant, sanitizeForDisplay,
@@ -288,7 +288,9 @@ test('パス判定は承認候補と touch 集合の変換で同じ規則を使�
     ['src', /ディレクトリ/],
     ['.', /作業ディレクトリ自身|ディレクトリ/],
     ['../outside.js', /作業ディレクトリの外/],
-    ['C:/Windows/x.js', /作業ディレクトリの外/],
+    // 絶対パスの綴りは実 OS の規則で決まる (posix に `C:` ドライブは無く、そこでは
+    // `C:/Windows/x.js` は本当にただの相対パス)。resolve で実 OS の形に直して渡す
+    [resolve('/outside/x.js'), /作業ディレクトリの外/],
     [' src/index.js', /前後に空白/],
     ['', /空/],
     ['.env', /秘密/],

@@ -178,8 +178,14 @@ test('同梱の example と実際の設定ファイルが起動時検証を通�
   // 「clone → example をコピー → doctor」が通ることの回帰。ここが崩れると
   // SETUP のとおりに進めた第三者が最初の起動で落ちる
   const pairs = [['config.policy.example.json', 'config.secrets.example.json']];
-  // 作者の実設定はこのリポジトリにしか無いので、在るときだけ見る (CI では飛ばす)
-  if (existsSync(resolve(ROOT, 'config.policy.json')) && existsSync(resolve(ROOT, 'config.secrets.json'))) {
+  // 作者の実設定はこのリポジトリにしか無いので、在るときだけ見る (CI では飛ばす)。
+  // **書かれた OS の上でだけ**見る: 設定の cwd は絶対パスなので、WSL から Windows 側の
+  // ツリーを検証すると同じディレクトリでも綴りが違い (`C:/…` と `/mnt/c/…`)、
+  // 直しようのない不一致で落ちる。その設定を使うのは Windows 側のブリッジの方
+  const realPolicy = resolve(ROOT, 'config.policy.json');
+  const usable = process.platform === 'win32'
+    || !(existsSync(realPolicy) && /"[A-Za-z]:[\\/]/.test(readFileSync(realPolicy, 'utf8')));
+  if (usable && existsSync(realPolicy) && existsSync(resolve(ROOT, 'config.secrets.json'))) {
     pairs.push(['config.policy.json', 'config.secrets.json']);
   }
   for (const [policy, secrets] of pairs) {
@@ -432,19 +438,22 @@ test('allowedTools / toolsExtra の型不正は起動拒否', () => {
 });
 
 test('claudeAddDirs は絶対パスへ正規化し、重複と cwd 自身を落とす', () => {
-  const cwd = resolve('C:/tmp/work');
+  // `--add-dir` は実 OS へ渡す引数なので、絶対パスの綴りは実 OS の規則で決まる。
+  // 事例も resolve() で作る — `C:/…` と直に書くと Windows でしか絶対パスにならない
+  const cwd = resolve('/tmp/work');
+  const docs = resolve('/tmp/docs');
   assert.deepEqual(resolveAddDirs({ cwd }), []); // 未指定なら何も渡さない
   assert.deepEqual(resolveAddDirs({ cwd, claudeAddDirs: [] }), []);
   assert.deepEqual(
-    resolveAddDirs({ cwd, claudeAddDirs: ['C:/tmp/docs', '../notes', ' C:/tmp/docs '] }),
-    [resolve('C:/tmp/docs'), resolve('C:/tmp/notes')], // 相対は cwd 基準・重複は 1 回
+    resolveAddDirs({ cwd, claudeAddDirs: [docs, '../notes', ` ${docs} `] }),
+    [docs, resolve('/tmp/notes')], // 相対は cwd 基準・重複は 1 回
   );
   // cwd 自身は常に渡っているので二重に足さない (表記ゆれも同じ扱い)
   assert.deepEqual(resolveAddDirs({ cwd, claudeAddDirs: [cwd, '.', 'sub/..'] }), []);
   // 検証を素通りした値が混ざっても、そこだけ落として残りは渡す
   assert.deepEqual(
-    resolveAddDirs({ cwd, claudeAddDirs: [null, '', '   ', 3, 'C:/tmp/docs'] }),
-    [resolve('C:/tmp/docs')],
+    resolveAddDirs({ cwd, claudeAddDirs: [null, '', '   ', 3, docs] }),
+    [docs],
   );
 });
 

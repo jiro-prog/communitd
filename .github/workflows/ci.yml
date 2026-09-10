@@ -6,10 +6,14 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # 開発は Windows・CI は ubuntu だと、パスの意味論の違いが公開してから出る
+    # (最初の CI で 9 件 fail した 2026-09-11)。両方を回して、どちらかでしか
+    # 通らないコードを入れたその場で気づけるようにする
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         node: ['20', '22']
     steps:
       - uses: actions/checkout@v4
