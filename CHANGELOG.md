@@ -5,6 +5,47 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-12
+
+### Added
+
+- **`bots.<key>.effort` を codex ランタイムでも書けるようにした。** 未指定だとユーザーの
+  `~/.codex/config.toml` の `model_reasoning_effort` を隔離 CODEX_HOME へ写すので、`max` を
+  拒むモデル (`gpt-5.5`) では bot が必ず落ちていた。値域の正本は `CODEX_EFFORTS` (`src/codex.js`)。
+
+### Changed
+
+- **同梱の設定例を「写しただけで安全寄り」にした。** `config.policy.example.json` の channels が
+  `tools: "standard"` / `permissionMode: "acceptEdits"` で、**既定 (`readonly` / `default`) より強い**
+  まま公開されていた。SETUP のとおりに写した第三者だけが、書込みと `git`/`node`/`npm` のシェルを
+  許した状態で始まることになる。例を `readonly` / `default` に落とし、書込みとシェルを許した
+  開発用は `config.policy.dev.example.json` として分けた (SETUP.md §0 で明示的に選ぶ)。
+  「既定が安全寄り」と「サンプルを写せば安全寄り」は別、という外部レビューの指摘への対処。
+  **`verify` はどちらの例にも入れていない** — 導入者のプロジェクトで通らないコマンドが既定で
+  入っていると、最初の一周 (SETUP §4) が verify NG で止まるため。
+
+### Fixed
+
+- **Windows で codex の `workspace-write` が最小コマンドにも応答せず、job のタイムアウトまで固まっていた。**
+  隔離 CODEX_HOME に Windows sandbox の状態ファイル (`cap_sid` / `.sandbox-secrets/sandbox_users.json` /
+  `.sandbox/setup_marker.json`) が無く、codex が sandbox の setup をやり直そうとして最初の
+  powershell が返らなかった。`workspace-write` のときだけ実 home から写す (`read-only` は setup を
+  要しないので写さない — 資格情報を撒かない)。
+- **codex の起動に失敗した経路で隔離 CODEX_HOME (認証と sandbox ユーザーの写し) が残っていた。**
+  `spawn` の同期例外や出力先の作成失敗が共通の削除経路に届いていなかった。どの経路でも削除し、
+  削除が `EBUSY` で失敗したら初回に告知したうえで 250ms・1s・4s で再試行する。
+- **Linux / macOS で `/stop` とタイムアウトが孫プロセスを殺せていなかった。** `killTree` は
+  win32 では `taskkill /T /F` でツリーごと止めるのに、それ以外は `child.kill('SIGKILL')` で直下の
+  1 つだけ。spawn 側に `detached` が無くプロセスグループも分かれていなかったため、claude / codex が
+  起こした bash・node は停止後も走り続けた (ファイルを書き続けうる)。子を別プロセスグループで起こし
+  (`src/claude.js` / `src/codex.js` / `src/verify.js`)、`kill(-pid, SIGKILL)` でグループごと撃つように
+  した。グループが既に無い場合は従来どおり直下へ落とす。**Windows の経路は無変更。**
+  Stop hook の `verify` は claude の子として走るので、そこだけはグループを分けない
+  (分けるとブリッジの停止が検証のツリーへ届かなくなる)。
+- **端末を閉じた (SIGHUP) ときにブリッジだけ消えて、エージェントのツリーが残っていた。**
+  上記でプロセスグループを分けたぶん、端末の SIGHUP は子へ届かなくなる。`SIGHUP` も
+  `SIGINT` / `SIGTERM` と同じ後始末 (走行中 job の中断 → `killTree`) へ配線した。
+
 ## [0.1.2] - 2026-09-11
 
 ### Fixed
@@ -67,7 +108,8 @@
 
 <!-- 版どうしの比較リンク ([Unreleased] / [0.1.0]) は publish-snapshot が --repo から生成する -->
 
-[Unreleased]: https://github.com/jiro-prog/communitd/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/jiro-prog/communitd/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/jiro-prog/communitd/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/jiro-prog/communitd/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/jiro-prog/communitd/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jiro-prog/communitd/releases/tag/v0.1.0

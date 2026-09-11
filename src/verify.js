@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { killTree, scrubEnv } from './proc.js';
+import { detachOption, killTree, scrubEnv } from './proc.js';
 
 export const DEFAULT_VERIFY_TIMEOUT_MS = 10 * 60 * 1000;
 export const VERIFY_OUTPUT_MAX_CHARS = 1024 * 1024;
@@ -23,6 +23,13 @@ export function runVerify({
   maxOutputChars = VERIFY_OUTPUT_MAX_CHARS,
   scrubEnvKeys = [],
   handle,
+  // **Stop hook から呼ぶときは false。** hook プロセスは claude の子なので、ここで
+  // グループを分けると (POSIX の detached = setsid) ブリッジが claude のグループを
+  // 撃っても `npm test` のツリーだけ生き残る。ブリッジ本体から呼ぶ経路 (job / orgapply)
+  // だけが detach してよい (Opus2 指摘 2026-09-11)。
+  // 代償として hook 側の timeout の killTree は直下の sh までしか殺せないが、その sh は
+  // claude のグループに残るので**ブリッジからの停止では孫まで届く** — 総和では確実になる
+  detachGroup = true,
   spawnImpl = spawn,
 } = {}) {
   if (handle?.stopRequested) {
@@ -47,6 +54,10 @@ export function runVerify({
         shell: true,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
+        // win32 以外はプロセスグループを分ける。shell: true なので直下は sh で、
+        // `npm test` が起こすテストランナーは孫。グループごとでないと届かない (src/proc.js)。
+        // hook 経路では分けない — 上の detachGroup を見ること
+        ...(detachGroup ? detachOption() : {}),
       });
     } catch (err) {
       resolvePromise(failedResult({ command, startedAt, error: `spawn failed: ${err.message}` }));
@@ -233,6 +244,9 @@ export async function runVerifyHook(config, hookInput = {}, { runVerifyImpl = ru
     command: config.command,
     cwd: config.cwd,
     timeoutMs: config.timeoutMs,
+    // この関数は claude の子 (Stop hook) の中で走る。ここで setsid すると
+    // ブリッジの killTree が claude のグループを撃っても検証のツリーだけ残る
+    detachGroup: false,
   });
   const shouldBlock = !result.ok && previous.blocksUsed < config.maxRetries;
   const state = {

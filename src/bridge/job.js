@@ -434,6 +434,9 @@ export function createJobRunner({
           codexCmd: config.codexCmd,
           cwd: cc.cwd,
           model: bot.cfg.model,
+          // 隔離 CODEX_HOME の model_reasoning_effort になる (ユーザー ~/.codex/config.toml より優先)。
+          // 未指定なら従来どおりユーザー設定を写す — モデルが拒む値を避けるための bot ごとの口
+          effort: bot.cfg.effort,
           prompt: codexPrompt,
           imagePaths,
           sandbox: resolveCodexSandbox(cc),

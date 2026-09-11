@@ -689,6 +689,11 @@ const messages = createMessageWiring({
 
 process.on('SIGINT', () => void shutdownWiring.shutdown(130));
 process.on('SIGTERM', () => void shutdownWiring.shutdown(143));
+// SIGHUP (端末を閉じた) も後始末へ回す。**既定動作のまま死なせない** — 子は
+// detached で別プロセスグループに居る (src/proc.js) ので端末の SIGHUP が届かず、
+// ブリッジだけ消えて claude/codex のツリーが残る。runShutdown は二重呼び出しを
+// lifecycle.beginShutdown() で弾くので、他のシグナルと重なっても安全
+process.on('SIGHUP', () => void shutdownWiring.shutdown(129));
 
 // ---- スラッシュコマンド (/stop・/restart) ----
 // 実処理は src/interactions.js。ここでは「何を触れるか」だけを渡す

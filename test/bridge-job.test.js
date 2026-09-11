@@ -376,6 +376,8 @@ test('codex: role を本文へ連結して渡し、セッションは保存し�
   assert.equal(opts.codexCmd, 'codex-test');
   assert.equal(opts.cwd, h.cwd);
   assert.equal(opts.model, 'claude-opus-4');
+  // 隔離 CODEX_HOME の model_reasoning_effort になる (モデルが拒む値を避ける bot ごとの口)
+  assert.equal(opts.effort, 'low', 'bots.<key>.effort が runCodex へ渡っていない');
   assert.equal(opts.sandbox, resolveCodexSandbox(h.cc));
   assert.deepEqual(opts.imagePaths, []);
   assert.deepEqual(opts.scrubEnvKeys, ['FABLE_TOKEN']);
@@ -384,6 +386,13 @@ test('codex: role を本文へ連結して渡し、セッションは保存し�
   assert.equal(h.store.get('T1', 'fable'), undefined, 'ステートレスな codex でセッションを保存している');
   assert.deepEqual(h.calls.prompts, [{ entry: null, includeSelf: true }]);
   assert.equal(h.calls.turns[0].extra.outgoingText, 'codex done');
+});
+
+test('codex: effort 未指定の bot には渡さない (ユーザー ~/.codex/config.toml のまま)', async (t) => {
+  const h = harness(t, { runtime: 'codex' });
+  delete h.config.bots.fable.effort; // 書いていない bot = 従来の codex bot
+  await h.run();
+  assert.equal(h.calls.codex[0].effort, undefined, '未指定なのに effort を渡している');
 });
 
 test('構造化出力: role が様式を宣言していればスキーマを渡し、本文フィールドだけを投稿する', async (t) => {

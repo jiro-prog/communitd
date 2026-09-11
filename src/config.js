@@ -5,7 +5,8 @@
 import { resolve } from 'node:path';
 import { DEFAULT_LIMITS } from './attachments.js';
 import { DEFAULT_JOB_BUDGET } from './board.js';
-import { CODEX_SANDBOXES, DEFAULT_CODEX_SANDBOX } from './codex.js';
+import { CLAUDE_EFFORTS } from './claude.js';
+import { CODEX_EFFORTS, CODEX_SANDBOXES, DEFAULT_CODEX_SANDBOX } from './codex.js';
 import { DEFAULT_MAX_BOT_HOPS } from './hops.js';
 import { validateSociety } from './society-policy.js';
 
@@ -1300,10 +1301,6 @@ export function validateConfig(config, { contractKindOf = null, repoRoot = null 
   // 自律社会 (docs/society-ledger.md)。**書いていなければ何も言わない** — 既定は off で、
   // 社会を使わない配備がこの検証で落ちることはない
   errors.push(...validateSociety(config));
-  // 許容値の正本は claude CLI の --help (二重管理)。CLI 側が値を変えてもここは追随せず、
-  // 乖離は無症状になる — 不正値でも CLI は stderr へ警告を出して既定 effort へ落ちるだけで、
-  // ブリッジは成功時の stderr を捨てる (実測 2026-08-05)。変更時は両方を確認すること
-  const effortLevels = ['low', 'medium', 'high', 'xhigh', 'max'];
   for (const [key, bot] of Object.entries(isPlainObject(config.bots) ? config.bots : {})) {
     if (!isPlainObject(bot)) {
       errors.push(`bots.${key} はオブジェクトで書く (${BOT_REQUIRED_KEYS.map(([k]) => k).join(' / ')})`);
@@ -1338,15 +1335,18 @@ export function validateConfig(config, { contractKindOf = null, repoRoot = null 
         `bots.${key}.${required} が要る (${hint}／受け取った値: ${JSON.stringify(value ?? null)})`,
       );
     }
+    // 推論量はランタイムごとに値域が違う (claude の `--effort` / codex の
+    // `model_reasoning_effort`)。**値域の正本は src/claude.js と src/codex.js の 1 箇所ずつ**で、
+    // ここは runtime で引き分けるだけ。codex で書けるようにしたのはモデル側の制約のため —
+    // `gpt-5.5` は `max` を拒むので、ユーザー ~/.codex/config.toml が `max` の環境では
+    // bot ごとに下げられないと起動できない (実測 2026-09-11)
     const effort = bot.effort;
-    if (effort !== undefined && bot.runtime === 'codex') {
+    const runtime = bot.runtime === 'codex' ? 'codex' : 'claude';
+    const effortLevels = runtime === 'codex' ? CODEX_EFFORTS : CLAUDE_EFFORTS;
+    if (effort !== undefined && !effortLevels.includes(effort)) {
       errors.push(
-        `bots.${key}.effort は runtime: "codex" では使えない (claude ランタイムにしか配線されない)`,
-      );
-    } else if (effort !== undefined && !effortLevels.includes(effort)) {
-      errors.push(
-        `bots.${key}.effort: ${JSON.stringify(effort)} は不明 ` +
-          `(${effortLevels.join(' | ')} の文字列で書く・省略可)`,
+        `bots.${key}.effort: ${JSON.stringify(effort)} は runtime: "${runtime}" では使えない ` +
+          `(claude: ${CLAUDE_EFFORTS.join(' | ')} ／ codex: ${CODEX_EFFORTS.join(' | ')}・省略可)`,
       );
     }
     // Codex 組み込み指示の差し替え (相談役として立てる bot の口 — src/codex.js)。

@@ -13,6 +13,10 @@
   設定漏れを「制限なし」と解釈しません。
 - **既定は最小権限です。** チャンネルに `tools` を書かなければ `readonly`、`permissionMode` を
   書かなければ `default`。書込みやシェルは、そのチャンネルに明示的に書いたときだけ有効になります。
+- **同梱の設定例も、写しただけで最小権限です。** `config.policy.example.json` は `readonly` /
+  `default`。書込みとシェルを許した設定は `config.policy.dev.example.json` に分けてあり、
+  **強い方を選ぶには別のコマンドが要ります**。「既定が安全寄り」と「サンプルを写せば安全寄り」は
+  別のことなので、例の側も安全寄りに倒してあります。
 - **公開サーバー・共有サーバーでは `readonly` を使ってください。** 書込みが必要なら、書込み用の
   bot とチャンネルを分け、作業ディレクトリを使い捨ての作業ツリーに閉じてください。
 
@@ -53,7 +57,9 @@
 - **This bridge turns Discord messages into command execution on your machine.** Anyone listed in
   `allowedUserIds` can effectively run commands on it — treat adding a user as handing them a terminal.
 - `guildId` and `allowedUserIds` are mandatory; the bridge refuses to start without them.
-  Defaults are least privilege (`readonly` tools, `default` permission mode).
+  Defaults are least privilege (`readonly` tools, `default` permission mode) — and so is the
+  bundled `config.policy.example.json`. The write-enabled setup lives in a separate
+  `config.policy.dev.example.json`, so copying the example never widens anything by itself.
 - **Prompt injection is a real path**: thread text, quotes, text inside images and uploaded text
   files all reach the model. Granting `WebFetch`/`WebSearch` *and* write access to the same channel
   is the dangerous combination.

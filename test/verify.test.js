@@ -51,6 +51,56 @@ function fakeVerify(ok, code) {
   });
 }
 
+test('spawn の detached はブリッジ本体からのときだけ付く (hook 経路では付けない)', async () => {
+  // ブリッジ本体 (job / orgapply) から呼ぶ分はグループを分けて孫まで殺せるようにする。
+  // Stop hook は claude の子の中で走るので、そこで分けるとブリッジが claude のグループを
+  // 撃っても検証のツリーだけ生き残る (Opus2 指摘 2026-09-11)
+  const optsFor = async (extra) => {
+    let opts = null;
+    await runVerify({
+      command: 'echo x',
+      cwd: process.cwd(),
+      spawnImpl: (cmd, spawnOpts) => { opts = spawnOpts; throw new Error('spawn ENOENT'); },
+      ...extra,
+    });
+    return opts;
+  };
+
+  const fromBridge = await optsFor({});
+  assert.equal(fromBridge?.detached, process.platform === 'win32' ? undefined : true);
+  assert.equal(fromBridge?.shell, true, '既存のオプションを落としている');
+
+  const fromHook = await optsFor({ detachGroup: false });
+  assert.equal(fromHook?.detached, undefined, 'hook 経路でグループを分けている');
+  assert.equal(fromHook?.shell, true);
+});
+
+test('Stop hook は detachGroup: false で検証を走らせる', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'communitd-verify-detach-'));
+  try {
+    let passed = null;
+    await runVerifyHook(
+      {
+        command: 'echo x',
+        cwd: process.cwd(),
+        stateFile: join(dir, 'state.json'),
+        maxRetries: 0,
+        timeoutMs: 10_000,
+      },
+      { hook_event_name: 'Stop' },
+      {
+        runVerifyImpl: async (args) => {
+          passed = args;
+          return { ran: true, ok: true, code: 0, command: args.command, durationMs: 1, output: '' };
+        },
+      },
+    );
+    assert.equal(passed?.detachGroup, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('verify コマンドの成功・失敗・コマンド不在を結果へ整形する', async () => {
   const success = await runVerify({
     spawnImpl: fakeSpawn({ stdout: 'ok' }),

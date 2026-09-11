@@ -3,7 +3,7 @@
 > 何が job を起こし、どう並び、どのコマンドで止め直せるか。
 > 入口は [README](../../README.md)、導入手順は [SETUP.md](../../SETUP.md)。
 
-- Claude bot は `bots.<key>.effort` に `low | medium | high | xhigh | max` を指定できる。短い返答や簿記的な作業の思考量を抑える用途で、未指定なら `--effort` を渡さず従来どおり
+- bot は `bots.<key>.effort` で推論量を指定できる。**値域はランタイムで違う** — claude は `low | medium | high | xhigh | max` (`--effort` へ渡る)、codex は `none | minimal | low | medium | high | xhigh | max` (隔離 `CODEX_HOME` の `model_reasoning_effort` になる)。短い返答や簿記的な作業の思考量を抑える用途のほか、codex 側は**モデルが受け付けない値を避ける**のにも要る (`gpt-5.5` は `max` を拒む → [codex ランタイム](codex-runtime.md))。未指定なら従来どおり (claude は `--effort` を渡さない / codex はユーザー `~/.codex/config.toml` の値を写す)
 - bot は自分宛メンションに反応。他 bot の発言もトリガーになる (manager → worker の委譲がこれ)。bot 間ホップは既定 **12** 回で停止し、人間の発言でリセット (`limits.maxBotHops`。0 なら bot 起点では起動しない)
 - **自分の発言は原則ここで捨てる。通るのは自己呼び出しの制御メッセージだけ** (`src/trigger.js` の `shouldIgnoreOwnMessage`)。判定は**完全一致** — 1 行目が `<@自分の ID>` ちょうどで、2 行目があれば契約タグ 1 個だけ。「本文のどこかに自分宛メンションがある」では通さない: verify の失敗出力・ツール軌跡・git 差分は無害化を通らずに投稿されるので、外部由来の文字列に bot ID が紛れただけで自己 job が湧いてしまう (→ [制御マーカー](control-markers.md))
 - **返信でも起動**: 人間が bot の発言に Discord の返信で返すと、メンションなしでもその bot が動く (`src/trigger.js`)。他人・他 bot への返信、bot からの返信は対象外。返信しつつ本文で別の bot をメンションした場合はメンション先だけが動く

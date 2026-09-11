@@ -11,9 +11,10 @@ import { SCHEMAS } from '../src/contract.js';
  * extra を渡すと result JSON へ追加のキー (usage など) を混ぜられる。
  */
 function fakeSpawn(seen, extra = {}) {
-  return (bin, args) => {
+  return (bin, args, opts) => {
     seen.bin = bin;
     seen.args = args;
+    seen.opts = opts;
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
@@ -52,6 +53,17 @@ async function argsFor(opts) {
   });
   return { args: seen.args, bin: seen.bin, res };
 }
+
+test('spawn には win32 以外でだけ detached が渡る (killTree が孫まで届く前提)', async () => {
+  // Windows では detachOption() が {} なので、落としても手元では永久に気付けない。
+  // 実行 OS ごとの期待をここで固定する (Opus2 指摘 2026-09-11)
+  const seen = {};
+  await runT({ cwd: 'C:/tmp', model: 'opus', prompt: 'x', spawnImpl: fakeSpawn(seen) });
+  assert.equal(seen.opts?.detached, process.platform === 'win32' ? undefined : true);
+  // 既存のオプションを落としていないことも一緒に見る
+  assert.equal(seen.opts?.windowsHide, true);
+  assert.deepEqual(seen.opts?.stdio, ['pipe', 'pipe', 'pipe']);
+});
 
 test('契約が無い job では権限に関わる引数が 1 つも増えない (回帰)', async () => {
   const { args } = await argsFor({ allowedTools: ['Read', 'Edit'] });

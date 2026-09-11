@@ -4,6 +4,8 @@ import { dirname, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_LIMITS } from '../src/attachments.js';
+import { CLAUDE_EFFORTS } from '../src/claude.js';
+import { CODEX_EFFORTS } from '../src/codex.js';
 import { DEFAULT_MAX_BOT_HOPS } from '../src/hops.js';
 import { resolveSociety } from '../src/society-policy.js';
 import {
@@ -177,7 +179,12 @@ test('model は codex ランタイムでだけ省略できる (書くなら非�
 test('同梱の example と実際の設定ファイルが起動時検証を通る', () => {
   // 「clone → example をコピー → doctor」が通ることの回帰。ここが崩れると
   // SETUP のとおりに進めた第三者が最初の起動で落ちる
-  const pairs = [['config.policy.example.json', 'config.secrets.example.json']];
+  // 例は 2 つある: 既定の安全寄り (readonly / default) と、書込み + verify を許した
+  // 開発用。**どちらを写しても起動時検証を通る**ことをここで固定する
+  const pairs = [
+    ['config.policy.example.json', 'config.secrets.example.json'],
+    ['config.policy.dev.example.json', 'config.secrets.example.json'],
+  ];
   // 作者の実設定はこのリポジトリにしか無いので、在るときだけ見る (CI では飛ばす)。
   // **書かれた OS の上でだけ**見る: 設定の cwd は絶対パスなので、WSL から Windows 側の
   // ツリーを検証すると同じディレクトリでも綴りが違い (`C:/…` と `/mnt/c/…`)、
@@ -197,6 +204,25 @@ test('同梱の example と実際の設定ファイルが起動時検証を通�
     assert.deepEqual(errors, [], `${policy} を読めない`);
     assert.deepEqual(validateConfig(config, { repoRoot: ROOT }), [], `${policy} が検証を通らない`);
   }
+});
+
+test('同梱の例は写しただけで安全寄り、強い設定は dev の例に分けてある', () => {
+  // GPT-6 Astra の外部レビュー (2026-09-11): 「既定が安全寄り」と「サンプルを写せば
+  // 安全寄り」は別。標準の例が黙って standard / acceptEdits へ戻らないよう固定する
+  const channel = (name) =>
+    JSON.parse(readFileSync(resolve(ROOT, name), 'utf8')).channels['my-project'];
+
+  const safe = channel('config.policy.example.json');
+  assert.deepEqual(resolveAllowedTools(safe), TOOL_PRESETS.readonly, '標準の例が readonly でない');
+  assert.equal(resolvePermissionMode(safe), 'default');
+  assert.equal(resolveVerifyCommand(safe), null, '標準の例に任意 shell 実行口を持たせない');
+
+  const dev = channel('config.policy.dev.example.json');
+  assert.deepEqual(resolveAllowedTools(dev), TOOL_PRESETS.standard);
+  assert.equal(resolvePermissionMode(dev), 'acceptEdits');
+  // dev の例にも verify は入れない。導入者のプロジェクトで `npm test` が通らないと
+  // SETUP §4 の最初の一周が verify NG で止まり、handoff が差し戻しに化ける (Opus2 指摘)
+  assert.equal(resolveVerifyCommand(dev), null, 'dev の例に verify を持たせない');
 });
 
 test('claudeBin / codexCmd は文字列 1 語でも語の配列でも書ける (省略可)', () => {
@@ -238,10 +264,49 @@ test('bot の effort の不正値は起動時に落とす', () => {
   }
 });
 
-test('codex bot への effort 指定は起動時に落とす (黙って無視しない)', () => {
-  const errors = validateConfig(cfg({ bots: { sol: bot({ runtime: 'codex', effort: 'low' }) } }));
-  assert.ok(errors.some((e) => e.includes('bots.sol.effort') && e.includes('codex')));
+test('codex bot の effort は codex CLI の値域で受ける (claude とは値域が違う)', () => {
+  // ChatGPT アカウント認証で通る会話モデル `gpt-5.5` は model_reasoning_effort = "max" を
+  // 400 で拒む。隔離 CODEX_HOME にはユーザー ~/.codex/config.toml の値が写るので、
+  // bot ごとに下げられないとその bot は必ず落ちる (実測 2026-09-11)
+  for (const effort of ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
+    assert.deepEqual(
+      validateConfig(cfg({ bots: { sol: bot({ runtime: 'codex', effort }) } })),
+      [],
+      `codex bot が effort=${effort} で落ちる`,
+    );
+  }
+  // codex にしか無い値を claude の bot に書いたら落とす (--effort は受け付けない)
+  for (const effort of ['none', 'minimal']) {
+    const errors = validateConfig(cfg({ bots: { opus: bot({ effort }) } }));
+    assert.ok(
+      errors.some((e) => e.includes('bots.opus.effort') && e.includes('claude')),
+      `claude bot が effort=${effort} で通ってしまう`,
+    );
+    // どちらのランタイムで何が書けるかまで出す (値域が 2 つある以上、名前だけでは直せない)
+    assert.ok(errors.some((e) => e.includes('minimal') && e.includes('xhigh')), errors.join(' / '));
+  }
+  // codex でも未知の値は落とす (隔離 config.toml へ書くと codex が 400 で落ちる)
+  const unknown = validateConfig(cfg({ bots: { sol: bot({ runtime: 'codex', effort: 'turbo' }) } }));
+  assert.ok(unknown.some((e) => e.includes('bots.sol.effort') && e.includes('codex')));
+  // 未指定は従来どおり (ユーザー ~/.codex/config.toml の値がそのまま写る)
   assert.deepEqual(validateConfig(cfg({ bots: { sol: bot({ runtime: 'codex' }) } })), []);
+});
+
+test('effort の値域はランタイム側の定数が正本 (config.js に写しを持たない)', () => {
+  // 2 つ目の値域が増えたので、config.js が独自の配列を持つと「codex CLI が受けるのに
+  // 起動時に落ちる」「claude が受けないのに通る」が無症状で生える
+  for (const effort of CODEX_EFFORTS) {
+    assert.deepEqual(validateConfig(cfg({ bots: { sol: bot({ runtime: 'codex', effort }) } })), []);
+  }
+  for (const effort of CLAUDE_EFFORTS) {
+    assert.deepEqual(validateConfig(cfg({ bots: { opus: bot({ effort }) } })), []);
+  }
+  for (const effort of CODEX_EFFORTS.filter((e) => !CLAUDE_EFFORTS.includes(e))) {
+    assert.ok(
+      validateConfig(cfg({ bots: { opus: bot({ effort }) } })).some((e) => e.includes('effort')),
+      `claude が受けない ${effort} が通ってしまう`,
+    );
+  }
 });
 
 test('codexInstructionsFile は codex bot だけ・非空の文字列で書く', () => {

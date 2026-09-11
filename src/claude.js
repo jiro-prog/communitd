@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { CLAUDE_CLI, cliCmdHint, cliCmdReason, resolveCliCommand, resolveConfiguredCommand } from './clicmd.js';
-import { killTree, scrubEnv } from './proc.js';
+import { detachOption, killTree, scrubEnv } from './proc.js';
 
 // claude CLI の在り処 (`CLAUDE_CLI`) は src/clicmd.js が正本。ネイティブ導入なら
 // PATH の `claude.exe`、npm 版なら `.cmd` シムが起動する実体を辿る (Windows で要る)
@@ -9,6 +9,18 @@ export { CLAUDE_CLI };
 
 /** claude が見つからないときの案内 (doctor と同じ文言を使う) */
 export const CLAUDE_BIN_HINT = cliCmdHint(CLAUDE_CLI);
+
+/**
+ * claude CLI が `--effort` に受け付ける値。**src 内でここだけが正本**で、
+ * `bots.<key>.effort` の検証 (src/config.js) もこの配列を見る。
+ *
+ * 許容値の正本は claude CLI の --help (二重管理)。CLI 側が値を変えてもここは追随せず、
+ * 乖離は無症状になる — 不正値でも CLI は stderr へ警告を出して既定 effort へ落ちるだけで、
+ * ブリッジは成功時の stderr を捨てる (実測 2026-08-05)。変更時は両方を確認すること。
+ *
+ * codex 側の値域は別 (`CODEX_EFFORTS` — `none` / `minimal` がある)。
+ */
+export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 /**
  * spawn できる形の claude コマンドへ解決する (実体は src/clicmd.js)。
@@ -147,6 +159,9 @@ export function runClaude({
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
+      // win32 以外はプロセスグループを分ける。これが無いと killTree が
+      // claude の起こした孫 (bash / node) を殺せない (src/proc.js)
+      ...detachOption(),
     });
     // chunk 境界のマルチバイト文字を StringDecoder に持ち越させる
     // (Buffer += だと 64KiB 境界で日本語が U+FFFD 化する)

@@ -28,6 +28,21 @@ cp config.secrets.example.json config.secrets.json
 cp .env.example .env
 ```
 
+**`config.policy.json` の例は 2 つある。** 上の `config.policy.example.json` は
+**写しただけで安全寄り** (`readonly` / `permissionMode: default`) — エージェントは読むだけで、
+ファイルは書き換えないしシェルも走らせない。§4 の委譲テスト (`hello.txt` を書く) まで進むなら、
+書込みと `git`/`node`/`npm` のシェルを許した開発用の例へ差し替える:
+
+```
+cp config.policy.dev.example.json config.policy.json
+```
+
+違いは `channels.my-project` の 2 行だけ (`"tools": "standard"` / `"permissionMode": "acceptEdits"`)。
+**強い方を選ぶのは明示的な操作にしてある** — 既定が安全寄りなのと、同梱の例を写せば安全寄りなのは
+別だから。完了時の機械検証 (`verify`) はどちらの例にも入れていない。最初の一周では要らないし、
+自分のプロジェクトで通らないコマンドを書くと委譲そのものが止まるため — 足すのは
+「高度な運用」まで読んでからでよい。
+
 ### どのファイルに何を書くか
 
 | ファイル | git | 書くもの | 必須キー |
@@ -66,12 +81,15 @@ cp .env.example .env
   "channels": {
     "my-project": {
       "cwd": "C:/path/to/your/project",
-      "tools": "standard",
-      "permissionMode": "acceptEdits"
+      "tools": "readonly",
+      "permissionMode": "default"
     }
   }
 }
 ```
+
+(`config.policy.dev.example.json` はこの `channels.my-project` が
+`"tools": "standard"` / `"permissionMode": "acceptEdits"` になっているだけで、他は同じ。)
 
 直すのは **`cwd` だけ**でよい。自分のプロジェクトの**絶対パス**に置き換える
 (Windows でも `/` 区切りで書ける)。`channels` のキー (`my-project`) は Discord の
@@ -124,6 +142,8 @@ Discord トークンは claude 子プロセスの環境変数から自動で除�
 追加は `"toolsExtra"`、細かく書きたければ従来の `"allowedTools"` 配列も使える (そちらが優先)。
 `tools`/`allowedTools` 未指定は `readonly`、`permissionMode` 未指定は `default`
 (fail-closed — `acceptEdits` を使うチャンネルは明示的に書く。[セキュリティモデル](docs/reference/security-model.md) 参照)。
+同梱の例も §0 のとおり 2 つに分けてある: `config.policy.example.json` が `readonly` / `default`、
+`config.policy.dev.example.json` が `standard` / `acceptEdits`。
 
 ---
 
@@ -391,6 +411,17 @@ npm グローバルは `.cmd` シムで Node から直接起動できないの�
 1. `#my-project` で `@Manager こんにちは。今の作業ディレクトリで ls して何があるか教えて`
 2. スレッドが生え、⏳→⚙️→応答が返れば疎通 OK
 3. 委譲テスト: `@Manager hello.txt に「こんにちは」と書くタスクを Worker に委譲して`
+   - **これは書込みを許したチャンネルでしか通らない。** §0 で `config.policy.example.json`
+     (readonly) の方を写したままなら Worker は「書けない」と返す。ここまで来たら `cwd` は既に
+     自分のパスへ直してあるので、**写し直さず** `config.policy.json` の `channels.my-project` に
+     この 2 行を足して (`cp` し直すと `cwd` が `C:/path/to/your/project` へ巻き戻る)、
+     ターミナルで `npm start` をやり直すか Discord で `/restart` を打つ:
+
+     ```json
+     "tools": "standard",
+     "permissionMode": "acceptEdits"
+     ```
+
    - Manager の返信末尾の `[[handoff:worker]]` で Worker が起動し、実装 → `[[handoff:manager]]` →
      Manager が検分して報告、まで自動で回れば完成
    - フッターの行は Discord には出ず、代わりに末尾へ実メンションが 1 つ付く。

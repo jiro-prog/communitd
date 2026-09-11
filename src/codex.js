@@ -1,9 +1,9 @@
 import { spawn } from 'node:child_process';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { CODEX_CLI, cliCmdHint, cliCmdReason, resolveCliCommand, resolveConfiguredCommand } from './clicmd.js';
-import { killTree, scrubEnv } from './proc.js';
+import { detachOption, killTree, scrubEnv } from './proc.js';
 
 // codex CLI の在り処 (`CODEX_CLI`) は src/clicmd.js が正本。**配備ごとの絶対パスは
 // 持たない** — 既定は PATH 解決で、明示したいときは config.policy.json の `codexCmd` に書く
@@ -28,11 +28,19 @@ export function resolveCodexCommand(deps = {}) {
 export const CODEX_SANDBOXES = ['read-only', 'workspace-write'];
 export const DEFAULT_CODEX_SANDBOX = 'read-only';
 
-// 値域の正本は codex CLI (二重管理)。**未知の値は行ごと省く**ので、ここが古いと
-// ユーザーが書いた effort が黙って落ち、codex 既定の `none` で走る — 実際 2026-09-10 に
-// `model_reasoning_effort = "max"` が読み落とされ、Sol が推論なしでレビューしていた。
-// `max` と `minimal` は codex 0.144.5 が受け付けることを実機で確認済み
-const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+/**
+ * codex CLI が `model_reasoning_effort` に受け付ける値。**src 内でここだけが正本**で、
+ * `bots.<key>.effort` の検証 (src/config.js) もこの配列を見る。
+ *
+ * 値域の正本は codex CLI 自身なので二重管理ではある。**未知の値は行ごと省く**ので、
+ * ここが古いとユーザーが書いた effort が黙って落ち、codex 既定の `none` で走る —
+ * 実際 2026-09-10 に `model_reasoning_effort = "max"` が読み落とされ、Sol が推論なしで
+ * レビューしていた。`max` と `minimal` は codex 0.144.5 が受け付けることを実機で確認済み。
+ *
+ * **モデルによっては受け付けない値がある** (`gpt-5.5` は `max` を 400 で拒む) ので、
+ * 「codex が知っている値」と「そのモデルで通る値」は別物。後者は起動して初めて分かる。
+ */
+export const CODEX_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
 /**
  * ユーザー config.toml のトップレベルから model_reasoning_effort を読む。
@@ -46,7 +54,7 @@ export function readUserReasoningEffort(toml) {
     const m = /^model_reasoning_effort\s*=\s*["']([A-Za-z]+)["']/.exec(line);
     if (m) {
       const value = m[1].toLowerCase();
-      return REASONING_EFFORTS.includes(value) ? value : null;
+      return CODEX_EFFORTS.includes(value) ? value : null;
     }
   }
   return null;
@@ -96,24 +104,148 @@ function realCodexHome() {
   return process.env.CODEX_HOME || join(homedir(), '.codex');
 }
 
+/** 一時ディレクトリを消せなかったときにやり直す間隔 (ms)。伸ばしながら 3 回試す */
+const TEMP_REMOVE_RETRY_MS = [250, 1000, 4000];
+
 /**
- * 隔離 CODEX_HOME を作る。認証だけ実 home から引き継ぐ。
+ * job が使った一時ディレクトリを消す。
+ *
+ * **Windows では 1 回目が失敗することがある** — タイムアウトで kill された codex が
+ * sqlite を掴んだままだと `EBUSY` で消せない (実測 2026-09-11)。掴みが外れるのを待って
+ * 数回やり直し、それでも消せなければ**黙らない**: 認証と sandbox ユーザーの写しが temp に
+ * 残ったことは、人間が知る必要がある。
+ *
+ * **最初の失敗は、やり直す前にその場で告知する。** やり直しのタイマーは `unref` してあり
+ * プロセスの終了を止めないので、`/restart` や停止がここに挟まると、やり直しごと消えて
+ * 「消せませんでした」を**言う機会が来ない** (sol 指摘 2026-09-11)。残ったパスが分かるのが
+ * この 1 行だけになる場合があるので、やり直す予定も一緒に書く。
+ *
+ * やり直しは背後で待つ。呼び出し側は待たない (削除の都合で job の応答を遅らせない)。
+ * export と `delays` / `rm` の差し替え口は、テストから「やり直す」「告知する」を固定する
+ * ため — 掴まれたファイルは実機の OS ごとに作り方が違い、事例にできない。
+ */
+export function removeTempDir(
+  dir,
+  what,
+  { delays = TEMP_REMOVE_RETRY_MS, attempt = 0, rm = null } = {},
+) {
+  if (!dir) return;
+  try {
+    if (rm) rm(dir);
+    else rmSync(dir, { recursive: true, force: true });
+    // 1 回目で消えたときは黙る (常態なので)。やり直して消えたときだけ、
+    // 先に出した「消せません」の結末として 1 行を残す
+    if (attempt > 0) {
+      console.log(`[codex] ${what} を削除しました: ${dir} (${attempt + 1} 回目)`);
+    }
+  } catch (err) {
+    const remaining = delays.length - attempt;
+    if (remaining > 0) {
+      if (attempt === 0) {
+        console.error(
+          `[codex] ${what} を削除できません: ${dir} (${err.message})`
+          + ` — ${remaining} 回やり直します。ブリッジがそれまでに終了したらこのパスは残るので、`
+          + '手動で削除してください',
+        );
+      }
+      setTimeout(
+        () => removeTempDir(dir, what, { delays, attempt: attempt + 1, rm }),
+        delays[attempt],
+      ).unref?.();
+      return;
+    }
+    console.error(`[codex] ${what} の削除に失敗: ${dir} (${err.message}) — 手動で削除してください`);
+  }
+}
+
+/**
+ * 隔離 CODEX_HOME と出力先をまとめて消す。**途中で return する経路も必ずここへ流す** —
+ * 経路ごとに個別に消していると、後から増えた資源が片方だけ漏れる
+ * (sol 指摘 2026-09-11: `spawn` の同期例外で認証コピーごと残っていた)。
+ */
+function cleanupTempDirs({ outDir = null, isolatedHome = null } = {}) {
+  removeTempDir(outDir, '一時出力ディレクトリ');
+  removeTempDir(isolatedHome, '認証コピーを含む一時 CODEX_HOME');
+}
+
+/**
+ * spawn の失敗を結果へ。同期例外と 'error' イベントで同じ文にする。
+ * 実行ファイルが見つからない / 直接起動できない (Windows の .cmd シム) の 2 つは
+ * 生の errno だけでは原因が分からないので、設定の直し方を添える。
+ */
+function spawnFailure(err) {
+  return {
+    ok: false,
+    error: `spawn failed: ${err.message}`
+      + (['ENOENT', 'EINVAL'].includes(err.code) ? ` — ${CODEX_CMD_HINT}` : ''),
+  };
+}
+
+/**
+ * Windows の codex sandbox が要求する状態ファイル (CODEX_HOME からの相対パス)。
+ *
+ * **これが無いと workspace-write の job が無反応のまま固まる。** codex は
+ * `.sandbox/sandbox.<日付>.log` に `sandbox setup required: sandbox setup marker missing or
+ * incompatible` と書いて sandbox の setup をやり直そうとし、最初のコマンドが返らないまま
+ * job のタイムアウトまで沈黙する (実測 2026-09-11、codex 0.144.5 / 0.154.0 の両方)。
+ * `.sandbox-secrets/sandbox_users.json` を欠くと今度は
+ * `sandbox users missing or incompatible with marker version` で同じ症状になる。
+ *
+ * `.sandbox-bin` (command-runner 群・数百 MB) は写さなくてよい — codex が実体の
+ * パスから使う。
+ */
+const SANDBOX_STATE_FILES = [
+  'cap_sid',
+  '.sandbox-secrets/sandbox_users.json',
+  '.sandbox/setup_marker.json',
+];
+
+/**
+ * sandbox の状態ファイルを実 home から隔離 home へ写す。
+ *
+ * **実 home に無ければ写さない** — 非 Windows や、まだ sandbox を setup していない環境には
+ * 存在しない。写す途中の失敗 (在るのに読めない等) は呼び出し側の catch へ投げる:
+ * 中途半端な隔離 home で走らせると、また「無反応のまま固まる」に戻る。
+ */
+function copySandboxState(source, dir) {
+  for (const rel of SANDBOX_STATE_FILES) {
+    const from = join(source, ...rel.split('/'));
+    if (!existsSync(from)) continue;
+    const to = join(dir, ...rel.split('/'));
+    mkdirSync(dirname(to), { recursive: true });
+    copyFileSync(from, to);
+  }
+}
+
+/**
+ * 隔離 CODEX_HOME を作る。実 home から引き継ぐのは認証と、書込みを許す時だけ
+ * sandbox の状態ファイル (SANDBOX_STATE_FILES) の 2 つ。
  * 作れなければ null を返し、呼び出し側は --ignore-user-config へ退避する
  * (= sandbox は read-only に固定される。fail-closed)。
  *
  * instructionsText を渡すと、その**内容を隔離 home へ書き出して**指す。元のパスを
  * config.toml へ書かないのは、読んでから codex が開くまでの間に指示が書き換わる窓を
  * 塞ぐため (role prompt を一時ファイルへ写す src/bridge/job.js と同じ理由)。
+ *
+ * effort (bot ごとの `bots.<key>.effort`) を渡すとユーザー `~/.codex/config.toml` の
+ * `model_reasoning_effort` より優先する。**bot ごとに変える口が要るのはモデル側の制約**で、
+ * 例えば `gpt-5.5` は `max` を 400 (`reasoning.effort`) で拒むため、ユーザー設定が `max` の
+ * 環境ではその bot だけ下げないと毎回落ちる (実測 2026-09-11)。省略すれば従来どおり
+ * ユーザー設定を写すので、既存 bot の挙動は変わらない。
  */
-export function createIsolatedHome(sandbox, instructionsText = null) {
+export function createIsolatedHome(sandbox, instructionsText = null, botEffort = null) {
   const source = realCodexHome();
   const auth = join(source, 'auth.json');
   if (!existsSync(auth)) return null;
 
-  let effort = null;
-  try {
-    effort = readUserReasoningEffort(readFileSync(join(source, 'config.toml'), 'utf8'));
-  } catch { /* config が無くても既定の推論設定で動く */ }
+  // 呼び出し側の検証 (src/config.js) を素通りした値は書き込まない — 未知の値を
+  // config.toml へ書くと codex が 400 で落ち、原因が「隔離 config の中身」になって遠い
+  let effort = CODEX_EFFORTS.includes(botEffort) ? botEffort : null;
+  if (!effort) {
+    try {
+      effort = readUserReasoningEffort(readFileSync(join(source, 'config.toml'), 'utf8'));
+    } catch { /* config が無くても既定の推論設定で動く */ }
+  }
 
   let dir = null;
   try {
@@ -125,9 +257,14 @@ export function createIsolatedHome(sandbox, instructionsText = null) {
     }
     writeFileSync(join(dir, 'config.toml'), renderCodexConfig({ sandbox, effort, instructionsFile }));
     copyFileSync(auth, join(dir, 'auth.json'));
+    // **書込みを許す時だけ** sandbox の状態を引き継ぐ。read-only は sandbox setup を
+    // 要さないので写さずに通り (実測)、`sandbox_users.json` は sandbox 用ローカルユーザーの
+    // 資格情報なので、要らない job の temp にまで置かない (auth.json と同じ扱い)
+    if (sandbox === 'workspace-write') copySandboxState(source, dir);
     return dir;
   } catch {
-    if (dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* 無視 */ } }
+    // 作りかけを残さない。認証だけ写った段階で失敗することもあるので、消せなければ告知する
+    removeTempDir(dir, '認証コピーを含む一時 CODEX_HOME');
     return null;
   }
 }
@@ -148,6 +285,9 @@ export function createIsolatedHome(sandbox, instructionsText = null) {
  *
  * instructionsFile (絶対パス) を渡すと Codex 組み込みの指示をそのファイルで置き換える
  * — コーディングエージェントではなく相談役として使うための口。
+ *
+ * effort を渡すと隔離 config.toml の model_reasoning_effort をその値で書く
+ * (ユーザー設定より優先。モデルが拒む値を避けるための bot ごとの口 — createIsolatedHome)。
  */
 export function runCodex({
   // 未設定・1 語なら spawn の直前に PATH から解決する (src/clicmd.js)
@@ -156,6 +296,8 @@ export function runCodex({
   resolveCmdImpl = null,
   cwd,
   model,
+  // bot ごとの推論量 (`bots.<key>.effort`)。省略すればユーザー ~/.codex/config.toml の値
+  effort = null,
   prompt,
   imagePaths = [],
   sandbox = DEFAULT_CODEX_SANDBOX,
@@ -165,6 +307,13 @@ export function runCodex({
   handle,
   // 子プロセスが立った直後に pid と時刻を知らせる (実行記録 — src/jobruns.js)。runClaude と同じ口
   onSpawn = null,
+  // spawn の差し替え口 (runClaude と同じ流儀)。同期例外のような「起動そのものが失敗する」
+  // 経路は実機で作れないので、後始末をテストで固定するにはここが要る
+  spawnImpl = spawn,
+  // 出力先の作成の差し替え口。**隔離 home は作れたのに出力先だけ作れない**という分岐は、
+  // 同じ tmpdir を使う以上 TEMP を壊しても作れない (隔離 home の方が先に落ちる) —
+  // 「その時に隔離 home が消えるか」を試験で押さえるにはここが要る (sol 指摘 2026-09-11)
+  mkdtempImpl = mkdtempSync,
 }) {
   // spawn 前に stop が来ていたら起動せず中断 (空振り窓の封鎖)
   if (handle?.stopRequested) {
@@ -188,7 +337,7 @@ export function runCodex({
     }
   }
 
-  const isolatedHome = createIsolatedHome(mode, instructionsText);
+  const isolatedHome = createIsolatedHome(mode, instructionsText, effort);
   if (!isolatedHome) {
     // 退避すると --ignore-user-config で read-only へ固定され、隔離 config.toml ごと
     // 読まれなくなる (= 指示の差し替えも消える)。**降格させずに落とす** —
@@ -215,24 +364,27 @@ export function runCodex({
     ? resolveCmdImpl(codexCmd)
     : resolveConfiguredCommand(codexCmd, CODEX_CLI);
   if (!resolvedCmd) {
-    // 認証コピーを置いた隔離 home はこの経路でも必ず消す。消せなかったら黙らない —
-    // finish() と同じ不変条件 (認証情報が temp に残ったことを人間が知る必要がある)
-    if (isolatedHome) {
-      try {
-        rmSync(isolatedHome, { recursive: true, force: true });
-      } catch (err) {
-        console.error(
-          `[codex] 認証コピーを含む一時 CODEX_HOME の削除に失敗: ${isolatedHome} (${err.message}) — 手動で削除してください`,
-        );
-      }
-    }
+    // 認証コピーを置いた隔離 home はこの経路でも必ず消す (finish() と同じ不変条件)
+    cleanupTempDirs({ isolatedHome });
     return Promise.resolve({
       ok: false,
       error: `codex を起動できません (${cliCmdReason(codexCmd, CODEX_CLI)}) — ${CODEX_CMD_HINT}`,
     });
   }
 
-  const outDir = mkdtempSync(join(tmpdir(), 'communitd-codex-'));
+  // 出力先を作れないこと自体はありうる (TEMP に書けない等)。**素の throw にしない** —
+  // 呼び出し側は Promise を待っているので、同期例外だと隔離 home を抱えたまま job が
+  // internal-error で落ちる
+  let outDir = null;
+  try {
+    outDir = mkdtempImpl(join(tmpdir(), 'communitd-codex-'));
+  } catch (err) {
+    cleanupTempDirs({ isolatedHome });
+    return Promise.resolve({
+      ok: false,
+      error: `一時出力ディレクトリを作れないため起動できません (${err.message})`,
+    });
+  }
   const outFile = join(outDir, 'last-message.txt');
   const [bin, ...binArgs] = resolvedCmd;
   const args = [
@@ -256,13 +408,25 @@ export function runCodex({
   const env = scrubEnv(process.env, scrubEnvKeys);
   if (isolatedHome) env.CODEX_HOME = isolatedHome;
 
-  return new Promise((resolvePromise) => {
-    const child = spawn(bin, args, {
+  // **spawn は同期例外も投げる** (Sol の sandbox では EPERM、Windows の実行ポリシー等)。
+  // これを Promise の executor の中でやると、例外は Promise の reject になって finish() を
+  // 素通りし、認証と sandbox ユーザーの写しを置いた隔離 home が temp に残る (sol 指摘 2026-09-11)
+  let child;
+  try {
+    child = spawnImpl(bin, args, {
       cwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
+      // win32 以外はプロセスグループを分ける (killTree が孫まで届くために要る。src/proc.js)
+      ...detachOption(),
     });
+  } catch (err) {
+    cleanupTempDirs({ outDir, isolatedHome });
+    return Promise.resolve(spawnFailure(err));
+  }
+
+  return new Promise((resolvePromise) => {
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     if (typeof onSpawn === 'function') {
@@ -289,17 +453,9 @@ export function runCodex({
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      // 認証コピーを置いた隔離 home は成功・失敗・停止・タイムアウトのどの経路でも消す。
-      // 消せなかった時は黙らない — 認証情報が temp に残ったことを人間が知る必要がある
-      for (const dir of [outDir, isolatedHome]) {
-        if (!dir) continue;
-        try {
-          rmSync(dir, { recursive: true, force: true });
-        } catch (err) {
-          const what = dir === isolatedHome ? '認証コピーを含む一時 CODEX_HOME' : '一時出力ディレクトリ';
-          console.error(`[codex] ${what} の削除に失敗: ${dir} (${err.message}) — 手動で削除してください`);
-        }
-      }
+      // 認証コピーを置いた隔離 home は成功・失敗・停止・タイムアウトのどの経路でも消す
+      // (消せなければ背後でやり直し、最後まで駄目なら告知する — cleanupTempDirs)
+      cleanupTempDirs({ outDir, isolatedHome });
       resolvePromise(value);
     };
 
@@ -314,13 +470,7 @@ export function runCodex({
 
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
-    child.on('error', (err) => finish({
-      ok: false,
-      // 実行ファイルが見つからない / 直接起動できない (Windows の .cmd シム) の 2 つは
-      // 生の errno だけでは原因が分からないので、設定の直し方を添える
-      error: `spawn failed: ${err.message}`
-        + (['ENOENT', 'EINVAL'].includes(err.code) ? ` — ${CODEX_CMD_HINT}` : ''),
-    }));
+    child.on('error', (err) => finish(spawnFailure(err)));
     child.on('close', (code) => {
       if (aborted) {
         finish({ ok: false, aborted: true, error: '停止指示により中断' });

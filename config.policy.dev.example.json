@@ -17,8 +17,8 @@
   "channels": {
     "my-project": {
       "cwd": "C:/path/to/your/project",
-      "tools": "readonly",
-      "permissionMode": "default"
+      "tools": "standard",
+      "permissionMode": "acceptEdits"
     }
   }
 }

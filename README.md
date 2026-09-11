@@ -27,6 +27,12 @@ Discord のメンションで、ローカルの Claude Code エージェント�
   | `config.secrets.json` | 追跡しない | `guildId` / `allowedUserIds` |
   | `.env` | 追跡しない | `tokenEnv` に書いた変数名すべて |
 
+- **`config.policy.json` の例は 2 つある。** `config.policy.example.json` は**写しただけで安全寄り**
+  (`"tools": "readonly"` / `"permissionMode": "default"` — エージェントは読むだけで、書込みもシェルも
+  しない)。書込みと `git`/`node`/`npm` のシェルを許した開発用は
+  `config.policy.dev.example.json` で、**そちらは明示的に選ぶ** (SETUP.md §0)。分けてあるのは、
+  「既定が安全寄り」と「同梱の例を写せば安全寄り」が別のことだから
+  → [セキュリティモデル](docs/reference/security-model.md)
 - 起動前に **`npm run doctor`** — Discord もモデルも動かさずに設定・CLI・作業ディレクトリを診断する。
   ❌ が 1 件でもあれば起動しても失敗する
 - 手順の全文は **[SETUP.md](SETUP.md)**。`allowedUserIds` に載せる人は**この PC でコマンドを実行できるのと

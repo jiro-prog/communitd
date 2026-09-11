@@ -63,6 +63,10 @@ Full walkthrough: [SETUP.md](SETUP.md) (Japanese). The short version:
 1. `git clone` this repository and run `npm ci`.
 2. `cp config.policy.example.json config.policy.json` — set `channels.<name>.cwd` to your
    project's absolute path. The channel key must match the Discord channel name.
+   This example is **read-only by default** (`"tools": "readonly"`, `"permissionMode": "default"`):
+   the agent reads, but never writes files or runs shell commands. To let it edit and run
+   `git`/`node`/`npm` (needed for step 10), copy `config.policy.dev.example.json` instead —
+   picking the stronger setup is a deliberate, separate step.
 3. Create a Discord server if you do not have one, and a text channel matching the channel key.
 4. `cp config.secrets.example.json config.secrets.json` — fill in `guildId` and
    `allowedUserIds` from the server you just made (Discord → Advanced → Developer Mode, then
