@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-09-12
+
+### Fixed
+
+- **テストが Linux で時間依存で落ちていた** (v0.1.3 の ubuntu CI、1 件)。隔離 CODEX_HOME の削除
+  再試行の告知を検査する試験が、再試行間隔 5ms × 3 回より長い 20ms を待ってから「まだ 1 回しか
+  告知していない」ことを見ていた。Windows の粗いタイマーでは偶然通り、Linux では 20ms 以内に
+  最終告知まで出て落ちる。間隔を待ち時間より十分長く取った。製品コードは無変更。
+
 ## [0.1.3] - 2026-09-12
 
 ### Added
@@ -108,7 +117,8 @@
 
 <!-- 版どうしの比較リンク ([Unreleased] / [0.1.0]) は publish-snapshot が --repo から生成する -->
 
-[Unreleased]: https://github.com/jiro-prog/communitd/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/jiro-prog/communitd/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/jiro-prog/communitd/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/jiro-prog/communitd/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/jiro-prog/communitd/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/jiro-prog/communitd/compare/v0.1.0...v0.1.1

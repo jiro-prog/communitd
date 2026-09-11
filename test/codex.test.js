@@ -334,8 +334,11 @@ test('やり直す前に 1 行目を出す (終了が挟まっても残ったパ
   // 黙っていると、資格情報の写しが「誰にも知られずに」残りうる (sol 指摘 2026-09-11)
   const io = captureConsole();
   try {
+    // 間隔は sleep より十分長く取る — 5ms × 3 だと Linux の精密なタイマーでは 20ms 後に
+    // 最終告知まで出てしまい、「途中で言い直さない」の検査が成り立たない (Windows のタイマーは
+    // 粗いので偶然通っていた。v0.1.3 の ubuntu CI で発覚)
     removeTempDir('/tmp/communitd-stuck-home', '認証コピーを含む一時 CODEX_HOME', {
-      delays: [5, 5, 5],
+      delays: [60, 60, 60],
       rm: throwing('EBUSY', 'EBUSY: resource busy or locked'),
     });
     assert.equal(io.errors.length, 1, '1 回目の失敗を黙っている');
@@ -346,8 +349,8 @@ test('やり直す前に 1 行目を出す (終了が挟まっても残ったパ
     // やり直しの途中では言い直さない (同じ 1 件を何度も出さない)
     await sleep(20);
     assert.equal(io.errors.length, 1, 'やり直すたびに告知している');
-    // 最後まで消せなければ従来どおり締めの 1 行
-    await sleep(60);
+    // 最後まで消せなければ従来どおり締めの 1 行 (3 回目の失敗は 180ms 後)
+    await sleep(400);
     assert.equal(io.errors.length, 2);
     assert.match(io.errors[1], /認証コピーを含む一時 CODEX_HOME の削除に失敗/);
   } finally {
