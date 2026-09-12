@@ -120,7 +120,7 @@ export function createContractWiring({ contracts, botKeyOf }) {
    *
    * @returns {{entry: object|null, error: string|null}}
    */
-  function claimContract({ bot, thread, cc, triggerMsg }) {
+  function claimContract({ bot, thread, triggerMsg }) {
     // 人間が直接呼んだ job はストアに触れない (契約は handoff で起動された 1 回のもの)
     const fromBotKey = botKeyOf(triggerMsg.author?.id);
     if (!consumableBy({ triggeredByBotKey: fromBotKey })) return { entry: null, error: null };

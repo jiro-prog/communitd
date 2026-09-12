@@ -1074,6 +1074,37 @@ test('runShutdown: 実行中 job を abort し、取消編集と drain を並行
   assert.deepEqual(events, ['abort', 'drain:8000', 'edit-done', 'destroy', 'exit']);
 });
 
+test('runShutdown: job ではない子 (org-apply の verify) も同じ瞬間に撃つ', async () => {
+  // 適用回路は tick から走るのでキューに居ない — ここを配線しないと、停止しても
+  // verify の子ツリーが自前の 10 分タイムアウトまでブリッジより長生きする
+  const events = [];
+  const shutdown = (abortOrgApply) => runShutdown({
+    jobs: { selectForStop: () => ({ active: [{ handle: { abort: () => events.push('job') } }], dequeued: [] }) },
+    lifecycle: createLifecycle(),
+    cancelMessage: '⏹',
+    drainMs: 0,
+    hardExitMs: 15000,
+    drain: async () => {},
+    destroyClients: async () => {},
+    exit: () => events.push('exit'),
+    abortOrgApply,
+  });
+
+  await shutdown(() => events.push('org-apply'));
+  assert.deepEqual(events, ['job', 'org-apply', 'exit']);
+
+  // 撃てなくても停止は続ける (notifyStop と同じ流儀)
+  events.length = 0;
+  const { error } = console;
+  console.error = () => {};
+  try {
+    await shutdown(() => { throw new Error('居ません'); });
+  } finally {
+    console.error = error;
+  }
+  assert.deepEqual(events, ['job', 'exit']);
+});
+
 test('runShutdown: ⏳ の送信中に停止しても、取消編集が終わるまで切断・終了しない', async () => {
   // キューにまだ載っていない受付は selectForStop で拾えない。待たずに exit すると
   // Discord には ⏳ が出たままプロセスが消える (sol 指摘)

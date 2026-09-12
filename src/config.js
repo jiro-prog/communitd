@@ -472,6 +472,38 @@ export function validateOwnerNameClash(config = {}) {
 }
 
 /**
+ * bot 同士で displayName が衝突していないか。
+ * 同じ表示名が 2 体に付いていると、**人間はスレッド上でどちらを指しているか見分けられず**
+ * (メンション候補にも同じ名前が 2 つ並ぶ)、旧記法の警告 (`src/mentions.js` の
+ * `detectLegacyMentions`) も宛先を言い当てられない。owner の呼び名との衝突
+ * (`validateOwnerNameClash`) と同じ理由で起動時に落とす。
+ * 照合は trim + 大文字小文字無視 (検出側の正規表現が i フラグで、名前も trim するため)。
+ */
+export function validateDisplayNameClash(config = {}) {
+  if (!isPlainObject(config.bots)) return [];
+  const errors = [];
+  const seen = new Map(); // 正規化した表示名 → 先に名乗った [bot キー, 綴り]
+  for (const [key, bot] of Object.entries(config.bots)) {
+    const displayName = bot?.displayName;
+    // 欠落・型違いは BOT_REQUIRED_KEYS 側が落とす (同じ設定に 2 行出さない)
+    if (!isNonEmptyString(displayName)) continue;
+    const normalized = displayName.trim().toLowerCase();
+    const first = seen.get(normalized);
+    if (first === undefined) {
+      seen.set(normalized, [key, displayName]);
+      continue;
+    }
+    // **両方の綴りを出す。** 片方だけだと「うちは Sol とは書いていない」で終わってしまう
+    // (照合は trim + 大小文字無視なので、見た目が違っても衝突する)
+    errors.push(
+      `bots.${first[0]} / bots.${key} の displayName が重複 — メンションの解決が曖昧になる ` +
+        `(前後の空白と大小文字は無視して照合: ${JSON.stringify(first[1])} / ${JSON.stringify(displayName)})`,
+    );
+  }
+  return errors;
+}
+
+/**
  * limits.attachments で書けるキー。未知キーは黙って無視せずエラーにする —
  * タイプミスが「設定したつもりの上限が効いていない」に化けるのを防ぐ。
  */
@@ -1371,6 +1403,8 @@ export function validateConfig(config, { contractKindOf = null, repoRoot = null 
     // 「拾うつもりのイベントが誰にも届いていない」まま静かに動く
     errors.push(...validateBotDuties(bot, { botKey: key }));
   }
+  // 1 体ずつ見ても分からない衝突は、ループを抜けてから見る
+  errors.push(...validateDisplayNameClash(config));
 
   errors.push(...validateCliCommands(config));
 

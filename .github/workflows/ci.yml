@@ -5,6 +5,20 @@ on:
   pull_request:
 
 jobs:
+  # 「動くか」以外の判断材料を 1 つ持つ (整形規則は入れていない — eslint.config.js の冒頭)。
+  # OS もバージョンも振らない: 規則の当たり外れは環境に依らないので、1 回で足りる
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # eslint 10 は Node ^20.19 / ^22.13 以上を要求する (本体の要件は >=20.6 のまま)
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
   test:
     # 開発は Windows・CI は ubuntu だと、パスの意味論の違いが公開してから出る
     # (最初の CI で 9 件 fail した 2026-09-11)。両方を回して、どちらかでしか

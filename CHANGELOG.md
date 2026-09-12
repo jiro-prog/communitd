@@ -5,6 +5,44 @@
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-09-12
+
+### Added
+
+- **lint を足した (`npm run lint`)。** eslint の flat config で `@eslint/js` の recommended だけを
+  使い、**整形規則は入れていない** (formatter も入れていない) — 整形の差分が混じると、外から来た
+  PR で何が変わったのかが読めなくなるため。CI に lint job を 1 つ足した (ubuntu / Node 22)。
+- **CONTRIBUTING.md と issue テンプレート** (バグ報告 / 機能の提案 + 脆弱性を SECURITY.md へ
+  誘導する `config.yml`)。README と README.en から辿れる。
+- **`jsconfig.json`** — エディタが JSDoc から型を推論できるようにする調査用の設定。
+  **CI には入れていない** (`tsc --checkJs` は現状 3000 件超の指摘が出る。ほとんどは JSDoc の
+  書き方の問題で実バグではない)。
+
+### Fixed
+
+- **ブリッジを止めても、適用回路 (org-apply) の `verify` だけが止まらなかった。** 走っている
+  検証に停止の口 (`handle`) を渡しておらず、SIGINT / SIGTERM / SIGHUP / `/restart` で終了しても
+  `npm test` の子ツリーが自前の 10 分タイムアウトまでブリッジより長生きしていた
+  (「停止はプロセスツリーごと」がこの経路だけ成り立っていなかった)。停止経路から撃てるようにし、
+  撃った後は**次の tick で新しい適用を始めない** (tick は job の受付の門を見ていないので、
+  塞がないと停止の合図から終了までの数秒で作業ツリーとコミットまで作ってしまう)。
+  中断された適用は receipt を作らない (従来どおり fail-closed)。
+  適用は job ではないので `/stop` (スレッド単位の job 停止) の対象ではない。
+- **承認された提案が設定を壊しても、そのまま commit できていた。** 適用後の内容を**書く前に**
+  起動時とまったく同じ手順 (JSON 解析 → secrets と合成 → `validateConfig`) へ通し、通らなければ
+  当てない (新しい段 `validate`)。壊れた設定が merge されると次の起動が exit 1 で止まり、
+  ラッパーは 42 以外で再起動しないため、そこで復旧の手段ごと失われていた。
+  見るのは `config.policy.json` だけではない — 起動時検証は役割文のスキーマ宣言も読むので、
+  `roles/*.md` から宣言を消す提案も同じ経路で止める。読む先は**適用後の内容**
+  (同じ diff の中身、無ければ基点) なので、役割文を新設する提案が「宣言が無い」と誤判定されない。
+  役割文のプロトコル版マーカー (`communitd-protocol`) と、全 bot に前置される
+  `roles/_common.md` も同じ経路で見る — 壊すと merge 後にその bot (共通規定なら全 bot) の
+  job が `protocol-mismatch` で起動しなくなる。**参照中の役割文を消す提案**も同じ理由で
+  止める (bot ごと退ける提案は従来どおり通る)。
+- **bot 同士で `displayName` が重複していても起動していた。** 同じ表示名が 2 体に付いていると
+  メンションの解決が曖昧になるので、owner の呼び名との衝突と同じく起動時に落とす
+  (照合は前後の空白と大文字小文字を無視)。
+
 ## [0.1.4] - 2026-09-12
 
 ### Fixed
@@ -117,7 +155,8 @@
 
 <!-- 版どうしの比較リンク ([Unreleased] / [0.1.0]) は publish-snapshot が --repo から生成する -->
 
-[Unreleased]: https://github.com/jiro-prog/communitd/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/jiro-prog/communitd/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/jiro-prog/communitd/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/jiro-prog/communitd/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/jiro-prog/communitd/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/jiro-prog/communitd/compare/v0.1.1...v0.1.2

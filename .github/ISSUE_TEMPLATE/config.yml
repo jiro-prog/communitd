@@ -1,0 +1,9 @@
+# テンプレに収まらない質問も受ける (空 issue は許す)。脆弱性だけは公開 issue から外へ逃がす
+blank_issues_enabled: true
+contact_links:
+  - name: 脆弱性の報告 / Report a vulnerability
+    url: https://github.com/jiro-prog/communitd/security/advisories/new
+    about: 公開 issue には書かないでください。非公開の報告窓口はこちら (SECURITY.md も読んでください)
+  - name: 導入でつまずいた / Setup help
+    url: https://github.com/jiro-prog/communitd/blob/master/SETUP.md
+    about: まず SETUP.md の手順と `npm run doctor` の出力を確かめてください

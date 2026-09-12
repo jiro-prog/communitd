@@ -1,0 +1,22 @@
+{
+  "//": [
+    "型検査の下ごしらえ (調査用)。**CI には入れていない** — `npx tsc -p jsconfig.json` を",
+    "手で回して件数を見るための設定で、通ることは今のところ前提にしていない。",
+    "エディタ (VS Code) はこのファイルを見て JSDoc から推論するので、置いておくだけでも",
+    "補完と型の食い違いの指摘が効く。"
+  ],
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023"],
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*.js", "scripts/**/*.mjs", "test/**/*.js"],
+  "exclude": ["node_modules", "data", "tmp", "sandbox", ".worktrees"]
+}

@@ -160,6 +160,7 @@ npm start
 - [計測ログ](docs/reference/metrics.md) — 所要時間とトークン使用量
 - [prompt cache の維持](docs/reference/prompt-cache.md) — 会話キャッシュを job 境界で壊さない
 - [SECURITY.md](SECURITY.md) — 運用上の注意と、脆弱性の報告先 (公開 issue には書かない)
+- [CONTRIBUTING.md](CONTRIBUTING.md) — issue / PR の出し方、テストと lint の回し方、コードの流儀
 - [CHANGELOG.md](CHANGELOG.md) — 版ごとの変更
 
 ## 制約・既知の注意

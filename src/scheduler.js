@@ -210,6 +210,9 @@ export function planTick({
     const picked = pickInitiative({ dutyBots, proposals, state: base, at });
     if (picked) {
       actions.push({ kind: 'initiative', botKey: picked.botKey, duty: picked.duty });
+      // **最後の行動でも残数を引く。** ここだけ引かないでおくと、後ろに 4 つ目の行動を
+      // 足したときに上限を 1 つ超える (規則が言うとおり今は誰も読まない値)
+      // eslint-disable-next-line no-useless-assignment
       jobsLeft -= 1;
       initiative = spendInitiativeOn(initiative, picked.botKey, picked.duty, at);
     }

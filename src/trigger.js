@@ -131,7 +131,7 @@ export async function resolveTrigger({
   if (otherBots.some((b) => mentionsBot(content, b))) return none;
   if (!lookupReply) return none;
 
-  let repliedToAuthorId = null;
+  let repliedToAuthorId;
   try {
     repliedToAuthorId = await lookupReply();
   } catch {

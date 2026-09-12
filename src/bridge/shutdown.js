@@ -25,10 +25,13 @@ export const SHUTDOWN_HARD_EXIT_MS = 15000;
  * @param {object} deps.lifecycle
  * @param {import('../jobruns.js').JobRunStore} deps.jobRuns
  * @param {(ms: number, label?: string) => Promise<void>} deps.waitForJobsDrained
+ * @param {() => unknown} [deps.abortOrgApply] 適用回路の verify を撃つ口
+ *        (src/bridge/orgapply.js の `abortVerify`)。**job ではないので stopJobs では撃てない**
  * @param {(code: number) => void} [deps.exit] プロセス終了 (テストから差し替える)
  */
 export function createShutdownWiring({
-  root, bots, jobs, lifecycle, jobRuns, waitForJobsDrained, exit = (code) => process.exit(code),
+  root, bots, jobs, lifecycle, jobRuns, waitForJobsDrained,
+  abortOrgApply = null, exit = (code) => process.exit(code),
 }) {
   const RESTART_NOTICE_FILE = resolve(root, 'data', 'restart-notice.json');
   let noticeHandled = false;
@@ -92,6 +95,8 @@ export function createShutdownWiring({
       drained,
       hardExitMs: SHUTDOWN_HARD_EXIT_MS,
       drain: (ms) => waitForJobsDrained(ms, 'shutdown'),
+      // 適用回路 (org-apply) の verify はキューに載らないので、ここから別に撃つ
+      abortOrgApply,
       destroyClients: () => Promise.allSettled([...bots.values()].map((b) => b.client.destroy())),
       exit: () => exit(code),
     });

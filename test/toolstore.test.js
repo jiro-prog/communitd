@@ -195,7 +195,7 @@ test('__proto__ のようなチャンネル名でも保存成功を偽装しな�
   const path = tempFile();
   const store = new ToolExtraStore(path);
 
-  let added = false;
+  let added;
   try {
     added = store.add('__proto__', grant('a.example.com')).added === true;
   } catch {

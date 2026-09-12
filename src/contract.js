@@ -151,7 +151,7 @@ export const FIELD_LABELS = {
   kind: '種別',
   targets: '対象',
   duty: '職務',
-  summary: '要旨',
+  // summary は案件の 1 ターン側 (上) と同じ綴り・同じ訳語なので、ここには書かない
   evidence: '根拠',
   remedy: '直し先',
   change: '変更案',

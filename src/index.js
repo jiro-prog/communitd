@@ -85,6 +85,9 @@ const { config: loadedConfig, errors: loadErrors } = loadConfigSources({
 // 発議に関わる bot が構造化出力を返せるかは**役割文を読まないと分からない**ので、
 // 読み手を注入する (src/config.js はファイルを触らない)。読めない役割文は
 // 「宣言なし」として扱う — job の起動時に role-unreadable で落ちる方が原因が分かる
+// **これは起動時の検証専用。** org-apply は同じ判定を「適用後の内容」に対して行う必要が
+// あり (基点の役割文・同じ diff で新設される役割文)、読む場所ごと違うので
+// src/bridge/orgapply.js が自前で持つ — ここを渡し回さない
 const contractKindOf = (botKey) => {
   const file = loadedConfig?.bots?.[botKey]?.rolePromptFile;
   if (typeof file !== 'string' || file === '') return null;
@@ -639,6 +642,8 @@ const shutdownWiring = createShutdownWiring({
   lifecycle,
   jobRuns,
   waitForJobsDrained: jobQueue.waitForJobsDrained,
+  // 適用回路の verify は job ではない (tick から走る) ので、停止はここから別に伝える
+  abortOrgApply: () => orgApply.abortVerify(),
 });
 
 // 上限で起動を見送ったことを受信箱へ (§10.3)。**bridge 同士は import しない**ので、

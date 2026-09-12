@@ -205,7 +205,7 @@ test('ブローカ: 読めない ask は deny (ファイル欠損・破損は fa
 test('ブローカ: 待ち上限で deny になり、裁定側へ abort が伝わる', async () => {
   const d = dir();
   let aborted = false;
-  const b = broker(d, (_ask, { signal }) => new Promise((resolve) => {
+  const b = broker(d, (_ask, { signal }) => new Promise(() => {
     // 押されないまま上限に達した場合。決着しない Promise を返しても止まらないこと
     signal.addEventListener('abort', () => { aborted = true; });
   }), { waitMs: 60 }).start();

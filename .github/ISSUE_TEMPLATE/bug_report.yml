@@ -1,0 +1,57 @@
+name: バグ報告 / Bug report
+description: 動かない・想定と違う挙動を報告する (Japanese or English)
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        日本語でも英語でも構いません / Japanese or English is fine.
+
+        ⚠️ **脆弱性はここに書かないでください。** 報告先は
+        [SECURITY.md](https://github.com/jiro-prog/communitd/blob/master/SECURITY.md) にあります。
+        (Do not report security vulnerabilities here — see SECURITY.md.)
+  - type: textarea
+    id: what
+    attributes:
+      label: 何が起きたか / What happened
+      description: 期待した動きと、実際の動きを並べて書いてください。
+      placeholder: |
+        期待: メンションすると job が起動する
+        実際: ⏳ のまま何も起きない
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現の手順 / Steps to reproduce
+      placeholder: |
+        1. `npm start` で起動
+        2. #dev で bot をメンション
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: ログ・エラー出力 / Logs
+      description: |
+        ブリッジの標準出力や Discord に出た行を貼ってください。
+        **貼る前に、トークン・サーバー ID・ユーザー ID・個人のパスを消してください。**
+      render: text
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`npm run doctor` の出力"
+      description: 設定の取り違えはここでだいたい分かります (秘密の値は出力されません)。
+      render: text
+  - type: textarea
+    id: env
+    attributes:
+      label: 環境 / Environment
+      placeholder: |
+        OS: Windows 11 / Ubuntu 24.04 / macOS 15
+        Node: node -v の結果
+        communitd: 版 (CHANGELOG の見出し) か commit
+        ランタイム: claude / codex (CLI の版)
+    validations:
+      required: true

@@ -114,6 +114,13 @@ Details: [docs/reference/security-model.md](docs/reference/security-model.md) (J
 queue and what each slash command refuses), tool permissions, control markers, delegation
 contract, codex runtime, extra read directories, attachments, tool trace, metrics, prompt cache.
 
+## Contributing
+
+Issues and pull requests in English are welcome. **Please open an issue before writing code** —
+this project is built around permission boundaries, so it is worth agreeing on the shape of a
+change first. [CONTRIBUTING.md](CONTRIBUTING.md) starts with an English summary (requirements,
+`npm test`, `npm run lint`, what not to touch).
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Security notes and how to report a vulnerability privately:

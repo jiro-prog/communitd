@@ -1,0 +1,38 @@
+name: 機能の提案 / Feature request
+description: 足りない口・変えたい挙動を提案する (Japanese or English)
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        日本語でも英語でも構いません / Japanese or English is fine.
+
+        **コードを書く前にこの issue を立ててください。** このリポジトリは権限の境界が
+        設計の中心なので、形をすり合わせてから書くほうが手戻りが少なくて済みます
+        ([CONTRIBUTING.md](https://github.com/jiro-prog/communitd/blob/master/CONTRIBUTING.md))。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 困っていること / The problem
+      description: 解決策ではなく、**困っている状況**から書いてください。
+      placeholder: |
+        例: bot を 3 体に増やしたら、どの job が動いているのか Discord からは分からない
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: 案 / Proposed change
+      description: 思いついている形があれば。無ければ空のままで構いません。
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 今どうしているか / Current workaround
+      description: いまの機能でどう凌いでいるか (「凌げていない」でも構いません)。
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: 確認 / Checks
+      options:
+        - label: 権限が広がる変更 (実行できることが増える) かどうかを本文に書いた
+        - label: 既存の issue を検索した

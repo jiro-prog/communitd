@@ -21,7 +21,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { TERMINAL_STATES, sendBackCount } from '../src/board.js';
+import { TERMINAL_STATES } from '../src/board.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_FILE = resolve(ROOT, 'data', 'tasks.json');
@@ -379,13 +379,13 @@ export function readRecords(file, label) {
   try {
     raw = readFileSync(file, 'utf8');
   } catch (err) {
-    throw new Error(`${label} ${file} を読めません (${err.message})`);
+    throw new Error(`${label} ${file} を読めません (${err.message})`, { cause: err });
   }
   let data;
   try {
     data = JSON.parse(raw);
   } catch (err) {
-    throw new Error(`${label} ${file} が JSON として読めません (${err.message})`);
+    throw new Error(`${label} ${file} が JSON として読めません (${err.message})`, { cause: err });
   }
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     throw new Error(`${label} ${file} のトップレベルが id → 記録の object ではありません`);
@@ -409,13 +409,13 @@ export function readBoard(file) {
   try {
     raw = readFileSync(file, 'utf8');
   } catch (err) {
-    throw new Error(`${file} を読めません (${err.message})`);
+    throw new Error(`${file} を読めません (${err.message})`, { cause: err });
   }
   let data;
   try {
     data = JSON.parse(raw);
   } catch (err) {
-    throw new Error(`${file} が JSON として読めません (${err.message})`);
+    throw new Error(`${file} が JSON として読めません (${err.message})`, { cause: err });
   }
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     throw new Error(`${file} のトップレベルが id → タスクの object ではありません`);
@@ -433,7 +433,7 @@ function readBotKeys(policyPath) {
     const policy = JSON.parse(readFileSync(policyPath, 'utf8'));
     return Object.keys(policy?.bots ?? {});
   } catch (err) {
-    throw new Error(`${policyPath} を読めません (${err.message}) — bot と人間を区別できません`);
+    throw new Error(`${policyPath} を読めません (${err.message}) — bot と人間を区別できません`, { cause: err });
   }
 }
 

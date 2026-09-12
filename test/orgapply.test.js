@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { join } from 'node:path';
 
-import { applyCommitMessage, applyProposal, withApplyLock } from '../src/orgapply.js';
+import {
+  APPLY_STAGES, applyCommitMessage, applyProposal, withApplyLock,
+} from '../src/orgapply.js';
 import { diffDigestOf } from '../src/apply.js';
 import { worktreePathFor } from '../src/worktree.js';
 
@@ -92,7 +94,10 @@ const rawEntry = (srcMode, dstMode, status, path) => `:${srcMode} ${dstMode} ${'
  * 偽の git。**呼ばれた順番をそのまま記録する** — この層の中身は副作用の順序なので、
  * 何がどの順で走ったかが読めることをテストの主眼にする。
  */
-function fakeWorld({ over = {}, plan = PLAN, worktrees = [], branches = [] } = {}) {
+function fakeWorld({
+  over = {}, plan = PLAN, worktrees = [], branches = [],
+  validateApplied = async () => ({ ok: true }),
+} = {}) {
   const calls = [];
   const answers = {
     'rev-parse HEAD': `${BASE}\n`,
@@ -129,6 +134,10 @@ function fakeWorld({ over = {}, plan = PLAN, worktrees = [], branches = [] } = {
     writeFile: async (p, text) => { calls.push(`write: ${p}`); files.set(p, text); },
     deleteFile: async (p) => { calls.push(`delete: ${p}`); files.delete(p); },
     ensureDir: async (p) => { calls.push(`mkdir: ${p}`); },
+    validateApplied: async ({ applied, readBase }) => {
+      calls.push(`validate: ${Object.keys(applied).join(' ')}`);
+      return validateApplied({ applied, readBase });
+    },
     verify: async (cwd) => { calls.push(`verify: ${cwd}`); return { ok: true }; },
     listWorktrees: async () => { calls.push('list: worktrees'); return worktrees; },
     listBranches: async () => { calls.push('list: branches'); return branches; },
@@ -163,6 +172,8 @@ test('基点から枝を作り、基点の内容へ当てて、index を検査�
     'wt: rev-parse HEAD',
     'wt: status --porcelain',
     `wt: show ${BASE}:roles/sol.md`,
+    // 書く前に、適用後の内容そのものを検証する (起動できない設定を commit しない)
+    'validate: roles/sol.md',
     `mkdir: ${join(WT, 'roles')}`,
     `write: ${join(WT, 'roles/sol.md')}`,
     'wt: add -A',
@@ -220,6 +231,75 @@ test('基点へ当たっても結果が裁定時と違えば当てない', async
   assert.equal(out.stage, 'base');
   assert.match(out.reason, /裁定時に見た内容と基点の内容が違います/);
   assert.equal(world.calls.some((c) => c.startsWith('write:')), false);
+});
+
+// ---- 書く前の検証 (起動できない設定を commit しない) ----
+
+test('APPLY_STAGES の validate は write より前 (書いてから検証する段は無い)', () => {
+  assert.ok(APPLY_STAGES.includes('validate'));
+  assert.ok(
+    APPLY_STAGES.indexOf('validate') < APPLY_STAGES.indexOf('write'),
+    '検証が書込みより後ろに居る',
+  );
+});
+
+test('validateApplied が通らなければ書かない (stage は validate)', async () => {
+  const world = fakeWorld({
+    validateApplied: async () => ({ ok: false, reason: 'bots.opus.model が要る' }),
+  });
+  const out = await run(world);
+
+  assert.equal(out.ok, false);
+  assert.equal(out.stage, 'validate');
+  assert.equal(out.reason, 'bots.opus.model が要る');
+  assert.equal(out.path, WT, '落ちた場所 (枝) を返していない — 呼び出し側が後始末できない');
+  assert.equal(world.calls.some((c) => c.startsWith('write:')), false, '通らない内容を書いている');
+  assert.equal(world.calls.includes('wt: add -A'), false, '通らない内容を stage している');
+  // 検証にかけるのは**当てた結果**。基点でも作業ツリーでもない
+  assert.equal(world.calls.at(-1), 'validate: roles/sol.md');
+});
+
+test('検証には適用後の内容と「基点を読む口」を渡す (読む先は作業ツリーではなく基点)', async () => {
+  // 呼び出し側 (src/bridge/orgapply.js) は、この適用が触っていないファイル
+  // (policy・他の bot の役割文) も「適用後の姿」を組むのに要る
+  const seen = [];
+  const world = fakeWorld({
+    validateApplied: async ({ applied, readBase }) => {
+      seen.push(applied);
+      seen.push(await readBase('roles/sol.md'));
+      seen.push(await readBase('roles/no-such.md'));
+      return { ok: true };
+    },
+  });
+  const out = await run(world);
+
+  assert.equal(out.ok, true, out.reason);
+  assert.deepEqual(seen[0], { 'roles/sol.md': AFTER }, '適用後の内容を渡していない');
+  assert.equal(seen[1], BEFORE, '基点の内容を読めていない');
+  assert.equal(seen[2], null, '基点に無いファイルは null で返す (create の前提)');
+  // 読んだのは**基点の blob** (作業ツリーの現物ではない)
+  assert.ok(world.calls.includes(`wt: show ${BASE}:roles/sol.md`));
+});
+
+test('検証そのものが投げたときも当てない (fail-closed)', async () => {
+  const world = fakeWorld({ validateApplied: async () => { throw new Error('読めません'); } });
+  const out = await run(world);
+
+  assert.equal(out.stage, 'validate');
+  assert.match(out.reason, /適用後の内容を検証できませんでした: 読めません/);
+  assert.equal(world.calls.some((c) => c.startsWith('write:')), false);
+});
+
+test('validateApplied を渡さない呼び出しは受け付けない (省略で検証が消えない)', async () => {
+  const { validateApplied, ...withoutValidate } = fakeWorld().deps;
+  assert.equal(typeof validateApplied, 'function');
+  await assert.rejects(
+    () => applyProposal({
+      proposal: PROPOSAL, plan: PLAN, taskId: TASK, branch: BRANCH, repoRoot: ROOT,
+      deps: withoutValidate,
+    }),
+    /org-apply: validateApplied は注入する/,
+  );
 });
 
 // ---- 途中で落ちる ----
@@ -354,8 +434,20 @@ test('verify に落ちたら receipt を作らない (コミットは残る)', a
   const out = await run(world);
 
   assert.equal(out.stage, 'verify');
-  assert.match(out.reason, /テストが 2 件失敗/);
+  assert.equal(out.reason, 'verify に通りませんでした: テストが 2 件失敗');
   assert.equal(out.path, WT, '枝を捨てる先が分からない');
+});
+
+test('中断は「通りませんでした」で包まない (落ちたのではなく確かめていない)', async () => {
+  const world = fakeWorld();
+  world.deps.verify = async () => ({
+    ok: false, aborted: true, detail: '停止指示により中断しました (ブリッジの停止)',
+  });
+  const out = await run(world);
+
+  assert.equal(out.stage, 'verify');
+  assert.equal(out.reason, '停止指示により中断しました (ブリッジの停止)', '二重否定になっている');
+  assert.equal(out.receipt, undefined, '確かめていないのに receipt を作っている');
 });
 
 test('hook が作業ツリーだけ直していたら verify へ進まない', async () => {

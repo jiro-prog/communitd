@@ -14,12 +14,13 @@
 //   1. 現況を読み、基点から枝を作り直す (残骸は再利用しない)
 //   2. HEAD が基点と一致し、index も作業ツリーも clean であることを確かめる
 //   3. **基点の内容へ**承認済み diff を当てて、適用後の内容を算出する
-//   4. 書いて stage し、**すぐ `write-tree` で固定してから**その tree を検査する
-//   5. commit し、**固定した tree がそのまま入ったこと**と親が基点だけであることを確かめる
-//   6. 作業ツリーが適用コミットそのものであることを確かめてから verify を回し、
+//   4. **書く前に**適用後の内容そのものを検証する (起動できない設定を commit しない)
+//   5. 書いて stage し、**すぐ `write-tree` で固定してから**その tree を検査する
+//   6. commit し、**固定した tree がそのまま入ったこと**と親が基点だけであることを確かめる
+//   7. 作業ツリーが適用コミットそのものであることを確かめてから verify を回し、
 //      通れば receipt を作る
 //
-// 4 で落ちたらコミットしない。6 で落ちたらコミットは残るが receipt は作らない —
+// 5 までで落ちたらコミットしない。7 で落ちたらコミットは残るが receipt は作らない —
 // どちらも呼び出し側が枝ごと捨てる。
 //
 // **検査するのは可変なものではなく immutable な object。** 作業ツリーも index も HEAD も、
@@ -45,7 +46,9 @@ import { applyDiffFile } from './diffs.js';
 const OID = /^[0-9a-f]{40}$/i;
 
 /** どの段で落ちたか。呼び出し側が「当たっていない」と「verify で落ちた」を区別する */
-export const APPLY_STAGES = Object.freeze(['worktree', 'base', 'write', 'inspect', 'commit', 'verify']);
+export const APPLY_STAGES = Object.freeze([
+  'worktree', 'base', 'validate', 'write', 'inspect', 'commit', 'verify',
+]);
 
 const fail = (stage, reason, path = null) => ({ ok: false, stage, reason, path });
 
@@ -84,9 +87,15 @@ export function withApplyLock(key, run) {
  * @param {{proposal: object, plan: object, taskId: string, branch: string,
  *          repoRoot: string, deps: object, settle?: function}} p
  *   plan は `checkApplicable` / `prepareApply` が返したもの (基点・適用後の内容・files)。
- *   deps は `{git, writeFile, deleteFile, ensureDir, verify, listWorktrees, listBranches}`:
+ *   deps は `{git, writeFile, deleteFile, ensureDir, validateApplied, verify,
+ *   listWorktrees, listBranches}`:
  *     - `git(cwd, args)` … `runGit` と同じ形 (cwd を `-C` で渡して stdout を返す)
- *     - `verify(cwd)` … `{ok, detail}` を返す。**省略できない** (receipt は verify 成功が前提)
+ *     - `validateApplied({applied, readBase})` … 書く前の検証。`{ok, reason}` を返す。
+ *       **省略できない** (省略できる口にすると、配線を 1 本忘れるだけで壊れた設定が
+ *       commit される)。`readBase(相対パス)` は基点の内容 (無ければ null) — 適用が触って
+ *       いないファイルも「適用後の姿」を組むのに要る
+ *     - `verify(cwd)` … `{ok, detail, aborted?}` を返す。**省略できない**
+ *       (receipt は verify 成功が前提)。`aborted` は「落ちた」ではなく「確かめていない」
  *     - `listWorktrees()` / `listBranches()` … 現況。**排他区間の中で読む**ので注入で受ける
  *   settle は `(result) => Promise<void>`。**排他区間の中で**呼ばれる。投げたらそのまま伝える
  *   (後始末に失敗したことを呼び出し側が握りつぶさないように)
@@ -96,7 +105,10 @@ export function withApplyLock(key, run) {
 export async function applyProposal({
   proposal, plan, taskId, branch, repoRoot, deps = {}, settle = null,
 } = {}) {
-  const required = ['git', 'writeFile', 'deleteFile', 'ensureDir', 'verify', 'listWorktrees', 'listBranches'];
+  const required = [
+    'git', 'writeFile', 'deleteFile', 'ensureDir', 'validateApplied', 'verify',
+    'listWorktrees', 'listBranches',
+  ];
   for (const name of required) {
     if (typeof deps[name] !== 'function') throw new Error(`org-apply: ${name} は注入する`);
   }
@@ -111,7 +123,9 @@ export async function applyProposal({
 }
 
 async function runApply({ proposal, plan, taskId, branch, repoRoot, deps }) {
-  const { git, writeFile, deleteFile, ensureDir, verify, listWorktrees, listBranches } = deps;
+  const {
+    git, writeFile, deleteFile, ensureDir, validateApplied, verify, listWorktrees, listBranches,
+  } = deps;
 
   // ---- 1. 現況を読んで、基点から枝を作り直す ----
   let path;
@@ -144,7 +158,33 @@ async function runApply({ proposal, plan, taskId, branch, repoRoot, deps }) {
   const computed = await computeFromBase({ plan, path, git });
   if (!computed.ok) return fail(computed.stage, computed.reason, path);
 
-  // ---- 4. 書いて stage して、index を検査する ----
+  // ---- 4. 書く前に、適用後の内容そのものを検証する ----
+  // **「当たるか」と「通る内容か」は別。** diff が基点へきれいに当たっても、
+  // 出来上がった `config.policy.json` が起動時検証を通らなければ、それを merge した
+  // 次の起動が exit 1 で止まる (ラッパーは 42 以外で再起動しないので、そこで社会ごと止まる)。
+  // **何を検証するかは呼び出し側が決める** — この層が持つのは「書く前に通す」という順序だけ
+  let validated;
+  try {
+    validated = await validateApplied({
+      applied: computed.applied,
+      // **読む先も基点。** 当てる元が基点なら、突き合わせる相手も基点でなければならない
+      // (呼び出し側が「適用後の設定」を組むのに、この適用が触っていないファイルを要る)
+      readBase: async (rel) => {
+        try {
+          return await git(path, objectShowArgs(plan.baseCommit, rel));
+        } catch {
+          return null; // 基点に無い (computeFromBase の create と同じ扱い)
+        }
+      },
+    });
+  } catch (err) {
+    return fail('validate', `適用後の内容を検証できませんでした: ${err.message}`, path);
+  }
+  if (validated?.ok !== true) {
+    return fail('validate', validated?.reason ?? '適用後の内容が検証を通りませんでした', path);
+  }
+
+  // ---- 5. 書いて stage して、index を検査する ----
   try {
     for (const [rel, after] of Object.entries(computed.applied)) {
       const target = join(path, rel);
@@ -191,7 +231,7 @@ async function runApply({ proposal, plan, taskId, branch, repoRoot, deps }) {
   }
   if (!inspected.ok) return fail('inspect', inspected.reason, path);
 
-  // ---- 5. commit し、検査した tree がそのまま入ったことを確かめる ----
+  // ---- 6. commit し、検査した tree がそのまま入ったことを確かめる ----
   let appliedCommit;
   let appliedTree;
   try {
@@ -223,7 +263,7 @@ async function runApply({ proposal, plan, taskId, branch, repoRoot, deps }) {
     return fail('commit', `コミットできませんでした: ${err.message}`, path);
   }
 
-  // ---- 6. verify ----
+  // ---- 7. verify ----
   // **回す前に、作業ツリーが適用コミットそのものであることを確かめる。**
   // verify が見るのは作業ツリー = 可変なもの。post-commit hook が index を触らずに
   // 作業ツリーだけ直すと、tree も系譜も通ったまま「コミットに入っていない内容」で
@@ -248,6 +288,12 @@ async function runApply({ proposal, plan, taskId, branch, repoRoot, deps }) {
     return fail('verify', `verify を回せませんでした: ${err.message}`, path);
   }
   if (verified?.ok !== true) {
+    // 中断は**落ちたのではなく確かめていない**。「verify に通りませんでした: 停止指示により
+    // 中断」という二重否定にせず、理由をそのまま出す (Opus2 指摘 2026-09-12 m2)。
+    // 倒れる先は同じ (receipt を作らない)
+    if (verified?.aborted === true) {
+      return fail('verify', verified.detail || '停止指示により中断しました', path);
+    }
     return fail('verify', `verify に通りませんでした: ${verified?.detail ?? '(詳細なし)'}`, path);
   }
 
@@ -285,8 +331,8 @@ async function computeFromBase({ plan, path, git }) {
     try {
       before = await git(path, objectShowArgs(plan.baseCommit, file.path));
     } catch {
-      // 基点に無い = create の前提。edit / delete なら次の applyDiffFile が落とす
-      before = null;
+      // 基点に無い = create の前提。**null のまま**進める
+      // (edit / delete なら次の applyDiffFile が落とす)
     }
     const result = applyDiffFile(file, before);
     if (!result.ok) {

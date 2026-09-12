@@ -10,7 +10,7 @@
 // 見つからなければ `reconcile` に残す。再実行しても 1 回に収束する。
 
 import {
-  CASE_TERMINAL_STATES, RECONCILE_TIMEOUT_MS,
+  CASE_TERMINAL_STATES,
   acceptClaim, addFinding, adoptFinding, cancelAction, declineClaim, expireClaim, linkCase,
   markAccepted, markReconcile, markRunning, markSending, markSent, offerClaim, planAction,
   reconcileActions, registerMandate, resumeCase, settleAction, stopCase,
@@ -27,15 +27,13 @@ export const SOCIETY_STOP_REASONS = Object.freeze([
 const QUIET_STOPS = Object.freeze(['off', 'not-ready']);
 
 /**
- * 起動メッセージに載せる案件の印。
+ * 起動メッセージに載せる案件の印。**印だけの行**として読む (前後の空白は許す) —
+ * 本文中の引用や説明を印と取り違えないため。
  *
  * **`[[...]]` の文法は使わない** — あれは「起動を決める」記法で、種類を増やすと
  * プロトコル版の管理対象になる (`src/contract.js` の契約タグと同じ流儀)。
  * **本文の印だけでは実行できない** (§5): 受信側は保存済みの Action と照合して初めて受け付ける。
  */
-const ACTION_TAG = /`案件:(A-\d+)`/;
-
-/** 印だけの行 (前後の空白は許す)。読むときはこちらを使う — 本文中の引用と区別するため */
 const ACTION_TAG_ONLY = /^`案件:(A-\d+)`$/;
 
 export function formatActionTag(actionId) {
@@ -1113,12 +1111,6 @@ export function createSocietyWiring({
 
   // ---- 照合 (§5 の reconcile / §7 の境界①〜③) ----
 
-  /** 送信から 2 分たったか (未受付と確定してよい時刻を過ぎたか) */
-  function agedOut(action, at) {
-    const sentAt = msOf(action.delivery?.sentAt ?? action.delivery?.sendingAt ?? action.createdAt);
-    return sentAt !== null && at - sentAt >= RECONCILE_TIMEOUT_MS;
-  }
-
   /** 宛先スレッドを 1 回ずつ走査して、印 → messageId を集める */
   async function scanForMarkers(live) {
     const since = new Map();
@@ -1251,7 +1243,7 @@ export function createSocietyWiring({
       if (!['accepted', 'running'].includes(action.state)) continue;
       const runId = action.delivery?.runId;
       if (typeof runId !== 'string' || runId === '') continue;
-      let record = null;
+      let record;
       try {
         record = jobRuns?.get?.(runId) ?? null;
       } catch (err) {
@@ -1490,6 +1482,8 @@ export function createSocietyWiring({
       // 期限切れの待ちと同じに見えて誰かが催促しに行くことになる
       `${c.stop ? '⏹ ' : ''}**${c.id}** \`${c.state}\` / ${escape(claimLabel(s, c.owner))} / `
       + `${escape(oneLine(c.desiredOutcome ?? '', 60))}`,
+      // 字下げは全角空白 (U+3000) でしか出せない — Discord は行頭の半角空白を畳む
+      // eslint-disable-next-line no-irregular-whitespace
       `　${escape(triggerLine(s, c))}`,
     ].join('\n'));
     const more = rows.length > shown.length ? `\n…ほか ${rows.length - shown.length} 件` : '';
@@ -1523,6 +1517,8 @@ export function createSocietyWiring({
         + ` / ${escape(String(record.stop.actionId ?? '起動なし'))}`
         + ` / ${escape(oneLine(record.stop.reason ?? '理由なし', 80))}`,
       );
+      // 字下げは全角空白 (U+3000) でしか出せない — Discord は行頭の半角空白を畳む
+      // eslint-disable-next-line no-irregular-whitespace
       lines.push(`　再開は \`/case resume:${escape(String(record.id))}\``);
     }
     const offers = claims.filter((c) => c.state === 'offered');

@@ -392,7 +392,7 @@ export function createInteractionHandler({
     let rationale = '';
     try {
       rationale = interaction.fields?.getTextInputValue?.(RATIONALE_FIELD) ?? '';
-    } catch { rationale = ''; }
+    } catch { /* 取り出せなければ空のまま (理由なしとして裁定を通す) */ }
     await finalizeAdjudication(interaction, gate, parsed, rationale);
   }
 
@@ -770,7 +770,7 @@ export function createInteractionHandler({
     // 「未知の id」になり、しかも応答が `##3` と二重になる (レビュー指摘 2026-09-02)
     const closeId = (interaction.options?.getString?.('close') ?? '').trim().replace(/^#/, '');
     if (closeId) {
-      let closed = null;
+      let closed;
       try {
         closed = inbox.close(closeId);
       } catch (err) {
@@ -1216,6 +1216,9 @@ export async function admitJob({
  * @param {(ms: number) => Promise<void>} p.drain  中断完了待ち
  * @param {() => Promise<unknown>} p.destroyClients Discord client の切断
  * @param {() => void} p.exit     プロセス終了 (process.exit)
+ * @param {() => unknown} [p.abortOrgApply] **job ではない子プロセス**の中断。
+ *        org-apply の verify は tick から走るのでキューに居らず、`stopJobs` では撃てない
+ *        (`/stop` の対象外なのも同じ理由 — あれはスレッド単位の job 停止)
  * @returns {Promise<boolean>} 自分が終了処理を走らせたなら true (二重呼び出しは false)
  */
 export async function runShutdown({
@@ -1228,12 +1231,19 @@ export async function runShutdown({
   drain,
   destroyClients,
   exit,
+  abortOrgApply = null,
 }) {
   if (!lifecycle.beginShutdown()) return false;
   const hardExit = setTimeout(exit, hardExitMs);
   const { active, cancelled } = stopJobs(jobs, {
     all: true, message: cancelMessage, stopKind: STOP_BY.SHUTDOWN,
   });
+  // job の abort と**同じ瞬間に**適用回路も撃つ。落ちても停止は続ける
+  // (撃てなかったことでプロセスが居座る方が悪い — notifyStop と同じ流儀)
+  if (typeof abortOrgApply === 'function') {
+    try { abortOrgApply(); }
+    catch (err) { console.error(`[org-apply] 停止を伝えられませんでした: ${err.message}`); }
+  }
   await Promise.all([
     cancelled,
     // まだキューに載っていない受付 (⏳ の送信中) の決着も待つ。全体の上限は hardExit。

@@ -92,9 +92,12 @@ function cfg(patch = {}) {
  * 検証を通る最小の bot (必須 4 キー) に patch を重ねる。
  * 個々のテストが見たいのは 4 キー**以外**の検査なので、そこはこの helper で満たす。
  */
+let displayNameSeq = 0;
 function bot(patch = {}) {
   return {
-    tokenEnv: 'T', displayName: 'D', model: 'opus', rolePromptFile: 'roles/worker.md', ...patch,
+    // **既定は 1 体ごとに違う名前。** displayName の重複そのものが検証で落ちるので、
+    // 「重複を見ていない」テストが巻き添えで落ちないようにする (見たい側は明示で書く)
+    tokenEnv: 'T', displayName: `D${++displayNameSeq}`, model: 'opus', rolePromptFile: 'roles/worker.md', ...patch,
   };
 }
 
@@ -124,6 +127,51 @@ test('bots.<key> の tokenEnv / displayName / model / rolePromptFile は必須',
   const notObject = validateConfig(cfg({ bots: { w: ['claude'] } }));
   assert.equal(notObject.length, 1);
   assert.match(notObject[0], /bots\.w はオブジェクトで書く/);
+});
+
+test('displayName は bot 同士で重複できない (trim・大文字小文字は無視)', () => {
+  // 同じ表示名が 2 体に付いていると、メンションも旧記法の名指しもどちらを指すか決まらない
+  const two = (a, b) => cfg({ bots: { x: bot({ displayName: a }), y: bot({ displayName: b }) } });
+  assert.deepEqual(validateConfig(two('Worker', 'Reviewer')), []);
+
+  for (const [a, b] of [['Worker', 'Worker'], ['Worker', 'worker'], ['Worker', ' WORKER ']]) {
+    const errors = validateConfig(two(a, b));
+    assert.equal(errors.length, 1, `${JSON.stringify([a, b])} が通ってしまう`);
+    // **両方の綴りをそのまま引用する** — 片方だけだと「うちはそうは書いていない」で終わる
+    assert.equal(
+      errors[0],
+      `bots.x / bots.y の displayName が重複 — メンションの解決が曖昧になる `
+      + `(前後の空白と大小文字は無視して照合: ${JSON.stringify(a)} / ${JSON.stringify(b)})`,
+    );
+  }
+
+  // 3 体ぶつかったら、先に名乗った bot との組を並べる (どれを直せばよいか分かる)
+  const three = validateConfig(cfg({
+    bots: { x: bot({ displayName: 'W' }), y: bot({ displayName: 'W' }), z: bot({ displayName: 'W' }) },
+  }));
+  assert.equal(three.length, 2);
+  assert.ok(three[0].startsWith('bots.x / bots.y'), three[0]);
+  assert.ok(three[1].startsWith('bots.x / bots.z'), three[1]);
+
+  // displayName が無い・型違いの bot は必須キー側の 1 行だけ (同じ設定に 2 行出さない)
+  const missing = validateConfig(cfg({ bots: { x: bot({ displayName: undefined }), y: bot({ displayName: undefined }) } }));
+  assert.equal(missing.length, 2, missing.join(' / '));
+  assert.ok(missing.every((e) => e.includes('displayName が要る')), missing.join(' / '));
+});
+
+test('owner の呼び名と bot 同士の重複は別々に出る (同じ名前なら両方出る)', () => {
+  // 2 つの検査は狙いが違う (人間宛のメンションが bot に化ける / bot 同士の区別がつかない)
+  // ので、同じ 1 つの命名ミスで両方から行が出る。**まとめない** — 直し方が違う
+  const errors = validateConfig(cfg({
+    ownerUserId: 'U1',
+    ownerNames: ['Sol'],
+    bots: { a: bot({ displayName: 'Sol' }), b: bot({ displayName: ' sol ' }) },
+  }));
+  const owner = errors.filter((e) => e.startsWith('owner の呼び名'));
+  const clash = errors.filter((e) => e.includes('displayName が重複'));
+  assert.equal(owner.length, 2, '衝突している bot ごとに 1 行 (owner 側)');
+  assert.equal(clash.length, 1, '重複の組ごとに 1 行 (bot 同士)');
+  assert.equal(errors.length, 3, errors.join(' / '));
 });
 
 test('runtime は claude | codex だけ (省略 = claude)', () => {

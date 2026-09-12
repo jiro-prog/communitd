@@ -223,9 +223,7 @@ export function createTurnWiring({
     //
     // 落とさないのは `[[notify:owner]]` だけ — 人間への質問は案件の外にある。
     // verify 最終 NG の戻しも上で owner の notify へ倒してあるので、ここは通る
-    let societyDropped = null;
     if (societyAction && handoffMention && handoffMention.kind !== 'notify') {
-      societyDropped = handoffMention;
       handoffMention = null;
       // 黙って落とさない — 落としたことが分かる唯一の手がかり (メンション警告と同じ流儀)
       steps.push({

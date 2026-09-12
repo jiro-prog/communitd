@@ -186,6 +186,9 @@ export function tailText(text, { maxLines = VERIFY_TAIL_LINES, maxChars = VERIFY
 
 function sanitizeOutput(text) {
   return String(text ?? '')
+    // 制御文字を**狙って**落とす (テストランナーの出力をそのまま Discord へ流さない)。
+    // no-control-regex はこの regex そのものを疑う規則なので、ここだけ外す
+    // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
     .replaceAll('```', "'''");
 }

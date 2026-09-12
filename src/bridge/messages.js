@@ -364,7 +364,7 @@ export function createMessageWiring({
         // 契約がストアに居座り、次の同じ送信元からの handoff がそれを消費してしまう
         // (対応がずれる — sol 指摘 2026-08-03)。取り消された job の契約は
         // その job と一緒に捨てられるのが正しい
-        const claimed = claimContract({ bot, thread, cc, triggerMsg: msg });
+        const claimed = claimContract({ bot, thread, triggerMsg: msg });
         // (3) 束縛した契約の参照を記録へ確定する。書けなければ起動しない — 契約は既に消費されて
         // いるので、走らせずに人へ返す (走らせて途中で落ちると、記録は pending・契約は無し、で
         // 何が効いていたのかを誰も読めない)

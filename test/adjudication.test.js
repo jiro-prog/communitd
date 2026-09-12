@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import { mkdtempSync } from 'node:fs';
+import { after, test } from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -82,7 +82,19 @@ const processInput = () => orgInput({
   change: { touch: ['docs/handbook.md'], diff: makeDiff('docs/handbook.md', FILES['docs/handbook.md'], '手順 (改)\n') },
 });
 
-const store = () => new ProposalStore(join(mkdtempSync(join(tmpdir(), 'communitd-adj-')), 'proposals.json'));
+/**
+ * 台帳 1 つにつき一時ディレクトリを 1 つ作る。**最後にまとめて消す** —
+ * 後始末が無かった頃は %TEMP% に `communitd-adj-*` が 1716 件溜まっていた (2026-09-12)。
+ */
+const tempDirs = [];
+const store = () => {
+  const dir = mkdtempSync(join(tmpdir(), 'communitd-adj-'));
+  tempDirs.push(dir);
+  return new ProposalStore(join(dir, 'proposals.json'));
+};
+after(() => {
+  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+});
 
 /** 裁定待ちまで進めた提案を 1 件作る */
 /** 適用の基点 (org / process の採択には commit OID が要る) */

@@ -94,6 +94,21 @@ const governanceEdit = (before, after) => ({
   trial: { deadline: '2026-09-30T00:00:00.000Z', successCriteria: '参照先が揃う', rollback: '前の文面へ戻す' },
 });
 
+/** policy そのものを書き換える提案 (pointer は実在していないと raise で落ちる) */
+const policyEdit = (before, after, { pointer = '/bots/fable/model', op = 'edit' } = {}) => ({
+  kind: 'policy-edit',
+  targets: [{ pointer, op }],
+  duty: 'org-audit',
+  summary: 'fable のモデル指定を変える',
+  evidence: ['起動のたびに同じ指定を手で直している'],
+  remedy: 'policy',
+  change: { touch: [POLICY_FILE], diff: makeDiff(POLICY_FILE, before, after) },
+  benefits: ['指定が 1 か所になる'],
+  risks: ['書き損じると起動しない'],
+  cost: '小',
+  trial: { deadline: '2026-09-30T00:00:00.000Z', successCriteria: '起動が通る', rollback: '前の値へ戻す' },
+});
+
 /** 実リポジトリ + ボード + 提案台帳。**git は実物・verify だけ偽物** */
 function newWorld({ policy = POLICY } = {}) {
   const repo = mkdtempSync(join(tmpdir(), 'communitd-orgapply-')).replaceAll('\\', '/');
@@ -151,13 +166,18 @@ function accepted(world, input, { ctx = world.ctxOf(), baseCommit = world.base }
   });
 }
 
-/** 実物の git / fs を使う依存。verify だけ差し替えられる */
-function realDeps(world, { verify = async () => ({ ok: true }), calls = [] } = {}) {
+/** 実物の git / fs を使う依存。verify と「書く前の検証」だけ差し替えられる */
+function realDeps(world, {
+  verify = async () => ({ ok: true }),
+  validateApplied = async () => ({ ok: true }),
+  calls = [],
+} = {}) {
   return {
     git: (cwd, args) => runGit(cwd, args),
     writeFile: (path, text) => writeFile(path, text, 'utf8'),
     deleteFile: (path) => rm(path, { force: true }),
     ensureDir: async (path) => { await mkdir(path, { recursive: true }); },
+    validateApplied: async (input) => { calls.push('validate'); return validateApplied(input); },
     verify: async (cwd) => { calls.push('verify'); return verify(cwd); },
     listWorktrees: async () => parseWorktreeList(await runGit(world.repo, ['worktree', 'list', '--porcelain'])),
     listBranches: async () => parseBranchList(
@@ -194,6 +214,7 @@ function recording(world, calls) {
  */
 function applyOptions(world, {
   ctx = world.ctxOf(), verify = async () => ({ ok: true }),
+  validateApplied = async () => ({ ok: true }),
   calls = [], submitted = [], released = [], board = world.board,
 } = {}) {
   return {
@@ -203,7 +224,7 @@ function applyOptions(world, {
     repoRoot: world.repo,
     by: 'bridge',
     now: T0,
-    deps: realDeps(world, { verify, calls }),
+    deps: realDeps(world, { verify, validateApplied, calls }),
     createThread: async ({ task }) => { calls.push('createThread'); return `thread-${task.id}`; },
     submitReview: async (arg) => {
       calls.push('submitReview');
@@ -216,7 +237,7 @@ function applyOptions(world, {
       let head = null;
       try {
         head = String(await runGit(world.repo, ['rev-parse', '--verify', `refs/heads/${task.branch}^{commit}`])).trim();
-      } catch { head = null; }
+      } catch { /* 枝がまだ無い = null のまま (当たっていないことの印) */ }
       released.push({ taskId: task.id, stage, head });
       await releaseWorktree({ repoRoot: world.repo, taskId: task.id, branch: task.branch, force: true });
       try {
@@ -336,6 +357,40 @@ test('当てる元は基点の blob — index と作業ツリーが食い違っ�
   );
 }));
 
+test('書く前の検証で落ちた適用は、枝を基点のままにして commit を残さない', withWorld(async (world) => {
+  // 壊れた `config.policy.json` を当てる提案。**diff としては当たる**ので、
+  // 止められるのは「書く前に内容そのものを見る」段だけ (実物の判定は src/bridge/orgapply.js)
+  const broken = { ...POLICY, bots: { ...POLICY.bots, fable: { model: '' } } };
+  accepted(world, policyEdit(policyText(), policyText(broken)));
+  const calls = [];
+  const { out, released } = await runApply(world, {
+    calls,
+    validateApplied: async () => ({
+      ok: false,
+      reason: `適用後の ${POLICY_FILE} は起動時検証を通りません:\n- bots.fable.model が要る`,
+    }),
+  });
+
+  assert.equal(out.ok, false);
+  assert.equal(out.stage, 'validate', out.reason);
+  assert.match(out.reason, /bots\.fable\.model が要る/);
+  assert.equal(calls.includes('verify'), false, '書く前に落ちたのに verify まで進んでいる');
+  assert.equal(released[0]?.head, world.base, '通らない policy がコミットされている');
+
+  // 当たっていない扱い: 錠は外れ、receipt は無く、verify まで届いていない
+  const proposal = world.store.require('1');
+  assert.equal(proposal.state, 'deliberating');
+  assert.equal(proposal.applyTaskId, null);
+  assert.equal(proposal.receipt, null);
+  assert.equal(proposal.applyAttempts[0].appliedCommit, null);
+  assert.equal(proposal.applyAttempts[0].verify, null);
+  assert.equal(world.board.get(out.taskId).state, 'dropped');
+
+  // 枝も作業ツリーも残さない。**本体の policy も動いていない**
+  assert.deepEqual(parseBranchList(world.git('branch', '--list', '--format=%(refname:short)')), ['master']);
+  assert.equal(readFileSync(join(world.repo, POLICY_FILE), 'utf8'), policyText());
+}));
+
 // ---- (ii) 成功経路 ----
 
 test('当たったら receipt → in-progress→review → 検収の依頼、の順で進む', withWorld(async (world) => {
@@ -348,8 +403,9 @@ test('当たったら receipt → in-progress→review → 検収の依頼、の
   assert.equal(out.receipt.baseCommit, world.base);
   assert.equal(out.receipt.verify.ok, true);
 
-  // **順序がこの層の中身。** 起票 → スレッド → 承認 → 着手 → 錠 → 当てる →
-  // receipt → review → 検収の依頼。**承認と着手の間に await は挟まない**
+  // **順序がこの層の中身。** 起票 → スレッド → 承認 → 着手 → 錠 → 当てる
+  // (書く前の検証 → verify) → receipt → review → 検収の依頼。
+  // **承認と着手の間に await は挟まない**
   // (挟むと Discord 待ちの窓で approved が残り、planTick が worker で起こす)
   assert.deepEqual(calls, [
     'board.propose',
@@ -357,6 +413,7 @@ test('当たったら receipt → in-progress→review → 検収の依頼、の
     'board.approve',
     'board.start',
     'store.linkTask',
+    'validate',
     'verify',
     'store.recordReceipt',
     'board.submitForReview',
@@ -1000,6 +1057,26 @@ test('適用の起動点は sweepProposals の 1 経路だけ (採択ボタン�
   // 採択の確定 (src/interactions.js の finalizeAdjudication) からは起こさない
   const interactions = readFileSync(fileURLToPath(new URL('../src/interactions.js', import.meta.url)), 'utf8');
   assert.equal(/startOrgApply|sweepOrgApply/.test(interactions), false);
+});
+
+test('適用の verify はブリッジの停止で撃つ (/stop の対象ではない)', () => {
+  // 適用回路は tick から走るので job キューに居ない。**停止経路は shutdown だけ** —
+  // `/stop` はスレッド単位の job 停止なので、そこから適用回路を撃つと
+  // 「誰かが自分のスレッドを止めたら、無関係な適用の verify まで死ぬ」になる
+  const orgapply = bridgeSource('orgapply');
+  assert.match(orgapply, /runVerifyImpl\(\{[^}]*handle,/s, 'runVerify に handle を渡していない');
+  assert.match(indexSource(), /abortOrgApply: \(\) => orgApply\.abortVerify\(\)/);
+  assert.match(bridgeSource('shutdown'), /\n {6}abortOrgApply,/);
+
+  const interactions = readSrc('interactions.js');
+  const from = interactions.indexOf('export function stopJobs');
+  const to = interactions.indexOf('function notifyStop');
+  assert.ok(from > 0 && to > from, 'stopJobs を切り出せない (関数名が変わった?)');
+  assert.equal(
+    /abortOrgApply/.test(interactions.slice(from, to)),
+    false,
+    '/stop (stopJobs) が適用回路まで撃っている',
+  );
 });
 
 test('片付け直しは in-flight ガードの中・候補走査より前でだけ走る', () => {
