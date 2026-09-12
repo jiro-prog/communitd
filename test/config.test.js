@@ -46,6 +46,9 @@ import {
   TOOL_PRESETS,
   VERIFY_MAX_RETRIES_RANGE,
   channelConfigForName,
+  channelNameOf,
+  isExampleCwd,
+  isExampleId,
   loadConfigSources,
   mergeConfigSources,
   resolveAddDirs,
@@ -73,6 +76,7 @@ import {
   resolveInitiativeBudget,
   validateAttachmentLimits,
   validateAutonomy,
+  unregisteredChannelNotice,
   validateConfig,
 } from '../src/config.js';
 
@@ -868,6 +872,51 @@ test('channelConfigForName は未登録・prototype 名で null', () => {
   assert.equal(channelConfigForName(config, 'unknown'), null);
   assert.equal(channelConfigForName(config, 'toString'), null);
   assert.equal(channelConfigForName({}, 'sandbox'), null);
+});
+
+test('channelNameOf はスレッドなら親の名前 (判定に使う名前を 1 か所で決める)', () => {
+  const parent = { name: 'my-project', isThread: () => false };
+  assert.equal(channelNameOf(parent), 'my-project');
+  assert.equal(channelNameOf({ name: 'T1', isThread: () => true, parent }), 'my-project');
+  assert.equal(channelNameOf({ name: 'T1', isThread: () => true, parent: null }), null, '親を取れないスレッド');
+  assert.equal(channelNameOf(null), null);
+  assert.equal(channelNameOf({}), null, 'isThread を持たない値でも落ちない');
+});
+
+test('未登録チャンネルの案内は、今の名前と登録されている名前を並べる', () => {
+  // 「未登録です」だけだと、綴り違いなのか場所違いなのかが Discord 側から分からない
+  // (実地の導入で詰まった: 2026-09-12)
+  const config = { channels: { 'my-project': { cwd: 'C:/tmp' }, kt: { cwd: 'C:/kt' } } };
+  assert.equal(
+    unregisteredChannelNotice(config, 'my_project'),
+    '⚠️ このチャンネル (`my_project`) は config.policy.json の channels に未登録です'
+    + ' — 登録されているのは `my-project` / `kt` (名前は完全一致・スレッドは親チャンネルの名前で判定)',
+  );
+  // 名前を取れないときも「何と照合したか」は出す
+  assert.match(unregisteredChannelNotice(config, null), /このチャンネル \(`\(不明\)`\)/);
+  // チャンネルが 1 つも無い配備
+  assert.match(unregisteredChannelNotice({}, 'x'), /登録されているチャンネルがありません/);
+  // Discord 由来の名前で引用を壊さない (改行とバッククォートは落とす)
+  assert.match(unregisteredChannelNotice(config, 'a`b\nc'), /\(`abc`\)/);
+  // チャンネルが多い配備でも 1 通に収まる形にする (頭 8 件 + 残りは件数)
+  const many = { channels: Object.fromEntries([...Array(12)].map((_, i) => [`ch-${i}`, {}])) };
+  const listed = unregisteredChannelNotice(many, 'x');
+  assert.match(listed, /登録されているのは `ch-0` \/ .* \/ `ch-7` ほか 4 件/);
+});
+
+test('設定例のままの ID / cwd を見分ける (doctor と起動ログが同じ判定を使う)', () => {
+  for (const id of ['000000000000000000', '00000', ' 000000000000000000 ']) {
+    assert.equal(isExampleId(id), true, id);
+  }
+  for (const id of ['123456789012345678', '0', '0000', '10000000000000000', '', null, undefined, 0]) {
+    assert.equal(isExampleId(id), false, JSON.stringify(id));
+  }
+  for (const cwd of ['C:/path/to/your/project', 'C:\\path\\to\\your\\project', '/path/to/your/project', 'C:/path/to/your/project/']) {
+    assert.equal(isExampleCwd(cwd), true, cwd);
+  }
+  for (const cwd of ['C:/work/my-project', '/home/me/path/to/your/project-2', '', null]) {
+    assert.equal(isExampleCwd(cwd), false, JSON.stringify(cwd));
+  }
 });
 
 test('limits.attachments は省略可・書くなら正の整数だけ', () => {

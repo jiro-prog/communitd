@@ -23,7 +23,7 @@ import { grantFingerprint } from './grants.js';
 import { formatPauseState, resolveCaseRequest, resolveStopScope } from './commands.js';
 import { formatJst } from './time.js';
 import { editSafe, safePayload } from './mentions.js';
-import { resolveChannelRoster } from './config.js';
+import { channelNameOf, resolveChannelRoster, unregisteredChannelNotice } from './config.js';
 import { formatRoster, parseRosterMembers, resolveEffectiveRoster } from './roster.js';
 import { RESTART_EXIT_CODE, evaluateRestart, restartRejectionMessage } from './restart.js';
 
@@ -149,7 +149,7 @@ export function createInteractionHandler({
 
     // 発火はブリッジ管轄チャンネル内に限定する (テキスト時代と同じ)
     if (!interaction.channel || !channelConfigFor(interaction.channel)) {
-      await replyQuietly(interaction, '⚠️ このチャンネルは config.policy.json の channels に未登録です');
+      await replyQuietly(interaction, unregisteredChannelNotice(config, channelNameOf(interaction.channel)));
       return;
     }
 

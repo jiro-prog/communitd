@@ -73,11 +73,11 @@ const CONFIG = {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
 
-function harness(t, { env = {} } = {}) {
+function harness(t, { env = {}, config = CONFIG } = {}) {
   const io = captureConsole(t);
   FakeClient.instances = [];
   const bots = new Map();
-  const discord = createDiscordWiring({ config: CONFIG, bots });
+  const discord = createDiscordWiring({ config, bots });
   const calls = { messages: [], interactions: [], announced: 0, exits: [] };
   discord.loginBots({
     env,
@@ -185,6 +185,23 @@ test('スラッシュコマンドの登録に失敗しても常駐は続け、�
   assert.ok(line, h.errors.join('\n'));
   assert.match(line, /メンション経路は生きています/);
   assert.equal(h.bots.get('fable').userId, 'F', '登録失敗で ready の処理を止めている');
+});
+
+test('guildId が設定例のままなら、Missing Access の理由としてそれを名指しする', async (t) => {
+  // 実在しないサーバーへ登録しようとするので Missing Access になるが、その文言からは
+  // 設定の取り違えだと読めない (実地の導入で詰まった: 2026-09-12)
+  const h = harness(t, {
+    env: { FABLE_TOKEN: 't1' },
+    config: { ...CONFIG, guildId: '000000000000000000' },
+  });
+  const { client } = h.bots.get('fable');
+  client.failRegister = true;
+  await client.ready('F', 'Fable#0001');
+  await settle();
+  const line = h.errors.find((e) => e.startsWith('[fable] スラッシュコマンドの登録に失敗: Missing Access'));
+  assert.ok(line, h.errors.join('\n'));
+  assert.match(line, /guildId が設定例のまま \(000000000000000000\) です/);
+  assert.match(line, /この値のままではメンションも拒否されます/);
 });
 
 test('botKeyOf / botEntries は registry の素の形を返す', (t) => {

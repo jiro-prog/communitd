@@ -5,6 +5,28 @@
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-09-12
+
+### Changed
+
+実際に第三者の手順どおり (clone → 例をコピー → bot 2 体 → 一周) 導入して詰まった所の反映。
+
+- **`npm run doctor` が「設定例のまま」の値を ❌ にする。** `guildId` / `allowedUserIds` /
+  `ownerUserId` の `000000000000000000` と、`channels.<name>.cwd` の `C:/path/to/your/project` は
+  非空の文字列なので起動時の検証を通ってしまう。そのまま起動すると**スラッシュコマンドの登録が
+  `Missing Access` で落ち、メンションは全部拒否される**のに、ログからは設定の取り違えだと
+  読み取れなかった。スラッシュ登録の失敗にも「guildId が設定例のまま」と名指しする案内を足した。
+- **未登録チャンネルの警告に、今のチャンネル名と登録されている名前を並べる。**
+  「未登録です」だけでは、綴り違いなのか場所違いなのかが Discord 側から分からなかった。
+  判定は完全一致・スレッドは親チャンネルの名前、という判定そのものも文面に書く。
+- **`/status` の運転の行を、自律運転を設定していないチャンネルでは「未設定」と書く。**
+  従来は kill switch の状態 (`▶️ 自律運転は動いています`) をそのまま出していたので、
+  メンションでしか動かないチャンネルでも「動いている」と読めた。止められているときは
+  未設定でも状態を出す。
+- SETUP.md: §0 の `cp` は初回だけ (写し直すと `cwd` と ID が例に戻る) / §3 の doctor の出力例を
+  実物に更新 / §5 の一周の確認を `/status` の実態に合わせ、トラブルシューティングに
+  `Missing Access` と「同じサーバーで 2 つのブリッジを動かしたとき」を追加。
+
 ## [0.1.5] - 2026-09-12
 
 ### Added
@@ -155,7 +177,8 @@
 
 <!-- 版どうしの比較リンク ([Unreleased] / [0.1.0]) は publish-snapshot が --repo から生成する -->
 
-[Unreleased]: https://github.com/jiro-prog/communitd/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/jiro-prog/communitd/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/jiro-prog/communitd/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/jiro-prog/communitd/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/jiro-prog/communitd/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/jiro-prog/communitd/compare/v0.1.2...v0.1.3

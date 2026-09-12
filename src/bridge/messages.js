@@ -4,7 +4,7 @@
 // 判断は src/trigger.js / src/authz.js / src/hops.js / src/interactions.js が持ち、ここは順序と結線だけ。
 import { randomUUID } from 'node:crypto';
 import { isAuthorizedSender } from '../authz.js';
-import { resolveAutonomy } from '../config.js';
+import { channelNameOf, resolveAutonomy, unregisteredChannelNotice } from '../config.js';
 import { readContractNonce, requiresContract } from '../contract.js';
 import { admitJob } from '../interactions.js';
 import { editSafe, replySafe, sendSafe } from '../mentions.js';
@@ -154,7 +154,7 @@ export function createMessageWiring({
     const configured = channelConfigFor(msg.channel);
     if (!configured) {
       discardContractFor(bot, msg, 'チャンネル未登録');
-      await replySafe(msg, '⚠️ このチャンネルは config.policy.json の channels に未登録です').catch(() => {});
+      await replySafe(msg, unregisteredChannelNotice(config, channelNameOf(msg.channel))).catch(() => {});
       return;
     }
 

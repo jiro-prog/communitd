@@ -42,7 +42,7 @@ const ACTIVE_STATUSES = Object.freeze(['running', 'queued', 'handoff-wait', 'rev
 export function summarizeStatus({
   channelName, tasks = [], statusOf, runs = [], runsError = null, ledgerErrors = [], now = Date.now(),
   windowMs = DEFAULT_STATUS_WINDOW_MS, pause = null, backoffUntil = 0, dayJobsLeft = null, maxJobsPerDay = null,
-  society = null,
+  autonomy = false, society = null,
 } = {}) {
   const from = now - windowMs;
   const list = (Array.isArray(tasks) ? tasks : []).filter((t) => t && typeof t === 'object');
@@ -102,7 +102,11 @@ export function summarizeStatus({
     open,
     runs: { total: windowRuns.length, byOutcome, error: runsError },
     ledgers: (Array.isArray(ledgerErrors) ? ledgerErrors : []).filter((l) => l && l.file),
-    operation: { pause, backoffUntil: Number(backoffUntil) || 0, dayJobsLeft, maxJobsPerDay },
+    // `autonomy` は**このチャンネルで自律運転が有効か**。止まっているかどうか (pause) とは
+    // 別で、未設定のチャンネルに「▶️ 動いています」と出さないために要る
+    operation: {
+      pause, backoffUntil: Number(backoffUntil) || 0, dayJobsLeft, maxJobsPerDay, autonomy: autonomy === true,
+    },
     // 自律社会 (docs/society-ledger.md)。**渡されなければ null = 行を出さない** —
     // 社会を持たない配備の /status を 1 行増やさない
     society: society && typeof society === 'object' ? society : null,
@@ -195,7 +199,13 @@ export function formatStatus(summary, { escape = (s) => s } = {}) {
   const others = ledgers.filter((l) => l.gate === false);
   const files = (list) => escape(oneLine(list.map((l) => l.file).join(' / '), 60));
   const footer = [
-    `**運転**: ${formatPauseState(summary.operation.pause)}`,
+    // **自律運転を設定していないチャンネルに「動いています」と書かない。** そこで動くのは
+    // メンションで起こす job だけで、この行は kill switch の状態を出すためのもの
+    // (実地の導入で「自律運転は動いています」が誤解を招いた: 2026-09-12)。
+    // 止められているときは、未設定でも状態を隠さない
+    summary.operation.autonomy || summary.operation.pause
+      ? `**運転**: ${formatPauseState(summary.operation.pause)}`
+      : '**運転**: 自律運転は未設定 (このチャンネルはメンションで動きます)',
     formatSocietyLine(summary.society, escape),
     // 台帳が読めない間は自律起動そのものが止まっている — 予算やバックオフより先に出す
     gated.length > 0

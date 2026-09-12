@@ -76,7 +76,7 @@ test('formatStatus: 4 節が必ず出て (0 件は「なし」)、運転の行�
   const s = summarizeStatus({
     channelName: 'kt', tasks, runs: Object.values(runsByThread).flat(), now: T0,
     statusOf: (t) => deriveTaskStatus({ task: t, runs: runsByThread[t.threadId] ?? [], now: T0 }),
-    pause: null, backoffUntil: T0 + minutes(10), dayJobsLeft: 38, maxJobsPerDay: 40,
+    pause: null, backoffUntil: T0 + minutes(10), dayJobsLeft: 38, maxJobsPerDay: 40, autonomy: true,
   });
   const text = formatStatus(s);
   assert.match(text, /^📊 kt の状況 \(過去 24h \/ 2026-09-05 17:00 JST\)/);
@@ -86,6 +86,26 @@ test('formatStatus: 4 節が必ず出て (0 件は「なし」)、運転の行�
   assert.match(text, /\*\*判断待ち \(1 件\)\*\*\n・#5 3h0m 「task 5」 \(要人間: 差し戻し 2 回目 → 原因を直して復帰 \(resume\)\) <#T5>/);
   assert.match(text, /\*\*運転\*\*: ▶️ 自律運転は動いています \/ ⏳ バックオフ中 \(10 分後に明ける\) \/ 日次予算 残 38 \/ 40 \/ 着手待ち 0 件 \/ job 2 本 \(failed 1 \/ ok 1\)/);
   assert.ok(text.length <= MAX_STATUS_CHARS);
+});
+
+test('formatStatus: 自律運転を設定していないチャンネルに「動いています」と書かない', () => {
+  // メンションで job を起こすだけのチャンネル (SETUP の一周で使う形) に
+  // 「▶️ 自律運転は動いています」と出ると、動いていないものが動いていると読める。
+  // job の数字は従来どおり出す — そこが素の job の唯一の手がかり
+  const base = {
+    channelName: 'my-project', tasks: [], now: T0, statusOf: () => ({ status: 'done' }),
+    runs: [run('T1'), run('T2')],
+  };
+  const plain = formatStatus(summarizeStatus(base));
+  assert.match(plain, /\*\*運転\*\*: 自律運転は未設定 \(このチャンネルはメンションで動きます\)/);
+  assert.match(plain, /job 2 本 \(ok 2\)/);
+  assert.equal(/自律運転は動いています/.test(plain), false);
+
+  // 自律運転のチャンネルは従来どおり
+  assert.match(formatStatus(summarizeStatus({ ...base, autonomy: true })), /\*\*運転\*\*: ▶️ 自律運転は動いています/);
+  // 止められているときは、未設定でも状態を隠さない (kill switch は全体に効く)
+  const paused = formatStatus(summarizeStatus({ ...base, pause: { paused: true, at: iso(T0 - hours(1)), by: 'U1' } }));
+  assert.match(paused, /⏸ 自律運転は停止中/);
 });
 
 test('formatStatus: 検証記録なしは不明と書き、実行記録が読めなければ job の数字を出さず、pause は誰がいつ止めたか', () => {

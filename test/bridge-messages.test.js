@@ -196,7 +196,13 @@ test('入口で捨てるもの: 自分の発言・DM・認可外・受付停止�
 
   const unregistered = fakeMessage({ channel: fakeThread('T2', { parentName: 'zzz' }) });
   await h.onMessage(h.fable, unregistered);
-  assert.equal(unregistered.replies[0].content, '⚠️ このチャンネルは config.policy.json の channels に未登録です');
+  // **何と食い違っているのかを出す。** 「未登録です」だけだと、綴り違いなのか場所違いなのかが
+  // Discord 側から分からない (実地の導入で詰まった: 2026-09-12)。スレッドなら親の名前で判定
+  assert.equal(
+    unregistered.replies[0].content,
+    '⚠️ このチャンネル (`zzz`) は config.policy.json の channels に未登録です'
+    + ' — 登録されているのは `kt` (名前は完全一致・スレッドは親チャンネルの名前で判定)',
+  );
   assert.equal(h.enqueued.length, 0);
 
   h.lifecycle.stopAccepting();

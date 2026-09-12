@@ -2,7 +2,7 @@
 // 起動しない運用メッセージの投稿。job を起こす経路はここに無い (それは src/bridge/messages.js)。
 import { Client as DiscordClient, Events, GatewayIntentBits } from 'discord.js';
 import { SLASH_COMMANDS } from '../commands.js';
-import { channelConfigForName } from '../config.js';
+import { channelConfigForName, channelNameOf, isExampleId } from '../config.js';
 import { sendSafe } from '../mentions.js';
 
 /** その時刻の Discord snowflake (メッセージ ID の下限として使う。epoch は 2015-01-01) */
@@ -47,18 +47,21 @@ export function createDiscordWiring({ config, bots }) {
         `[${bot.key}] スラッシュコマンド登録: ${SLASH_COMMANDS.map((c) => `/${c.name}`).join(' ')}`,
       );
     } catch (err) {
-      console.error(
-        `[${bot.key}] スラッシュコマンドの登録に失敗: ${err.message}\n` +
-          '  → メンション経路は生きています。原因はメッセージの通り ' +
-          '(guildId の指定違い・権限・レート制限など) — 直したら再起動 (SETUP.md トラブルシューティング)',
-      );
+      // **例のままの guildId は真っ先に言う。** 実在しないサーバーへ登録しようとするので
+      // `Missing Access` になるが、その文言からは設定の取り違えだと読めない
+      // (実地の導入で詰まった: 2026-09-12)
+      const hint = isExampleId(config.guildId)
+        ? `  → guildId が設定例のまま (${config.guildId}) です — config.secrets.json に実際のサーバー ID を`
+          + ' 書いて再起動 (SETUP.md §1)。この値のままではメンションも拒否されます'
+        : '  → メンション経路は生きています。原因はメッセージの通り '
+          + '(guildId の指定違い・権限・レート制限など) — 直したら再起動 (SETUP.md トラブルシューティング)';
+      console.error(`[${bot.key}] スラッシュコマンドの登録に失敗: ${err.message}\n${hint}`);
     }
   }
 
   function channelConfigFor(channel) {
-    const base = channel.isThread() ? channel.parent : channel;
-    if (!base) return null;
-    return channelConfigForName(config, base.name);
+    // 名前の決め方は `channelNameOf` が正本 (未登録の案内と同じ名前で判定する)
+    return channelConfigForName(config, channelNameOf(channel));
   }
 
   /** 自分以外の起動済み bot の、メンション判定に使う ID 群 */

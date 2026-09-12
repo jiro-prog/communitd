@@ -28,6 +28,12 @@ cp config.secrets.example.json config.secrets.json
 cp .env.example .env
 ```
 
+**この `cp` は初回だけ。** 一度書き始めたら**写し直さない** — 例で上書きすると、`cwd` は
+`C:/path/to/your/project` に、サーバー ID とユーザー ID は `000000000000000000` に巻き戻る。
+後の節を読み返して二度目の `cp` を打つのが、実地の導入でいちばん多かった詰まり方
+(`npm run doctor` が「設定例のまま」と ❌ を出すので気づける)。既にファイルがあるなら、
+差分を見ながら**手で足す**。
+
 **`config.policy.json` の例は 2 つある。** 上の `config.policy.example.json` は
 **写しただけで安全寄り** (`readonly` / `permissionMode: default`) — エージェントは読むだけで、
 ファイルは書き換えないしシェルも走らせない。§4 の委譲テスト (`hello.txt` を書く) まで進むなら、
@@ -356,27 +362,33 @@ Discord もモデルも動かさず、設定・トークン環境変数の有無
 最後の行が `診断: 起動できる見込み (⚠️ N 件)` なら次へ進んでよい。
 `診断: ❌ N 件 / ⚠️ M 件 — ❌ を直してから npm start` なら、上の ❌ 行がそのまま直す場所。
 
-**clone 直後に例をコピーしてトークンだけ入れ、`cwd` を直していないとこう出る**
+**clone 直後に例をコピーしてトークンだけ入れた状態ではこう出る**
 (`[cli]` の行と `[data]` の 2 行は環境で変わる — `data/` は初回起動時に作られるので、
 まだ無い状態では「確かめられなかった」になる):
 
 ```
 ✅ [config] config.policy.json + config.secrets.json は検証を通った (bot 2 体 / channel 1 件)
+❌ [config] guildId が設定例のまま (000000000000000000) — 起動を許可する Discord サーバーの ID に置き換える (SETUP.md §1。開発者モードでサーバー名を右クリック → ID をコピー)
+❌ [config] allowedUserIds が設定例のまま (000000000000000000) — 自分の Discord ユーザー ID に置き換える。例の値のままだと全メンションが拒否されます
+❌ [config] ownerUserId が設定例のまま (000000000000000000) — 自分のユーザー ID に置き換えるか、人間への通知を使わないならキーごと消す
 ✅ [roles] roles/_common.md のプロトコル版は一致
 ✅ [bots.manager] 環境変数 MANAGER_DISCORD_TOKEN は設定されている (値は表示しない)
 ✅ [bots.manager] 役割文 roles/manager.md のプロトコル版は一致
 ✅ [bots.worker] 環境変数 WORKER_DISCORD_TOKEN は設定されている (値は表示しない)
 ✅ [bots.worker] 役割文 roles/worker.md のプロトコル版は一致
-✅ [cli] <claude の実体パス> --version → 2.1.267 (Claude Code)
-❌ [channels.my-project] cwd C:/path/to/your/project を解決できません (存在しないか読めない)
+✅ [cli] <claude の実体パス> --version → 2.1.269 (Claude Code)
+❌ [channels.my-project] cwd が設定例のまま (C:/path/to/your/project) — このチャンネルで作業するディレクトリの絶対パスに置き換える (SETUP.md §0)
 ⚠️ [data] data/ の書き込み可否を確かめられなかった (無ければ起動時に作られる)
 ✅ [data] data/society.json は無いが society.mode は off — 台帳は要らない
 ✅ [discord] Discord への接続とモデルの起動は診断では行わない — `npm start` のログと SETUP.md §4 の動作確認で確かめる
 
-診断: ❌ 1 件 / ⚠️ 1 件 — ❌ を直してから npm start
+診断: ❌ 4 件 / ⚠️ 1 件 — ❌ を直してから npm start
 ```
 
-この ❌ 1 件だけになっていれば、あとは `cwd` を自分のプロジェクトの絶対パスに直すだけ。
+**「設定例のまま」の 4 件は、埋めるべき場所がまだ埋まっていないという意味**で、埋めれば消える。
+値の形 (非空の文字列) としては正しいので起動時の検証は通ってしまう — だからここで止める。
+**例の ID のまま起動すると、スラッシュコマンドの登録が `Missing Access` で落ち、メンションも
+全部拒否される** (どちらもログからは設定の取り違えだと読み取りにくい)。
 
 ### CLI が見つからないとき (`claudeBin` / `codexCmd`)
 
@@ -434,20 +446,34 @@ npm グローバルは `.cmd` シムで Node から直接起動できないの�
 - スレッドに `📋 実行前後の git status 差分` と (hooks を有効にしていれば) `🔧 ツール軌跡` が
   出ていること
 - `verify` を書いたチャンネルなら verify の結果行が出ていること
-- `/status` で「完了」に載ること (verify を書いていなければ「検証記録なし (不明)」と出る —
-  それが正しい表示)
+- `/status` の末尾の行に `job N 本 (ok N)` が出ていること。**「完了」の節はボードのタスク
+  (自律運転) 用**なので、メンションで動かしただけの job はそこには載らない。自律運転を
+  設定していないチャンネルでは、運転の行も `自律運転は未設定 (このチャンネルはメンションで
+  動きます)` と出る
+- bot を 2 体以上入れたサーバーでは、**`/status` や `/restart` をどのアプリのコマンドとして
+  打っても同じブリッジに届く** (同じプロセスが両方の bot に登録するため)
 
 ## トラブルシューティング
 
 - `/stop` `/restart` が Discord の入力候補に出ない → まず起動ログを見る。`スラッシュコマンドの登録に失敗`
   が出ていればその理由 (権限・レート制限・`guildId` の指定間違いなど) が原因。ログ上は成功しているのに
   出ない場合は Discord クライアント側のキャッシュなので、Ctrl+R で再読込する
+- `スラッシュコマンドの登録に失敗: Missing Access` → **`guildId` が実在しないサーバーを指している。**
+  例のまま (`000000000000000000`) なら案内にその旨が出る。書き換えたつもりなら、bot がそのサーバーに
+  招待されているかも確認する。この状態ではメンションも `guildId` 不一致で拒否される
+- **同じサーバーで 2 つのブリッジを動かしている** (例: 本番と試用) → スラッシュコマンドは
+  **プロセスごとに全 bot へ登録される**ので、入力候補には同じ `/restart` が複数並ぶ。どのアプリの
+  コマンドを選んだかで**止まるブリッジが変わる**。試用側を操作したいなら、そのブリッジの bot を
+  選ぶか、ターミナルで Ctrl-C → `npm start` する方が確実
 - `[<bot名>] ログイン失敗: Used disallowed intents` → **その bot だけ** MESSAGE CONTENT INTENT が未設定。
   Developer Portal → 該当アプリ → Bot → Privileged Gateway Intents で ON → Save → 再起動
 - `[<bot名>] ログイン失敗: An invalid token was provided` → `.env` のそのトークンが失効/貼り間違い。
   Reset Token して再記入
-- bot がメンションに無反応 → MESSAGE CONTENT INTENT の ON を確認。Discord のチャンネル名が
-  `config.policy.json` の `channels` のキーと一致しているか確認
+- bot がメンションに無反応 → MESSAGE CONTENT INTENT の ON を確認。`guildId` と `allowedUserIds` が
+  例の値のままだと**全メンションが黙って拒否される** (`npm run doctor` が ❌ で教える)
+- `⚠️ このチャンネル (…) は config.policy.json の channels に未登録です` → 警告に**今のチャンネル名と
+  登録されている名前**が並ぶので、綴りを見比べる。判定は完全一致で、スレッドは親チャンネルの名前を見る
+  (Discord は作成時に小文字化・空白を `-` に変えるが、`_` はそのまま残る)
 - `npm run doctor` / `npm start` が `node: .env: not found` だけ出して終わる → `.env` がまだ無い。
   `cp .env.example .env` してトークンを記入する (どちらも `--env-file=.env` で起動するため)
 - `no JSON result` エラー → そのチャンネルの `cwd` で `claude -p "test"` を手で叩いて認証・動作を確認

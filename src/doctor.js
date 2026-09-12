@@ -11,7 +11,9 @@ import { checkRoleProtocol } from './protocol.js';
 // CLI の在り処は clicmd.js が正本。**ランタイム側 (claude.js / codex.js) からは取らない** —
 // doctor は「読むだけ」の純粋モジュールなので、子プロセスを起こすモジュールに依存させない
 import { CLAUDE_CLI, CODEX_CLI, cliCmdFailure, cliCmdHint, resolveConfiguredCommand } from './clicmd.js';
-import { resolveAutonomy, resolveHooksEnabled, resolveVerifyCommand } from './config.js';
+import {
+  isExampleCwd, isExampleId, resolveAutonomy, resolveHooksEnabled, resolveVerifyCommand,
+} from './config.js';
 import { isUnsafeCwd } from './project.js';
 import { resolveSociety } from './society-policy.js';
 // 台帳の分類はランタイムと同じ関数を使う (判定を 2 か所に書かない)。
@@ -54,7 +56,19 @@ export function diagnose({
   const bots = Object.entries(config.bots ?? {});
   const channels = Object.entries(config.channels ?? {});
   add('ok', 'config', `config.policy.json + config.secrets.json は検証を通った (bot ${bots.length} 体 / channel ${channels.length} 件)`);
-  if (!config.ownerUserId) {
+  // **設定例のままの ID は「書いてある」ので検証は通る。** 通ったまま起動すると、
+  // スラッシュコマンドは Missing Access で落ち、メンションは全部拒否されるのに
+  // ログからは理由が読めない (実地の導入で両方起きた: 2026-09-12)
+  if (isExampleId(config.guildId)) {
+    add('fail', 'config', `guildId が設定例のまま (${config.guildId}) — 起動を許可する Discord サーバーの ID に置き換える (SETUP.md §1。開発者モードでサーバー名を右クリック → ID をコピー)`);
+  }
+  const exampleUsers = (Array.isArray(config.allowedUserIds) ? config.allowedUserIds : []).filter(isExampleId);
+  if (exampleUsers.length > 0) {
+    add('fail', 'config', `allowedUserIds が設定例のまま (${exampleUsers[0]}) — 自分の Discord ユーザー ID に置き換える。例の値のままだと全メンションが拒否されます`);
+  }
+  if (isExampleId(config.ownerUserId)) {
+    add('fail', 'config', `ownerUserId が設定例のまま (${config.ownerUserId}) — 自分のユーザー ID に置き換えるか、人間への通知を使わないならキーごと消す`);
+  } else if (!config.ownerUserId) {
     add('warn', 'config', 'ownerUserId が未設定 — bot からの [[notify:owner]] (裁定待ちの呼び出し) は実メンションになりません');
   }
 
@@ -135,6 +149,11 @@ export function diagnose({
     const scope = `channels.${name}`;
     const cwd = cc?.cwd;
     if (typeof cwd !== 'string' || cwd === '') { add('fail', scope, 'cwd が未設定'); continue; }
+    // 「解決できません」より先に言う — 例のままなのか、書いたパスが無いのかで直し方が違う
+    if (isExampleCwd(cwd)) {
+      add('fail', scope, `cwd が設定例のまま (${cwd}) — このチャンネルで作業するディレクトリの絶対パスに置き換える (SETUP.md §0)`);
+      continue;
+    }
     const real = attempt(() => fs.realpath(cwd));
     if (!real) { add('fail', scope, `cwd ${cwd} を解決できません (存在しないか読めない)`); continue; }
     if (isUnsafeCwd(String(real).replaceAll('\\', '/'), root)) {

@@ -337,6 +337,54 @@ export function channelConfigForName(config, channelName) {
 }
 
 /**
+ * 設定を引く名前。**スレッドは親チャンネルの名前で判定する** —
+ * 判定に使う名前をここ 1 か所で決めて、警告文と実際の解決がずれないようにする。
+ * @returns {string|null}
+ */
+export function channelNameOf(channel) {
+  const base = channel?.isThread?.() ? channel.parent : channel;
+  return typeof base?.name === 'string' ? base.name : null;
+}
+
+/**
+ * 未登録チャンネルの案内。**今の名前と、登録されている名前を並べる** —
+ * 「未登録です」だけだと、綴り違いなのか場所違いなのかが Discord 側から分からない
+ * (実地の導入で実際に詰まった: 2026-09-12)。
+ */
+export function unregisteredChannelNotice(config, channelName) {
+  // チャンネル名は Discord 由来なので、引用が壊れない形に均す (メンションは
+  // 送信側の allowedMentions が既に殺している)
+  const shown = String(channelName ?? '(不明)').replace(/[`\r\n]/g, '').slice(0, 60) || '(不明)';
+  // 名前は**認可を通った人にしか出ない** (メンションもスラッシュも先に認可を見る)。
+  // 多いときは頭だけ — 1 通に収まらないと肝心の「今の名前」が読めなくなる
+  const names = Object.keys(config?.channels ?? {});
+  const shownNames = names.slice(0, 8).map((n) => `\`${n}\``).join(' / ');
+  const more = names.length > 8 ? ` ほか ${names.length - 8} 件` : '';
+  const registered = names.length === 0
+    ? '登録されているチャンネルがありません'
+    : `登録されているのは ${shownNames}${more}`;
+  return `⚠️ このチャンネル (\`${shown}\`) は config.policy.json の channels に未登録です`
+    + ` — ${registered} (名前は完全一致・スレッドは親チャンネルの名前で判定)`;
+}
+
+/**
+ * 設定例のまま残っている ID か (`config.secrets.example.json` の `000000000000000000`)。
+ *
+ * **写しただけで起動できてしまうのがいちばん分かりにくい**: guildId が例のままだと
+ * スラッシュコマンドの登録が `Missing Access` で落ち、allowedUserIds が例のままだと
+ * 全メンションが黙って拒否される (実地の導入で両方起きた: 2026-09-12)。
+ */
+export function isExampleId(value) {
+  return typeof value === 'string' && /^0{5,}$/.test(value.trim());
+}
+
+/** 設定例のまま残っている作業ディレクトリか (`C:/path/to/your/project`) */
+export function isExampleCwd(value) {
+  if (typeof value !== 'string') return false;
+  return /(^|[/\\])path[/\\]to[/\\]your[/\\]project[/\\]?$/i.test(value.trim());
+}
+
+/**
  * 人間 (作者) の呼び名。config.ownerNames で上書きできる。
  * 通知そのものは制御フッター [[notify:owner]] が決めるので、この名前は
  * 「平文で呼んでも起動しない」ことを知らせる旧記法検出にだけ使う (src/mentions.js)。

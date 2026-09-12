@@ -44,6 +44,7 @@ import {
   resolveToolApprovalTtlMs,
   resolveToolApprovalWaitMs,
   resolveTranscriptCharBudget,
+  unregisteredChannelNotice,
   validateConfig,
 } from './config.js';
 import { readContractKind } from './contract.js';
@@ -752,7 +753,7 @@ const onInteraction = createInteractionHandler({
  * ボードの無い配備・自律運転の無いチャンネルでも、実行記録があれば job の数字は出す。
  */
 function statusReport(channelName) {
-  if (!channelName) return '⚠️ このチャンネルは config.policy.json の channels に未登録です';
+  if (!channelName) return unregisteredChannelNotice(config, channelName);
   const configured = channelConfigForName(config, channelName);
   const autonomy = configured ? resolveAutonomy(configured) : null;
   const state = tickStates.get(channelName) ?? null;
@@ -771,6 +772,8 @@ function statusReport(channelName) {
     backoffUntil: state?.backoffUntil ?? 0,
     dayJobsLeft: autonomy?.enabled ? Math.max(0, autonomy.maxJobsPerDay - (Number(state?.jobsToday) || 0)) : null,
     maxJobsPerDay: autonomy?.enabled ? autonomy.maxJobsPerDay : null,
+    // このチャンネルで自律運転が有効か (未設定のチャンネルに「動いています」と出さない)
+    autonomy: autonomy?.enabled === true,
   });
   return formatStatus(summary, { escape: sanitizeForDisplay });
 }

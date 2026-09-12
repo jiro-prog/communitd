@@ -114,6 +114,48 @@ test('validateConfig が落とす設定は doctor でも ❌ になる (必須�
   assert.match(formatDiagnosis(out), /診断: ❌ 1 件/);
 });
 
+test('設定例のまま残っている ID と cwd は ❌ (検証は通ってしまうので doctor で止める)', () => {
+  // `000000000000000000` も `C:/path/to/your/project` も「非空の文字列」なので
+  // validateConfig は通す。そのまま起動すると、スラッシュコマンドは Missing Access で
+  // 落ち、メンションは全部拒否される — 理由はログから読めない (実地の導入で起きた)
+  const example = {
+    guildId: '000000000000000000',
+    allowedUserIds: ['000000000000000000'],
+    ownerUserId: '000000000000000000',
+    claudeBin: 'claude',
+    bots: {
+      fable: {
+        tokenEnv: 'FABLE_TOKEN', displayName: 'Fable', model: 'opus', rolePromptFile: 'roles/fable.md',
+      },
+    },
+    channels: { 'my-project': { cwd: 'C:/path/to/your/project' } },
+  };
+  assert.deepEqual(validateConfig(example), [], '前提: 設定例のままでも検証は通る');
+
+  const out = harness({ config: example, env: { FABLE_TOKEN: 'x' } });
+  assert.equal(out.ok, false);
+  const fails = out.findings.filter((f) => f.level === 'fail').map((f) => f.message);
+  assert.equal(fails.length, 4, fails.join(' / '));
+  assert.ok(fails.some((m) => /^guildId が設定例のまま \(000000000000000000\)/.test(m)), fails.join(' / '));
+  assert.ok(fails.some((m) => /^allowedUserIds が設定例のまま/.test(m)), fails.join(' / '));
+  assert.ok(fails.some((m) => /^ownerUserId が設定例のまま/.test(m)), fails.join(' / '));
+  // cwd は「解決できません」ではなく「例のまま」と言う (直し方が違う)
+  const cwd = out.findings.find((f) => f.scope === 'channels.my-project');
+  assert.equal(cwd.level, 'fail');
+  assert.match(cwd.message, /^cwd が設定例のまま \(C:\/path\/to\/your\/project\)/);
+  assert.equal(/解決できません/.test(cwd.message), false);
+
+  // 実際の値を書いてあれば何も言わない (0 が並ぶだけの別の ID を誤検知しない)
+  const real = harness({
+    config: {
+      ...example, guildId: '123456789012345678', allowedUserIds: ['1010'], ownerUserId: '1010',
+      channels: { 'my-project': { cwd: 'C:/work/kt' } },
+    },
+    env: { FABLE_TOKEN: 'x' },
+  });
+  assert.deepEqual(real.findings.filter((f) => f.level === 'fail'), []);
+});
+
 test('トークンは有無だけ見て値を出さない。未設定は fail', () => {
   const out = harness({ env: { FABLE_TOKEN: 'super-secret-token-value' } });
   const fable = out.findings.find((f) => f.scope === 'bots.fable' && /FABLE_TOKEN/.test(f.message));
