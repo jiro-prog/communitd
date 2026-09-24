@@ -69,7 +69,7 @@ export function createJobQueueWiring({
     } catch (err) {
       console.error(`[jobruns] ${item.jobId}: 開始を記録できませんでした (実行は続けます): ${err.message}`);
     }
-    // 社会の Action に結ぶ job なら「走り出した」を台帳へ (§5 の running)
+    // 社会の Action に結ぶ job なら「走り出した」を台帳へ (running)
     const actionId = societyActionOf(item.jobId);
     if (actionId) noteSociety(`${actionId} の running`, () => society.noteRunning(actionId));
     // job 側が終わり方の文脈 (handoff 先・task の遷移・成果の証拠) をここへ書く
@@ -93,7 +93,7 @@ export function createJobQueueWiring({
           verified: metrics.verifyPassed === 1 ? true : metrics.verifyPassed === 0 ? false : null,
         },
       });
-      // job の結果を Action へ (§5 の settled)。**配送の後**なので、外へ出したものは出し終えている。
+      // job の結果を Action へ (settled)。**配送の後**なので、外へ出したものは出し終えている。
       // outcome / reason は実行記録と同じ値を使う (台帳と記録で食い違わせない)。
       //
       // **構造化された戻り (`case-turn`) が既に写していれば、ここは何もしない** (S2-3a) —

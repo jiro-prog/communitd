@@ -41,7 +41,7 @@ export function approvalItem(task) {
   const item = { id: String(task.id), title: String(task.title) };
   const rationale = String(task.rationale ?? '').trim();
   if (rationale) item.rationale = rationale;
-  // 重複を見つける材料 (§9.3)。宣言が無ければ載せない (空配列は様式が拒む)
+  // 重複を見つける材料。宣言が無ければ載せない (空配列は様式が拒む)
   if (Array.isArray(task.touch) && task.touch.length > 0) item.touch = [...task.touch];
   if (Number.isSafeInteger(task.jobBudget) && task.jobBudget > 0) item.job_budget = task.jobBudget;
   return item;
@@ -71,11 +71,11 @@ async function isAncestor(repoRoot, a, b) {
 }
 
 /**
- * merge の申告 (`merge_commit`) を照合するための git の事実 (§12.3 (2))。
+ * merge の申告 (`merge_commit`) を照合するための git の事実。
  *
  * ここは**集めるだけ**で判断はしない (判断は planReview)。確かめられなかったものは
  * null / false のまま返す — 「読めなかった」を「真」に倒すと、検収の申告だけで
- * merged が書ける状態に戻る (docs/reviews/2026-09-06-product-health.md D1)。
+ * merged が書ける状態に戻る。
  */
 async function collectMergeFacts({ repoRoot, sha, baseBranch, branch }) {
   const facts = {
@@ -94,7 +94,7 @@ async function collectMergeFacts({ repoRoot, sha, baseBranch, branch }) {
 }
 
 /**
- * 適用 task (org-apply) の検収で `merge_commit` が指しているものを照合する (§12.3 (2))。
+ * 適用 task (org-apply) の検収で `merge_commit` が指しているものを照合する。
  *
  * **この経路では merge を打つのはブリッジ自身** (`mergeApplyTask`) なので、検収の時点で
  * マージコミットはまだ存在しない。reviewer が書けるのは**検収した commit** =
@@ -110,7 +110,7 @@ function checkAppliedCommit({ contract, proposal, task }) {
   const applied = String(proposal?.receipt?.appliedCommit ?? '').trim().toLowerCase();
   const declared = String(contract?.merge_commit ?? '').trim().toLowerCase();
   // receipt が無い (旧レコード・適用の記録が落ちた) ときは照合できない = 適用しない。
-  // 「確かめられない」を「確かめた」へ倒さないのは §12.3 (2) の全体方針と同じ
+  // 「確かめられない」を「確かめた」へ倒さないのは全体の方針と同じ
   if (applied !== '' && declared !== '' && applied.startsWith(declared)) return null;
   return `⚠️ 適用タスク #${task.id} の検収 commit が receipt (${applied ? applied.slice(0, 12) : '未記録'}) と一致しません`
     + ' — 判定を適用していません'
@@ -118,7 +118,7 @@ function checkAppliedCommit({ contract, proposal, task }) {
 }
 
 /**
- * そのタスクを**実装した bot** (§12.3 (2) の「worker 本人には通させない」用)。
+ * そのタスクを**実装した bot** (「worker 本人には通させない」用)。
  *
  * 着手 (`in-progress`) の `by` はスケジューラ自身なので、bot キーとして残るのは
  * 完了報告でレビューへ進めた `review` の `by` — 実装した本人の唯一の記録がここにある。
@@ -160,12 +160,12 @@ export function createBoardWiring({
   safeProposalContext, releaseApplyWorktree,
 }) {
   /**
-   * 検査を通った起票をボードへ載せる (§3.3)。
+   * 検査を通った起票をボードへ載せる。
    *
    * **承認はしない。** proposed のまま積むところまでで、着手できるようになるのは
    * 承認を経てから (承認回路は M0-7)。
    *
-   * **載せる前に制動をかける** (§9.1(b) / §9.2(a) — 判断は `planFiling`)。
+   * **載せる前に制動をかける** (判断は `planFiling`)。
    * 既にあるタスクと同じファイルを掴む起票は載せず、枠 (maxOpenTasks) を超えた分は
    * 次の巡回へ回す。どちらもボードには触らないので、次の巡回でまた起票できる。
    *
@@ -218,7 +218,7 @@ export function createBoardWiring({
   }
 
   /**
-   * 起票が載ったら承認 job を起こす (§3.2 裁定: 起票 Opus・承認 Fable)。
+   * 起票が載ったら承認 job を起こす (裁定: 起票 Opus・承認 Fable)。
    *
    * **enqueue は呼ばない。** 契約を保存して制御メンションを投げるだけで、あとは
    * 人間が handoff したときと同じ MessageCreate 経路が動く。job はチャンネルの
@@ -231,7 +231,7 @@ export function createBoardWiring({
    */
   async function requestApproval({ filed, cc, autonomy, bot, thread }) {
     const stay = ' — proposed のまま残ります (次の巡回の一覧には出ます)';
-    // kill switch (§3.7)。**ボードはそのまま**にして召喚だけ止める —
+    // kill switch。**ボードはそのまま**にして召喚だけ止める —
     // 起票を取り消すと、再開したときに巡回からやり直すことになる
     if (pauseStore.paused) {
       console.log(`[pause] ${cc.channelName}: 停止中のため承認を召喚しませんでした`);
@@ -256,7 +256,7 @@ export function createBoardWiring({
       approve: [],
       drop: [],
       pending: filed.map(approvalItem),
-      // 重複を見つける材料 (§9.3)。**今回の起票は除く** — 既に proposed でボードに
+      // 重複を見つける材料。**今回の起票は除く** — 既に proposed でボードに
       // 載っているので、そのまま渡すと参考欄に自分自身が並ぶ
       board: approvalBoard(scoutBoardView(board.list({ channel: cc.channelName })), {
         excludeIds: filed.map((task) => task.id),
@@ -315,7 +315,7 @@ export function createBoardWiring({
   }
 
   /**
-   * worker の完了報告を見てタスクをレビューへ進め、レビューを召喚する (§3.5 → §3.6)。
+   * worker の完了報告を見てタスクをレビューへ進め、レビューを召喚する。
    *
    * **完了の定義は「制御フッタの無い report」。** 自己呼び出しで区切った途中報告や
    * 上位へのエスカレーション (どちらもフッタがある) は仕事が続いているので進めない。
@@ -367,7 +367,7 @@ export function createBoardWiring({
   }
 
   /**
-   * レビュー担当を召喚する (§3.6)。手順は requestApproval と同じ型 —
+   * レビュー担当を召喚する。手順は requestApproval と同じ型 —
    * 契約を保存し、予算を 1 積み、種別を被せてから制御メンションを投げる。
    * **merge を実行するのはレビュー担当の shell 仕事**で、ブリッジは git を持たない。
    *
@@ -391,7 +391,7 @@ export function createBoardWiring({
       return { ok: false, note: `⚠️ レビュー担当 (${reviewerKey ?? '未設定'}) が起動していません${stay}` };
     }
     if (byWorker && reviewerKey === bot.key) {
-      // §6 の自己レビュー禁止。設定の不備なので、黙って通さず人間へ返す。
+      // 自己レビュー禁止。設定の不備なので、黙って通さず人間へ返す。
       // **見ているのは「実装した担当 == reviewer」**なので、worker の完了報告から
       // 来た経路だけが対象。`/review` (人間の出し直し) で打った bot は実装した担当では
       // ないので、ここで断ると reviewer 自身のコマンドから永久に出し直せなくなる
@@ -456,7 +456,7 @@ export function createBoardWiring({
   }
 
   /**
-   * レビューの判定をボードへ適用する (§3.6)。
+   * レビューの判定をボードへ適用する。
    * 判断は src/scheduler.js の planReview (純粋) が持ち、ここは実行と報告だけ。
    *
    * @returns {Promise<string>} スレッドへ出す 1 行
@@ -471,7 +471,7 @@ export function createBoardWiring({
     const autonomy = resolveAutonomy(cc);
     const counted = { sendBackCount: sendBackCount(task) };
 
-    // **検収の同一性は経路より前** (§12.3 (2)。Opus 指摘 2026-09-07 で前へ移した)。
+    // **検収の同一性は経路より前** ((2)。Opus 指摘 2026-09-07 で前へ移した)。
     // 召喚時の自己レビュー禁止 (requestReview) は `様式:task-review` タグで迂回できるので、
     // 適用側にも門を置く。適用 task も同じ門を通す — org 提案を当てた本人が
     // 「検収なしで role / policy を main へ入れる」道を残さないため
@@ -486,10 +486,10 @@ export function createBoardWiring({
         + ' — 判定を適用していません (実装した本人)';
     }
 
-    // **適用 task は経路が違う** (§3.9)。merge するのは receipt の commit OID だけで、
+    // **適用 task は経路が違う**。merge するのは receipt の commit OID だけで、
     // 通らなかったときの戻り先は作業ツリーではなく提案 (直す対象は diff なので、
     // 同じ枝へ差し戻しても直す担当が居ない)。取り込みの照合は planMerge が持つので、
-    // ここで git の事実を要求しない (§12.3 (2) — この経路は変えない)
+    // ここで git の事実を要求しない (この経路は変えない)
     const applying = proposals ? findApplyProposal(proposals, task.id) : null;
     if (applying) {
       const applyPlan = planReview(contract, { ...counted, mergeCheckedBy: 'planMerge' });
@@ -517,7 +517,7 @@ export function createBoardWiring({
     });
     if (plan.action === 'none') return `⚠️ ${plan.error} — 判定を適用していません`;
     // **照合できなかった merge は遷移させない。** ボードも枝も触らないので、取り込み直して
-    // `/review` で出し直せば同じ道をもう一度通れる (§12.3 (2))
+    // `/review` で出し直せば同じ道をもう一度通れる
     if (plan.action === 'hold') {
       return `⚠️ タスク #${task.id} は review のままです — ${plan.reason}。`
         + `取り込みを確かめてから \`/review ${task.id}\` で出し直してください`;
@@ -525,7 +525,7 @@ export function createBoardWiring({
 
     try {
       if (plan.action === 'complete') {
-        // **遷移が先・掃除は後** (§9.5)。撤去に失敗しても merged は取り消さない —
+        // **遷移が先・掃除は後**。撤去に失敗しても merged は取り消さない —
         // 成果は base へ入っているので、戻すとボードだけが現実とずれる
         board.complete(task.id, { by: bot.key, note: plan.note });
         return joinNote(
@@ -534,7 +534,7 @@ export function createBoardWiring({
         );
       }
       if (plan.action === 'drop') {
-        // 対象が不要と分かったときの後始末 (§9.4)。**duty イベントは配らない** —
+        // 対象が不要と分かったときの後始末。**duty イベントは配らない** —
         // DUTY_EVENT_KINDS に drop は無く、語彙を増やすのは config の裁定
         board.drop(task.id, { by: bot.key, reason: plan.reason });
         return joinNote(
@@ -544,7 +544,7 @@ export function createBoardWiring({
       }
       if (plan.action === 'block') {
         board.block(task.id, { by: bot.key, reason: plan.reason });
-        // 要人間で止まったことは組織の観測点 (§3.9) — 宣言した duty へ配る。
+        // 要人間で止まったことは組織の観測点 — 宣言した duty へ配る。
         // 判定を出した本人は外す (見えるのは自分の判断であって組織の乖離ではない)
         await notifyDutyEvent({
           eventKind: 'block',
@@ -575,7 +575,7 @@ export function createBoardWiring({
   }
 
   /**
-   * 適用 task の検収判定 (§3.9)。通常の task と違うのは 2 つ:
+   * 適用 task の検収判定。通常の task と違うのは 2 つ:
    *
    * - **merge するのは receipt の commit OID だけ** (`planMerge`)。ブランチ名で merge すると、
    *   コミットの後にその枝へ足された未承認の commit まで入る
@@ -648,7 +648,7 @@ export function createBoardWiring({
   }
 
   /**
-   * 判定のついたタスクの作業ツリーを片付ける (§9.5)。
+   * 判定のついたタスクの作業ツリーを片付ける。
    *
    * **ボードの遷移が済んでから呼ぶ。** 撤去は掃除であって判定の一部ではない — git が
    * 失敗したからといって merged を取り消すと、成果は base に入っているのにボードだけ戻る。
@@ -749,7 +749,7 @@ export function createBoardWiring({
     const task = board.findByThread(thread.id);
     const plan = planReissueReview({ task, id });
     if (!plan.ok) return plan;
-    // kill switch (§3.7) は素通りさせない。止めている理由 (暴走・調査中) は
+    // kill switch は素通りさせない。止めている理由 (暴走・調査中) は
     // レビューの召喚にも効いている — 出したいなら先に /resume する
     if (pauseStore.paused) {
       return { ok: false, reason: '自律運転が停止中です — `/resume` してから打ってください' };
@@ -770,7 +770,7 @@ export function createBoardWiring({
   }
 
   /**
-   * 承認の応答をボードへ適用する (§3.2)。
+   * 承認の応答をボードへ適用する。
    * 判断は src/scheduler.js の planApproval (純粋) が持ち、ここは実行と報告だけ。
    *
    * @returns {string} スレッドへ出す 1 行

@@ -14,7 +14,7 @@ import { canonicalCwd } from '../src/grants.js';
 import { HopTracker } from '../src/hops.js';
 import { ProposalStore } from '../src/proposals.js';
 
-// src/bridge/orgapply.js — org-apply (§3.9) の実体の解決: 適用チャンネル・git・Discord のスレッド。
+// src/bridge/orgapply.js — org-apply の実体の解決: 適用チャンネル・git・Discord のスレッド。
 // 順序の層 (src/orgapply-wiring.js) は本物だが、ここでは配線が結ぶ実体だけを見る。
 
 function captureConsole(t) {

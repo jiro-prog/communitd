@@ -218,7 +218,7 @@ test('/status はスラッシュコマンドとして登録され、実体へチ
   assert.ok(log.some((l) => /^edit:⚠️ 状況表示の機能が無効です/.test(l)), log.join(' | '));
 });
 
-// ---- 自律社会の 1 行 (docs/society-ledger.md・S2-1) ----
+// ---- 自律社会の 1 行 ----
 
 const societyStatus = (society) => formatStatus(summarizeStatus({
   channelName: 'kt', tasks: [], runs: [], now: T0, statusOf: () => ({ status: 'done' }), society,

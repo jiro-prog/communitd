@@ -8,7 +8,7 @@ import { createRecoveryService } from '../src/recovery-wiring.js';
 import { RecoveryStore, classifySendError, parseRequestMarker, requestMarker } from '../src/recovery.js';
 import { JobRunStore } from '../src/jobruns.js';
 
-// docs/reviews/2026-09-05-recovery-followup.md の残作業 A (受付側で失効した要求を断る) と
+// 復旧まわりの見直しで残った残作業 A (受付側で失効した要求を断る) と
 // B (送達不明を未送信と断定しない) の回帰テスト。
 
 const T0 = Date.parse('2026-09-05T09:00:00.000Z');

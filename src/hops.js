@@ -32,7 +32,7 @@ export class HopTracker {
     // 載っていないスレッド (= 人間が始めた普通のスレッド) は従来どおり動く。
     // スケジューラ (M0-4) が起こす無人のタスクスレッドには人間の発言が来ない =
     // hop リセットが永遠に起きないので、代わりにこの予算が「どこまで走ってよいか」
-    // を決める (docs/social-engineering.md §3.5)
+    // を決める
     this.budgets = new Map();
     this.budgetWarned = new Set(); // 予算切れ通知を出したスレッド (1 回だけ出す)
   }
@@ -119,7 +119,7 @@ export class HopTracker {
   }
 
   /**
-   * スレッドへ job 予算を払い出す (docs/social-engineering.md §3.5)。
+   * スレッドへ job 予算を払い出す。
    *
    * **再付与は積み増し。** 詰まったタスクへ人間が追い予算を出す操作なので、
    * 上書きだと「20 出したつもりが残 3 に戻っていた」が起きる。

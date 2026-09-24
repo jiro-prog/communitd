@@ -1,5 +1,4 @@
-// `/status` — 朝開いて 30 秒で「何が終わり・何が動き・何を決めるか」を掴むための 1 通
-// (docs/implementation-plan.md P5 / docs/social-engineering.md §11.5)。**純粋関数だけ**。
+// `/status` — 朝開いて 30 秒で「何が終わり・何が動き・何を決めるか」を掴むための 1 通。**純粋関数だけ**。
 //
 // 状態の判定は src/taskstatus.js (受信箱と同じ判定)、組版は src/inbox.js と同じ流儀
 // (どの節も見出しと先頭 1 行は必ず出す — 判断待ちの節が大量の行で消えないように)。
@@ -29,7 +28,7 @@ const ACTIVE_STATUSES = Object.freeze(['running', 'queued', 'handoff-wait', 'rev
  * @param {object[]} [p.runs] そのチャンネルの実行記録
  * @param {string|null} [p.runsError] 実行記録が読めない理由 (読めれば null)
  * @param {Array<{file: string, reason: string, gate?: boolean}>} [p.ledgerErrors] 読めない台帳
- *   (§12.3 (1))。`gate !== false` = **自律起動が止まる台帳** (pause / tasks / recovery /
+ *  。`gate !== false` = **自律起動が止まる台帳** (pause / tasks / recovery /
  *   job-runs / tick-states / proposals)。それ以外は読めないことだけを出す —
  *   sessions.json の破損で「自律起動は止まっています」と書くと、表示と実態がずれる
  * @param {number} p.now
@@ -107,7 +106,7 @@ export function summarizeStatus({
     operation: {
       pause, backoffUntil: Number(backoffUntil) || 0, dayJobsLeft, maxJobsPerDay, autonomy: autonomy === true,
     },
-    // 自律社会 (docs/society-ledger.md)。**渡されなければ null = 行を出さない** —
+    // 自律社会。**渡されなければ null = 行を出さない** —
     // 社会を持たない配備の /status を 1 行増やさない
     society: society && typeof society === 'object' ? society : null,
   };

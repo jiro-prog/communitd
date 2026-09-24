@@ -100,7 +100,7 @@ function harness(t, {
   ]);
   const hops = new HopTracker(12, 3);
   const lifecycle = createLifecycle();
-  // 制御台帳のどれか 1 つが読めない状況 (§12.3 (1))。本物の store を壊れたファイルで開く
+  // 制御台帳のどれか 1 つが読めない状況。本物の store を壊れたファイルで開く
   const LEDGER_CLASSES = {
     pauseStore: [PauseStore, 'pause.json'],
     jobRuns: [JobRunStore, 'job-runs.json'],
@@ -231,7 +231,7 @@ test('pause 中は行動を選ばず、ログは止めている間 1 回だけ�
   assert.equal(h.tickStates.get('kt').jobsToday, 0);
 });
 
-test('制御台帳が 1 つでも読めなければ何も選ばず、ログは 1 回だけ (§12.3 (1))', async (t) => {
+test('制御台帳が 1 つでも読めなければ何も選ばず、ログは 1 回だけ', async (t) => {
   for (const dep of ['pauseStore', 'jobRuns', 'recoveryStore', 'tickStateStore']) {
     const h = harness(t, {
       tasks: [{ title: 'lint' }],

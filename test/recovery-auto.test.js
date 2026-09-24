@@ -20,7 +20,7 @@ const T0 = Date.parse('2026-09-05T09:00:00.000Z');
 const minutes = (n) => n * 60000;
 const iso = (ms) => new Date(ms).toISOString();
 
-// ---- 設定 (§11.4) ----
+// ---- 設定 ----
 
 test('autonomy.recovery は既定 observe / 5 分 / 2 回 / [5, 15] で、書けば上書きできる', () => {
   const def = resolveAutonomy({ autonomy: { enabled: true } }).recovery;
@@ -150,7 +150,7 @@ test('planRecovery: 上限・pause・予算・日次予算・台帳の不信・�
   const halt = plan({ jobRunsHealthy: false });
   assert.equal(halt.action, 'halt');
   assert.match(halt.reason, /制御台帳が信用できない \(job-runs\.json\)/);
-  // 実行記録以外の制御台帳が読めないときも同じ (§12.3 (1))。理由に対象ファイルが入る
+  // 実行記録以外の制御台帳が読めないときも同じ。理由に対象ファイルが入る
   const other = plan({ brokenLedgers: [{ file: 'pause.json', reason: 'JSON として読めません' }] });
   assert.equal(other.action, 'halt');
   assert.match(other.reason, /制御台帳が信用できない \(pause\.json\)/);
@@ -195,7 +195,7 @@ function harness({
       findByThread: (id) => tasks.find((t) => t.threadId === id) ?? null,
     },
     jobRuns,
-    // 読めない pause.json は「停止していない」ではない (§12.3 (1))
+    // 読めない pause.json は「停止していない」ではない
     pauseStore: breakPause ? brokenPauseStore(dir) : { paused },
     channels: ['kt'],
     autonomyFor: () => ({

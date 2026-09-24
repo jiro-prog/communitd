@@ -172,39 +172,39 @@ export function resolveChannelRoster(cc = {}) {
 }
 
 /**
- * 自律運転 (docs/social-engineering.md §3.7) のチャンネル設定。
+ * 自律運転のチャンネル設定。
  *
- * スケジューラ (§7-4、未実装) が tick ごとに読む値。**既定は「何も起きない」側**で、
+ * スケジューラ (未実装) が tick ごとに読む値。**既定は「何も起きない」側**で、
  * `enabled: true` と明示的に書いたチャンネルだけが自律起動の対象になる。
  * 綴り違い・型不正・範囲外は起動時検証 (validateAutonomy) が落とすので、
  * ここは黙って既定へ倒して fail-closed にする。
  */
 export const DEFAULT_AUTONOMY_ENABLED = false;
 
-/** 方向性ドキュメント = 社会の憲法 (§3.4)。チャンネルの cwd 基準 */
+/** 方向性ドキュメント = 社会の憲法。チャンネルの cwd 基準 */
 export const DEFAULT_DIRECTION_FILE = 'docs/direction.md';
 
 /**
- * タスクの作業ツリーを生やす基点 (§8-1)。**既定ブランチの自動検出はしない** —
+ * タスクの作業ツリーを生やす基点。**既定ブランチの自動検出はしない** —
  * 検出に頼ると、たまたま別のブランチが出ていた日に「前のタスクの上に積まれた」
  * (#9 と同じ壊れ方) が静かに再発する。書いてある方が事故らない (Sol 推奨 2026-08-28)。
  */
 export const DEFAULT_BASE_BRANCH = 'main';
 
-/** 同時に走らせるタスク数 (§3.7 ペース制御・裁定 2026-08-27「同時タスク 2 くらいから」) */
+/** 同時に走らせるタスク数 (ペース制御・裁定 2026-08-27「同時タスク 2 くらいから」) */
 export const DEFAULT_MAX_CONCURRENT_TASKS = 2;
 
 /** そのチャンネルの自律 job の 1 日あたり上限 (人間メンション起点の job は数えない) */
 export const DEFAULT_MAX_JOBS_PER_DAY = 40;
 
 /**
- * 1 タスクへ払い出す job 予算 (§3.5)。
+ * 1 タスクへ払い出す job 予算。
  * 値の正本はボード側 (board.js) — 「設定を書かなかったチャンネル」と
  * 「予算を渡さずに起票したタスク」で違う数字が効くと追いかけられなくなる。
  */
 export const DEFAULT_TASK_JOB_BUDGET = DEFAULT_JOB_BUDGET;
 
-/** スカウト (§3.3) を起こす間隔 (分) */
+/** スカウトを起こす間隔 (分) */
 export const DEFAULT_SCOUT_INTERVAL_MIN = 60;
 
 /** 未着手 (proposed + approved) がこの数あればスカウトを起こさない (起票だけが溜まるのを防ぐ) */
@@ -230,7 +230,7 @@ export const AUTONOMY_KEYS = [
 export const AUTONOMY_SCOUT_KEYS = ['bot', 'intervalMin', 'maxOpenTasks'];
 export const AUTONOMY_WORKER_KEYS = ['bots'];
 
-// ---- 自動復旧 (docs/social-engineering.md §11.4) ----
+// ---- 自動復旧 ----
 
 /** `autonomy.recovery` に書けるキー */
 export const AUTONOMY_RECOVERY_KEYS = ['mode', 'graceMin', 'maxAutoRetries', 'retryDelaysMin'];
@@ -299,7 +299,7 @@ export function resolveAutonomy(cc = {}) {
 }
 
 /**
- * `autonomy.recovery` → 実効値 (§11.4)。書いていない配備は observe (起こさない・観測だけ)。
+ * `autonomy.recovery` → 実効値。書いていない配備は observe (起こさない・観測だけ)。
  * 読めない値は既定へ倒す — 検証は validateAutonomy が別に落とすので、ここは形を揃えるだけ
  */
 export function resolveRecovery(value) {
@@ -636,7 +636,7 @@ function isPositiveInt(v) {
 }
 
 /**
- * 自律運転設定の不変条件 (docs/social-engineering.md §3.7)。
+ * 自律運転設定の不変条件。
  *
  * ここは**人が見ていない間に動く機構の設定**なので、他のキーより強く落とす:
  * 未知キー・型不正・範囲外に加えて、担当に書いた bot キーが `config.bots` に
@@ -752,7 +752,7 @@ export function validateAutonomy(autonomy, { channel = '<channel>', botKeys = []
     }
   }
 
-  // 自動復旧 (§11.4)。未知キー・型違いは起動時に落とす — 「observe のつもりが auto」や
+  // 自動復旧。未知キー・型違いは起動時に落とす — 「observe のつもりが auto」や
   // 「上限 2 のつもりが無制限」が無症状で進む設定なので、他のキーと同じ強さで断る
   if (autonomy.recovery !== undefined) {
     const r = autonomy.recovery;
@@ -785,7 +785,7 @@ export function validateAutonomy(autonomy, { channel = '<channel>', botKeys = []
 
   // enabled のチャンネルにだけかかる不変条件。書き損じではなく「危ない組み合わせ」を止める
   if (autonomy.enabled === true) {
-    // 自律運転は人が見ていない間に main へ昇格する (§3.6)。機械検証が無いチャンネルで
+    // 自律運転は人が見ていない間に main へ昇格する。機械検証が無いチャンネルで
     // 有効にすると、壊れたまま merge される経路だけが残る
     if (!hasVerify) {
       errors.push(
@@ -793,14 +793,14 @@ export function validateAutonomy(autonomy, { channel = '<channel>', botKeys = []
           '— 人が見ていない間に main へ昇格するので、機械検証の無いチャンネルでは有効にしない',
       );
     }
-    // §6 規約層「自己レビュー禁止 (執筆と検収は別 bot)」を、設定だけで破れる形を潰す。
+    // 規約「自己レビュー禁止 (執筆と検収は別 bot)」を、設定だけで破れる形を潰す。
     // worker が reviewer 1 人しか居ないと、必ず自分の書いたものを自分で通すことになる
     const resolved = resolveAutonomy({ autonomy });
     const workers = resolved.worker.bots;
     if (resolved.reviewer && workers.length > 0 && workers.every((k) => k === resolved.reviewer)) {
       errors.push(
         `${at}: worker.bots が reviewer (${resolved.reviewer}) だけになっている ` +
-          '— 執筆と検収は別 bot にする (自己レビュー禁止・§6)',
+          '— 執筆と検収は別 bot にする (自己レビュー禁止)',
       );
     }
   }
@@ -808,7 +808,7 @@ export function validateAutonomy(autonomy, { channel = '<channel>', botKeys = []
   return errors;
 }
 
-// ---- 発議と組織裁定 (docs/social-engineering.md §3.9) ----
+// ---- 発議と組織裁定 ----
 
 /** `initiative` が持てるキー (増やすときは validateInitiative も直す) */
 export const INITIATIVE_KEYS = ['enabled', 'execBotKeys', 'applyChannel'];
@@ -821,7 +821,7 @@ export function isInitiativeEnabled(config = {}) {
 }
 
 /**
- * `work | process` を経営裁量で裁定できる bot (§3.9 の CEO 代理)。
+ * `work | process` を経営裁量で裁定できる bot (CEO 代理)。
  *
  * **既定は空 = 誰も裁定できない** (fail-closed)。裁定権を config に書かせるのは、
  * ここを既定値やコードのハードコードで決めると「誰が決めてよいか」がリポジトリの
@@ -833,7 +833,7 @@ export function resolveExecBotKeys(config = {}) {
 }
 
 /**
- * 採択された `org | process` を当てる専用回路のチャンネル (§3.9 の `org-apply`)。
+ * 採択された `org | process` を当てる専用回路のチャンネル (`org-apply`)。
  *
  * **既定は無し = 適用回路を持たない** (fail-closed)。ここが決まらないと、
  * どのチャンネルの設定で `roles/**` と `config.policy.json` へ書いてよいかが決まらない —
@@ -848,7 +848,7 @@ export function resolveApplyChannel(config = {}) {
   return isNonEmptyString(name) ? name.trim() : null;
 }
 
-// ---- duty (docs/social-engineering.md §3.8「bot 組織 OS」) ----
+// ---- duty ----
 //
 // 職務憲章の散文は `roles/<key>.md` にあり、config が持つのは**機械が扱う分だけ**。
 // `duties` を配列でなく key オブジェクトにしてあるのは、`/bots/<bot>/duties/<dutyKey>`
@@ -859,7 +859,7 @@ export function resolveApplyChannel(config = {}) {
 export const DUTY_KEYS = ['intervalMin', 'maxOpenProposals', 'eventKinds'];
 
 /**
- * duty を起こすイベント (§3.9 の発議 3 経路のうち (2))。
+ * duty を起こすイベント (発議 3 経路のうち (2))。
  * **閉集合**にしてあるのは、綴り違いを黙って無視すると「拾うつもりのイベントが
  * 誰にも届いていない」に化けるため。
  */
@@ -875,7 +875,7 @@ export const DEFAULT_DUTY_INTERVAL_MIN = 24 * 60;
 export const DEFAULT_DUTY_MAX_OPEN_PROPOSALS = 2;
 
 /**
- * bot ごとの日次発議 job 上限 (§3.8)。**ノルマではなく上限**で、
+ * bot ごとの日次発議 job 上限。**ノルマではなく上限**で、
  * 「提案なし」が正常な巡回も認める。既定を 1 にしてあるのは、
  * 書き忘れた bot が 1 日に何本も発議 job を立てないようにするため。
  */
@@ -986,7 +986,7 @@ export function validateBotDuties(botConfig, { botKey = '<bot>' } = {}) {
 /**
  * 発議機構の設定検証。
  *
- * **有効にするなら `ownerUserId` を必須にする** (§3.9) — org 提案を裁定できるのは
+ * **有効にするなら `ownerUserId` を必須にする** — org 提案を裁定できるのは
  * 作者だけで、ID が無いと `canAdjudicate` が誰も通さない。裁定できない提案が
  * 黙って溜まるより、起動時に落ちた方がよい。
  *
@@ -996,7 +996,7 @@ export function validateBotDuties(botConfig, { botKey = '<bot>' } = {}) {
  *   注入にしてあるのは、このモジュールがファイルを読まないため (判定はテストから直接叩ける)
  */
 /**
- * 適用回路のチャンネルが §3.9 の条件を満たすか。
+ * 適用回路のチャンネルが条件を満たすか。
  *
  * **構造 (名前・実在) は常に見るが、稼働条件は `initiative.enabled` のときだけ見る。**
  * `enabled: false` は機構ごと止める設定なので、止めたまま applyChannel を残した config が
@@ -1166,7 +1166,7 @@ function validateStructuredRoles(config, contractKindOf) {
 // autonomy・予算などの非秘密設定) と、**gitignore する** `config.secrets.json`
 // (サーバー ID・ユーザー ID といった秘密・個人情報)。
 //
-// 分ける理由は M2 の `org-apply` (docs/social-engineering.md §3.9) — 採択された組織提案の
+// 分ける理由は M2 の `org-apply` — 採択された組織提案の
 // diff をブリッジが policy へ当てるので、policy が追跡可能でないと差分も巻き戻しも作れない。
 // 同時に、その適用回路から**裁定権者を書き換えられないようにする**必要がある。
 // `ownerUserId` / `ownerNames` を secrets 側に固定してあるのはそのため
@@ -1378,7 +1378,7 @@ export function validateConfig(config, { contractKindOf = null, repoRoot = null 
   }
   errors.push(...validateOwnerNameClash(config));
   errors.push(...validateInitiative(config, { contractKindOf, repoRoot }));
-  // 自律社会 (docs/society-ledger.md)。**書いていなければ何も言わない** — 既定は off で、
+  // 自律社会。**書いていなければ何も言わない** — 既定は off で、
   // 社会を使わない配備がこの検証で落ちることはない
   errors.push(...validateSociety(config));
   for (const [key, bot] of Object.entries(isPlainObject(config.bots) ? config.bots : {})) {
@@ -1447,7 +1447,7 @@ export function validateConfig(config, { contractKindOf = null, repoRoot = null 
         );
       }
     }
-    // duty (§3.8) は発議の巡回とイベント配信の宛先を決める。綴り違いを黙って無視すると
+    // duty は発議の巡回とイベント配信の宛先を決める。綴り違いを黙って無視すると
     // 「拾うつもりのイベントが誰にも届いていない」まま静かに動く
     errors.push(...validateBotDuties(bot, { botKey: key }));
   }

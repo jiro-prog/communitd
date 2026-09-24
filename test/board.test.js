@@ -43,15 +43,15 @@ function seed(store, over = {}, options = { now: T0 }) {
   }, options);
 }
 
-// ---- 遷移表 (§3.2) ----
+// ---- 遷移表 ----
 
-test('canTransition は §3.2 の遷移表そのもの', () => {
+test('canTransition は遷移表そのもの', () => {
   assert.equal(canTransition('proposed', 'approved'), true);
   assert.equal(canTransition('approved', 'in-progress'), true);
   assert.equal(canTransition('in-progress', 'review'), true);
   assert.equal(canTransition('review', 'merged'), true);
 
-  // 差し戻し (§3.2 裁定 2026-08-28)。M0-1 では「終端まで一方通行」だったが、
+  // 差し戻し (裁定 2026-08-28)。M0-1 では「終端まで一方通行」だったが、
   // レビューが通らなかったときに同じスレッドの続きとして直させる辺を足した
   assert.equal(canTransition('review', 'in-progress'), true);
 
@@ -120,7 +120,7 @@ test('起票は空の channel / title と壊れた jobBudget を断る', () => {
   assert.deepEqual(store.list(), []);
 });
 
-// ---- touch (§3.9) ----
+// ---- touch ----
 
 test('起票は touch を必須にする — 無い / 空 / 壊れたパスは断って何も書かない', () => {
   const store = board();
@@ -183,7 +183,7 @@ test('touchOverlaps は重なったパスを返す (大小文字だけの違い�
   assert.equal(touchOverlaps(['tools/a.py'], [42, null, 'tools/a.py']), 'tools/a.py');
 });
 
-// ---- 起票の制動 (§9.1b 重なり + §9.2a 枠) ----
+// ---- 起票の制動 (重なり + 枠) ----
 
 /** planFiling / scoutBoardView が見るのは id と state と touch だけ */
 const onBoard = (id, state, touch) => ({ id, state, title: `#${id}`, touch });
@@ -345,7 +345,7 @@ test('planFiling: 壊れた入力でも落ちない (枠が読めなければ設
   assert.equal(planFiling({ wanted: many, openTasks: [] }).file.length, DEFAULT_SCOUT_MAX_OPEN_TASKS);
 });
 
-// ---- スカウトへ見せるボード (§9.1a) ----
+// ---- スカウトへ見せるボード ----
 
 test('scoutBoardView: 非終端すべてと直近 48 時間の merged を渡す', () => {
   const hoursBack = (hours) => new Date(at(-hours * 60)).toISOString();
@@ -502,7 +502,7 @@ test('起票 → 承認 → 着手 → レビュー提出 → 完了まで通る
   const started = store.start(task.id, { threadId: 777, by: 'opus', now: at(2) });
   assert.equal(started.state, 'in-progress');
   assert.equal(started.threadId, '777');
-  assert.equal(started.branch, 'task/1', 'branch 省略時は §3.6 の task/<id>');
+  assert.equal(started.branch, 'task/1', 'branch 省略時は task/<id>');
 
   store.submitForReview(task.id, { by: 'opus', now: at(3) });
   const merged = store.complete(task.id, { by: 'fable', note: 'merge --no-ff', now: at(4) });
@@ -528,7 +528,7 @@ test('branch は明示すればそちらが残る', () => {
 
 // ---- 不正遷移 ----
 
-test('§3.2 に無い遷移は拒否する (proposed から直接 merged にできない)', () => {
+test('遷移表に無い遷移は拒否する (proposed から直接 merged にできない)', () => {
   const store = board();
   const task = seed(store);
 
@@ -624,7 +624,7 @@ test('スレッドとタスクは 1:1 — 同じスレッドを 2 つのタス�
   assert.equal(store.get(b.id).state, 'approved', '断ったら状態は動かない');
 });
 
-// ---- job 予算 (§3.5) ----
+// ---- job 予算 ----
 
 test('job 予算は消費できるが履歴も状態も汚さない', () => {
   const store = board();
@@ -754,7 +754,7 @@ test('spendJob は blocked を引き続き拒否する (止まっている間に
   assert.equal(store.spendJob(task.id, { now: at(5) }).jobsSpent, 1);
 });
 
-// ---- 差し戻し (§3.2 裁定 2026-08-28) ----
+// ---- 差し戻し (裁定 2026-08-28) ----
 
 /** 着手済み (in-progress) のタスクを 1 件作る */
 function started(store, over = {}) {

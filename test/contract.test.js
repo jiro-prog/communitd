@@ -271,7 +271,7 @@ test('touch 集合は対象パスへの Edit だけになる (書込み経路を
   // 実測に基づく 5 点セット。どれか 1 つでも欠けると絞り込みが素通りする
   assert.equal(n.permissionMode, 'default', 'acceptEdits のままだと Edit(パス) が迂回される');
   assert.equal(n.strictMcp, true);
-  // user settings の permissions.allow が --allowedTools に勝って権限を付与する (T0 §2.4)。
+  // user settings の permissions.allow が --allowedTools に勝って権限を付与する。
   // 実測 2026-08-03: `permissions.allow: ["Edit"]` を 1 行足すだけで touch 制限が破れた
   assert.equal(n.settingSources, '', '外部 settings を読ませたままにしている');
   for (const denied of NARROWED_DENY_TOOLS) {
@@ -469,7 +469,7 @@ test('touch 制限つきの委譲は codex ランタイムへ渡さない (Fable
 });
 
 test('契約を本体の cwd で束縛すれば、作業ツリーで走る相手との間でも通る', () => {
-  // §8-2 の worktree 分離で、worker は .worktrees/task-N・reviewer は本体、と cwd が
+  // worktree 分離で、worker は .worktrees/task-N・reviewer は本体、と cwd が
   // 分かれた。ブリッジは契約を本体へ寄せて保存する (index.js の contractCwd) —
   // 寄せないと worker が保存した契約を reviewer が取り出せず、レビュー job が起動しない
   // ままタスクが review に残る (Sol 指摘 2026-08-28)
@@ -856,7 +856,7 @@ test('task-proposal: 異常系は不適合にして、何件目が悪いかを�
     [{ body: 'x', tasks: [task(), task({ rationale: '   ' })] }, /2 件目: 理由 が空です/],
     [{ body: 'x', tasks: [{ rationale: '理由', touch: ['src/a.ts'] }] }, /1 件目: タイトル がありません/],
     [{ body: 'x', tasks: [{ title: 'タイトル', touch: ['src/a.ts'] }] }, /1 件目: 理由 がありません/],
-    // touch は必須で、空配列も通さない (§3.9 — 宣言の無いタスクが発議を全件止める)
+    // touch は必須で、空配列も通さない (宣言の無いタスクが発議を全件止める)
     [{ body: 'x', tasks: [{ title: 'タイトル', rationale: '理由' }] }, /1 件目: touch集合 がありません/],
     [{ body: 'x', tasks: [task({ touch: [] })] }, /1 件目: touch集合 は 1 件以上書きます/],
     [{ body: 'x', tasks: [task({ touch: 'src/a.ts' })] }, /1 件目: touch集合 は配列で書きます/],
@@ -999,7 +999,7 @@ test('task-approval: 異常系は不適合にして、どこが悪いかを返�
     [{ ...PENDING, pending: [{ id: '3' }] }, /1 件目: タイトル がありません/],
     [{ ...PENDING, pending: [{ id: '3', title: 'A', job_budget: 0 }] }, /job予算/],
     [{ ...PENDING, pending: [{ id: '3', title: 'A', touch: 'src/a.ts' }] }, /配列/],
-    // 参考欄 (§9.3) も提示用の形が決まっている — 余分なキーや欠けは落とす
+    // 参考欄も提示用の形が決まっている — 余分なキーや欠けは落とす
     [{ ...PENDING, board: [{ id: '1', title: 'A' }] }, /1 件目: 状態 がありません/],
     [{ ...PENDING, board: [{ id: '1', state: 'review' }] }, /1 件目: タイトル がありません/],
     [{ ...PENDING, board: [{ id: '1', state: 'review', title: 'A', note: 'x' }] }, /契約に無いキー/],
@@ -1038,7 +1038,7 @@ test('task-approval: 承認する側のプロンプトに id つきの一覧が�
   assert.equal(renderForKind('task-approval', null), '');
 });
 
-test('task-approval: 重複を見つける材料 (touch と参考欄と見る点) が出る — §9.3', () => {
+test('task-approval: 重複を見つける材料 (touch と参考欄と見る点) が出る', () => {
   const block = renderForKind('task-approval', PENDING);
   // 承認待ちの touch (宣言が無ければそう書く — 空欄だと見落としと区別できない)
   assert.match(block, /touch: src\/render\/table\.ts \/ src\/style\.css/);
@@ -1137,12 +1137,12 @@ const REVIEW_TARGET = {
 };
 
 test('task-review: 判定は 4 値だけ / 応答もブリッジの提示も通る', () => {
-  // drop は §9.4 で足した「対象が不要」— 増やすときは設計の裁定を経ること
+  // drop は後から足した「対象が不要」— 増やすときは設計の裁定を経ること
   assert.deepEqual(REVIEW_VERDICTS, ['merge', 'send-back', 'block', 'drop']);
   assert.equal(validateContract('task-review', REVIEW).ok, true);
   assert.equal(validateContract('task-review', REVIEW_TARGET).ok, true);
   for (const verdict of REVIEW_VERDICTS) {
-    // merge だけはマージコミットが要る (§12.3 (2) — ブリッジが git で照合する)
+    // merge だけはマージコミットが要る (ブリッジが git で照合する)
     const r = validateContract('task-review', {
       body: 'x', verdict, reason: '理由', ...(verdict === 'merge' ? { merge_commit: 'a1b2c3d' } : {}),
     });
@@ -1160,7 +1160,7 @@ test('task-review: 判定は 4 値だけ / 応答もブリッジの提示も通�
   );
 });
 
-test('task-review: merge はマージコミットの SHA が要る (§12.3 (2))', () => {
+test('task-review: merge はマージコミットの SHA が要る', () => {
   assert.equal(validateContract('task-review', { body: 'x', verdict: 'merge', merge_commit: 'a1b2c3d' }).ok, true);
   // 完全 OID も短縮 OID (7 桁) も通る
   assert.equal(validateContract('task-review', { body: 'x', verdict: 'merge', merge_commit: 'f'.repeat(40) }).ok, true);
@@ -1226,11 +1226,11 @@ test('task-review: レビューする側のプロンプトに対象と手順が�
   assert.match(block, /実ファイル/);
   assert.match(block, /テストを回す/);
   assert.match(block, /差し戻しは 2 回まで/);
-  // §12.3 (2) — merge の申告は git で照合され、適用 task だけ書くものが違う
+  // merge の申告は git で照合され、適用 task だけ書くものが違う
   assert.match(block, /`merge_commit` は必須/);
   assert.match(block, /適用 task \(org-apply\) だけは例外/);
   assert.match(block, /検収した commit/);
-  // §9.4 — 不要と分かったときの逃げ道と、そのとき何をしないか
+  // 不要と分かったときの逃げ道と、そのとき何をしないか
   assert.match(block, /verdict: "drop"/);
   assert.match(block, /ブランチは消さない/);
   assert.equal(block.includes(REVIEW_TARGET.body), false, '本文は Discord へ出す面なので混ぜない');
@@ -1268,7 +1268,7 @@ test('resolveContractKind: 既定は「有効・claude」(呼び出し漏れで�
   assert.equal(resolveContractKind({ roleText: DECLARED, structuredOutput: 'false' }), 'report');
 });
 
-// ---- 組織提案の裁定 (§3.9) ----
+// ---- 組織提案の裁定 ----
 
 const ADJUDICATION = { proposal_id: '12', decision: 'accepted', rationale: '職務の重なりが実測で出ている' };
 
@@ -1353,7 +1353,7 @@ test('resolveJobContractKind: 目印があるときは共有枠を取り出さ�
   assert.equal(resolveJobContractKind({ roleText: DECLARED }), 'report');
 });
 
-// ---- 発議 (§3.9 の 3 経路のうち (1)) ----
+// ---- 発議 (3 経路のうち (1)) ----
 
 const INITIATIVE = {
   kind: 'duty-edit',
@@ -1450,7 +1450,7 @@ test('発議: スキーマのキーは proposals.js の入力側と綴りまで�
   assert.ok(spec.properties.change.properties.diff.maxLength > MAX_TEXT_CHARS);
 });
 
-// ---- 案件の 1 ターン (docs/society-ledger.md・S2-3a) ----
+// ---- 案件の 1 ターン ----
 
 const CASE_TURN = {
   body: '調べました',
@@ -1462,7 +1462,7 @@ test('case-turn: 本文と次の一手が必須で、成果と気づきは任意
   assert.equal(validateContract('case-turn', CASE_TURN).ok, true);
   // result も finding も無くてよい (待つだけのターンがある)
   assert.equal(validateContract('case-turn', { body: 'x', next: CASE_TURN.next }).ok, true);
-  // **次の一手は必ず要る** — 案件は次の契機を 1 つ持つ (§3 の不変条件)
+  // **次の一手は必ず要る** — 案件は次の契機を 1 つ持つ (不変条件)
   assert.match(validateContract('case-turn', { body: 'x' }).reason, /次の一手/);
   assert.match(validateContract('case-turn', { next: CASE_TURN.next }).reason, /本文/);
 });

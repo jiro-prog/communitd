@@ -1,4 +1,4 @@
-// 止まった仕事の検知と再開の実体 (docs/social-engineering.md §11.2〜11.4。src/index.js から切り出し)。
+// 止まった仕事の検知と再開の実体 (src/index.js から切り出し)。
 // 判定は純粋関数 (src/taskstatus.js / src/recovery.js)、順序は src/recovery-wiring.js。
 // ここは実体を結ぶだけ。通知はタスクのスレッドへ 1 通 (同じ問題につき 1 回)。
 import { channelConfigForName, resolveAutonomy } from '../config.js';
@@ -80,7 +80,7 @@ export function createRecoveryWiring({
         const snapshot = gitStatusSnapshot(cwd); // 読めなければ null (断定しない)
         return snapshot === null ? null : snapshot.length > 0;
       },
-      // 自動復旧 (§11.4) の門: チャンネルの日次予算の残と、適用 task (org-apply が担う — 二つの機構から動かさない)。
+      // 自動復旧の門: チャンネルの日次予算の残と、適用 task (org-apply が担う — 二つの機構から動かさない)。
       // 日次予算は **planTick と同じ勘定 `jobsToday`** を使う (日付の繰越も同じ関数で)
       dayJobsLeftFor: (name) => jobsLeftToday(tickStates.get(name) ?? initialState(), {
         maxJobsPerDay: resolveAutonomy(channelConfigForName(config, name)).maxJobsPerDay,

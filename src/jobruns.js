@@ -1,4 +1,4 @@
-// job の実行記録 (docs/implementation-plan.md P1 / docs/social-engineering.md §11)。
+// job の実行記録。
 //
 // 「動いている」「人間を待っている」「失敗した」「結果が分からない」を、Discord の
 // スレッドを読み直さずに判定するための台帳。**task の状態は `TaskBoardStore` が正本、
@@ -153,7 +153,7 @@ export class JobRunStore extends JsonStore {
    * **基底が持つ判定をそのまま使い、文字列で返す** — 「記録が 1 件も無い =
    * 何も走っていない」と読まれないための印で、読む側 (src/index.js の /status・
    * src/bridge/recorder.js の起動ログ) は文字列を期待している。
-   * 台帳を退避しないのは基底と同じ (§12.3 (1))。
+   * 台帳を退避しないのは基底と同じ。
    *
    * @returns {string|null}
    */
@@ -219,7 +219,7 @@ export class JobRunStore extends JsonStore {
 
   /**
    * その Action ID で受け付けた記録 (受付順)。社会台帳の照合が「外で job が立ったか」を
-   * 操作 ID で探すための口 (docs/society-ledger.md §7 — 再実行しても 1 回に収束させる鍵)。
+   * 操作 ID で探すための口 (再実行しても 1 回に収束させる鍵)。
    */
   forAction(actionId) {
     const key = String(actionId ?? '');
@@ -295,7 +295,7 @@ export class JobRunStore extends JsonStore {
       handoff: null,
       reconcile: null,
       placeholderId: asText(placeholderId),
-      // 社会台帳の Action に結ぶ受付 (docs/society-ledger.md §5)。印なしの起動は null。
+      // 社会台帳の Action に結ぶ受付。印なしの起動は null。
       // **操作 ID (Action ID) はここにしか残らない** — 照合はこれを鍵に外側 (Discord の投稿と
       // 実行記録) を探すので、受付の記録と同じ update で書く
       society: societyRef(society),

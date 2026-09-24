@@ -422,7 +422,7 @@ test('自己呼び出しは制御メッセージの形だけ通し、連続上�
   assert.equal(h.hops.selfHops('T1', 'fable'), 0);
 });
 
-test('失効した再開要求 (§11.3) は hop と予算を消費する前に断る', async (t) => {
+test('失効した再開要求は hop と予算を消費する前に断る', async (t) => {
   const screened = [];
   const recovery = {
     screenTrigger: (p) => { screened.push(p); return { ok: false, reason: '再開要求 7-2 は期限切れです' }; },
@@ -478,7 +478,7 @@ test('stopNoticeFor は予算切れと hop 上限を混ぜない', (t) => {
   assert.equal(h.stopNoticeFor('T0', fallback).reason, 'タスクの job 予算切れ');
 });
 
-// ---- 社会の印が付いた起動 (docs/society-ledger.md §5・S2-2) ----
+// ---- 社会の印が付いた起動 ----
 
 /** screenAction / noteAccepted の呼ばれ方を記録する偽の society 配線 */
 function fakeSociety({ screen = null, accept = { ok: true } } = {}) {

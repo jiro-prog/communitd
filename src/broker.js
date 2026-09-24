@@ -54,7 +54,7 @@ export function decideAsk(ask, { cwd = null, allowedRules = [], isApproved = () 
   const tool = String(ask?.tool_name ?? ask?.toolName ?? '').trim();
   if (tool === '') return { decision: 'pass' };
   // 全許可モードのチャンネルでは、どうせ通る呼び出しにカードを出しても意味がない
-  // (payload に permission_mode が入っている — T0 §1.1)
+  // (payload に permission_mode が入っている)
   if (ask?.permission_mode === 'bypassPermissions') return { decision: 'pass' };
   // 素のツール名で既に許可されている = hook が無くても通る呼び出し。聞かない
   if (allowedRules.includes(tool)) return { decision: 'pass' };
@@ -372,7 +372,7 @@ async function main() {
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   main().catch((err) => {
-    // **判定できないまま実行させない。** 理由はそのままモデルへ渡る (T0 §1.3)。
+    // **判定できないまま実行させない。** 理由はそのままモデルへ渡る。
     // exit code は 0 のまま — 異常終了にすると出した deny が読まれない
     process.stdout.write(JSON.stringify(decisionOutput({
       decision: 'deny',

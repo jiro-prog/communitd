@@ -327,7 +327,7 @@ test('壊れたファイルは broken に理由が残り、「記録が無い」
   assert.match(s.broken, /JSON として読めません/);
   assert.equal(s.healthy, false);
   assert.equal(s.list().length, 0);
-  // **退避しない** (§12.3 (1))。書き込みも断るので、証拠が上書きされない
+  // **退避しない**。書き込みも断るので、証拠が上書きされない
   assert.equal(readFileSync(path, 'utf8'), '{ broken json');
   assert.throws(() => accepted(s), /台帳を直すか手で退避してから/);
   assert.equal(readFileSync(path, 'utf8'), '{ broken json');
@@ -406,7 +406,7 @@ test('ディスクにも同じ形で落ち、読み直せる', () => {
   assert.equal(new JobRunStore(path).get('j1').stage, 'starting');
 });
 
-// ---- 社会台帳への参照 (docs/society-ledger.md §5・S2-2) ----
+// ---- 社会台帳への参照 ----
 
 test('open: 案件の参照を保存し、操作 ID で引ける', () => {
   const runs = store();

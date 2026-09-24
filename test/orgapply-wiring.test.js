@@ -462,7 +462,7 @@ test('スレッドを作っている間、適用タスクは proposed のまま 
   // **ここが不変条件** (Fable 検収 2026-09-03)。`createThread` は Discord を待つので、
   // その間に task が `approved` だと、同じ tick で並走する planTick が
   // `approved` を全部 `start-task` にする — 適用 task が**書込み権限つきの worker**で
-  // 起きてしまい、「適用 task に修正担当も書込み権限も無い」(§3.9) が破れる
+  // 起きてしまい、「適用 task に修正担当も書込み権限も無い」が破れる
   const calls = [];
   const seen = [];
   const out = await startOrgApply({
@@ -677,7 +677,7 @@ test('settle の途中で task を閉じられなかった適用は、次の tic
     '当てたコミットが載った枝を押し切って消している',
   );
   assert.deepEqual(await reclaimStaleApplies(world.store, world.board, { now: T0 }), []);
-  // 戻し先は「当て直しの列」ではなく再裁定 — 直す対象は diff なので (§3.9)
+  // 戻し先は「当て直しの列」ではなく再裁定 — 直す対象は diff なので
   assert.deepEqual(applyCandidates(world.store).map((p) => p.id), []);
 }));
 

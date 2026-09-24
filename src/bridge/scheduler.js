@@ -1,4 +1,4 @@
-// 自律運転のスケジューラの実体 (docs/social-engineering.md §3.1。src/index.js から切り出し)。
+// 自律運転のスケジューラの実体 (src/index.js から切り出し)。
 //
 // **新しい実行経路を作らない。** ここがするのは「スレッドを作って起動メッセージを
 // 投稿する」ところまでで、以降は人間がメンションしたときと同じ MessageCreate →
@@ -43,7 +43,7 @@ export const AUTONOMY_TICK_MS = 60 * 1000;
 /**
  * チャンネル名 → スケジューラの勘定。
  *
- * **台帳の部分だけディスクへ落とす** (§3.9)。巡回の最終実行時刻と日次の消費を
+ * **台帳の部分だけディスクへ落とす**。巡回の最終実行時刻と日次の消費を
  * in-memory のままにすると、再起動のたびに「間隔が明けた」と見なして巡回が連発する。
  * 何を持ち越すかは scheduler.js の `persistedState` / `restoreState` が決める
  * (バックオフは持ち越さない — 走っているプロセスの観測であって台帳ではない)。
@@ -101,7 +101,7 @@ export function createSchedulerWiring({
   let brokenNoticed = false;
 
   /**
-   * 自律起動が根拠にする台帳 (§12.3 (1))。**どれか 1 つでも読めなければ止める** —
+   * 自律起動が根拠にする台帳。**どれか 1 つでも読めなければ止める** —
    * 「停止していない」「記録が無い」「仕事が無い」は、読めなかっただけかもしれない。
    * 人間のメンション・handoff は従来どおり通る (止めているのは自律起動だけ)。
    */
@@ -110,7 +110,7 @@ export function createSchedulerWiring({
   }
 
   /**
-   * `thread:bot` → その**次の 1 job だけ**に使うスキーマ種別 (§3.3 のスカウト job)。
+   * `thread:bot` → その**次の 1 job だけ**に使うスキーマ種別 (スカウト job)。
    *
    * スカウトは「同じ bot が通常の役割のまま、その job だけ task-proposal で返す」必要が
    * あるので、役割文の宣言は据え置いて種別だけをかぶせる。**in-memory・1 回きり**で、
@@ -145,7 +145,7 @@ export function createSchedulerWiring({
       console.log('[pause] 自律運転は停止中 — tick は日付の繰越だけ進めます (/resume で再開)');
     }
     pauseNoticed = paused; // 止めている間ログを撒かない / 再開したらまた 1 回だけ出す
-    // 制御台帳が読めないときも停止と同じ扱い (§12.3 (1))。**pause より重い** — 人が押した
+    // 制御台帳が読めないときも停止と同じ扱い。**pause より重い** — 人が押した
     // 停止は /resume で解けるが、こちらは台帳を直すか手で退避するまで解けない
     const brokenList = brokenControlLedgers();
     if (brokenList.length > 0 && !brokenNoticed) {
@@ -155,7 +155,7 @@ export function createSchedulerWiring({
       );
     }
     brokenNoticed = brokenList.length > 0;
-    // 止まった仕事の見回り (§11.2)。**pause 中も回す** — 止めているのは自律起動で、観測ではない。
+    // 止まった仕事の見回り。**pause 中も回す** — 止めているのは自律起動で、観測ではない。
     // ここが落ちても tick は続ける (見回りは起動の前提ではない)
     if (recovery) {
       try {
@@ -163,7 +163,7 @@ export function createSchedulerWiring({
       } catch (err) {
         console.error(`[recovery] 見回りに失敗 (tick は続けます): ${err.message}`);
       }
-      // 自動復旧 (§11.4)。既定は観測 mode (判断をログに残すだけ)。`auto` のチャンネルでも
+      // 自動復旧。既定は観測 mode (判断をログに残すだけ)。`auto` のチャンネルでも
       // 起こすのは副作用が始まっていないと実行記録で確認できる停止だけ。
       // **受付停止中・pause 中は planRecovery 側が止める** (pause は判定の材料として渡っている)
       if (lifecycle.accepting) {
@@ -287,7 +287,7 @@ export function createSchedulerWiring({
   }
 
   /**
-   * `scout` の適用 (§3.3)。start-task と同じ順序の約束:
+   * `scout` の適用。start-task と同じ順序の約束:
    * スレッド作成 → 予算の払い出し → 起動メッセージ。
    *
    * ボードは触らない (スカウトが起票するのは job が返ってきてから — fileProposal)。
@@ -330,7 +330,7 @@ export function createSchedulerWiring({
         scoutStartMessage({
           botUserId: scout.userId,
           directionFile: autonomy.directionFile,
-          // 重複起票を避ける材料 (§9.1) = 非終端すべてと、直近に着地したもの。
+          // 重複起票を避ける材料 = 非終端すべてと、直近に着地したもの。
           // 「着手前だけ」に絞ると、review 中の仕事が見えず同じものが再起票される。
           // **`now` は渡さない** — tick の now はスレッド作成を待つ前の時刻なので、
           // その間に着地した merge が「未来」扱いで隠れる (既定の Date.now() は
@@ -351,7 +351,7 @@ export function createSchedulerWiring({
   }
 
   /**
-   * `initiative` の適用 (§3.9 の発議 3 経路のうち (3) 定期巡回)。
+   * `initiative` の適用 (発議 3 経路のうち (3) 定期巡回)。
    * 手順は startScout と同じ約束: スレッド作成 → 予算の払い出し → 起動メッセージ。
    *
    * **種別は `report` を被せる。** 発議は report の任意フィールドなので、
@@ -422,7 +422,7 @@ export function createSchedulerWiring({
   }
 
   /**
-   * イベントを duty へ配る (§3.9 の発議 3 経路のうち (2))。
+   * イベントを duty へ配る (発議 3 経路のうち (2))。
    *
    * `block` / `send-back` / `backoff` は「社会がうまく回っていない」の観測点で、
    * report と定期巡回だけだと**次の巡回まで誰も見ない**。宣言した duty
@@ -449,8 +449,8 @@ export function createSchedulerWiring({
     eventKind, channelName, detail = '', excludeBotKeys = [], now = Date.now(),
   }) {
     if (!proposals || DUTY_BOTS.length === 0) return;
-    // kill switch (§3.7)。止めている間に発議 job だけが立ち上がらないように。
-    // 制御台帳が読めないときも同じ (§12.3 (1) — イベント経由だけが自律起動の抜け道にならないように)
+    // kill switch。止めている間に発議 job だけが立ち上がらないように。
+    // 制御台帳が読めないときも同じ (イベント経由だけが自律起動の抜け道にならないように)
     if (pauseStore.paused || !lifecycle.accepting || brokenControlLedgers().length > 0) return;
     const autonomy = resolveAutonomy(channelConfigForName(config, channelName));
     if (autonomy.enabled !== true) return;
@@ -487,7 +487,7 @@ export function createSchedulerWiring({
   }
 
   /**
-   * bot 起点 job を 1 本通した = そのタスクの job 予算を 1 使った (§3.5 の記帳)。
+   * bot 起点 job を 1 本通した = そのタスクの job 予算を 1 使った (記帳)。
    * 実行時の門番は hops が持ち、**台帳はボード**が持つ — 人間が覗いたときに
    * 「あと何本走れるか」がボードだけで読める。
    */
@@ -504,7 +504,7 @@ export function createSchedulerWiring({
   }
 
   /**
-   * 自律スレッドの job の成否をチャンネルの勘定へ記録する (§3.7 のバックオフ)。
+   * 自律スレッドの job の成否をチャンネルの勘定へ記録する (バックオフ)。
    * **予算を配ったスレッドだけが対象** — 人間が回している job の失敗で社会を止めない。
    *
    * **発議 job も対象外** (sol 指摘 2026-08-30)。バックオフはチャンネル単位の勘定なので
@@ -533,7 +533,7 @@ export function createSchedulerWiring({
       console.error(
         `[scheduler] ${item.channelName}: 自律 job が失敗 (${reason}) — 自律起動をバックオフします`,
       );
-      // ランタイムが動かなかったことも組織の観測点 (§3.9)。**待たない** —
+      // ランタイムが動かなかったことも組織の観測点。**待たない** —
       // job の後始末の途中なので、発議の起動で終了理由の記録を遅らせない
       void notifyDutyEvent({
         eventKind: 'backoff',

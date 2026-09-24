@@ -2,9 +2,9 @@ import { JsonStore } from './store.js';
 import { isSafeRepoPath, samePathLoose } from './repopath.js';
 
 /**
- * エージェント社会のタスクボード (docs/social-engineering.md §3.2)。
+ * エージェント社会のタスクボード。
  *
- * スケジューラ (§7-4、未実装) が読む**状態の正本**で、1 タスク = 1 Discord スレッド。
+ * スケジューラ (未実装) が読む**状態の正本**で、1 タスク = 1 Discord スレッド。
  * ここが持つのは状態機械だけで、「次に何を起動するか」の判断は持たない —
  * tick の判断はスケジューラ側の純粋関数へ置く。
  *
@@ -12,7 +12,7 @@ import { isSafeRepoPath, samePathLoose } from './repopath.js';
  * 保存は tmp 書き → rename、壊れたファイルは退避される。
  */
 
-/** ボードが取りうる状態 (§3.2) */
+/** ボードが取りうる状態 */
 export const TASK_STATES = Object.freeze([
   'proposed', 'approved', 'in-progress', 'review', 'merged', 'blocked', 'dropped',
 ]);
@@ -28,14 +28,14 @@ export const TASK_STATES = Object.freeze([
 export const TERMINAL_STATES = Object.freeze(['merged', 'dropped']);
 
 /**
- * 「まだ着手されていない」状態。**起票の枠 (§9.2a) はこの数で数える** —
+ * 「まだ着手されていない」状態。**起票の枠はこの数で数える** —
  * スケジューラがスカウトを起こすかどうかを見る定義 (`OPEN_STATES` — src/scheduler.js) と
  * 同じにそろえてある。2 か所が食い違うと「起こしたのに 1 件も載らない」巡回ができる。
  * ずれは test/scheduler.test.js が planTick と突き合わせて固定している。
  */
 const OPEN_STATES = Object.freeze(['proposed', 'approved']);
 
-/** スカウトへ見せる「直近に着地したもの」の窓 (§9.1a)。48 時間 */
+/** スカウトへ見せる「直近に着地したもの」の窓。48 時間 */
 export const MERGED_WINDOW_MS = 48 * 60 * 60 * 1000;
 
 /**
@@ -54,18 +54,18 @@ const NON_SPENDING_STATES = Object.freeze(['merged', 'blocked', 'dropped']);
 /**
  * 許される遷移だけを列挙した表。**ここに無い辺は API が拒否する。**
  *
- * 幹は §3.2 の `proposed → approved → in-progress → review → merged`。
+ * 幹は `proposed → approved → in-progress → review → merged`。
  * `blocked` / `dropped` はどの作業中の状態からも起こりうるので、幹の各段から出す:
- * - `blocked` = 要人間 (§6「差し戻し 2 回 / verify が原因不明で落ち続ける / job 予算切れ」)。
+ * - `blocked` = 要人間 (「差し戻し 2 回 / verify が原因不明で落ち続ける / job 予算切れ」)。
  *   予算切れは in-progress、差し戻しは review で起きるので終端だけに置くと表現できない。
  * - `dropped` = 破棄 (承認されなかった提案・不要になったタスク)。
  *
  * 復帰は `blocked → approved` の一辺だけ (検収裁定 2026-08-27)。承認済みまで戻して
  * 着手の列へ並べ直す形にすると、「どこまで進んでいたか」を推測して復元せずに済む。
  *
- * 差し戻しは `review → in-progress` (§3.2 裁定 2026-08-28)。スレッドも作業ブランチも
+ * 差し戻しは `review → in-progress` (裁定 2026-08-28)。スレッドも作業ブランチも
  * そのままなので、承認まで戻さず**同じスレッドの続き**として直させる。
- * 2 回目の差し戻しは要人間 (§6) — 判断はボードではなくスケジューラ側が持つ。
+ * 2 回目の差し戻しは要人間 — 判断はボードではなくスケジューラ側が持つ。
  */
 export const TRANSITIONS = Object.freeze({
   proposed: Object.freeze(['approved', 'blocked', 'dropped']),
@@ -77,20 +77,20 @@ export const TRANSITIONS = Object.freeze({
   dropped: Object.freeze([]),
 });
 
-/** その遷移が §3.2 の表にあるか (スケジューラが着手可否を判断するためにも使う純粋関数) */
+/** その遷移が遷移表 (TRANSITIONS) にあるか (スケジューラが着手可否を判断するためにも使う純粋関数) */
 export function canTransition(from, to) {
   return TRANSITIONS[from]?.includes(to) ?? false;
 }
 
 /**
- * 1 タスクに払い出す job 予算の既定値 (§3.5 の例)。
- * 実際の値はチャンネルの autonomy config (§7-2、未実装) から渡す想定で、
+ * 1 タスクに払い出す job 予算の既定値 (例)。
+ * 実際の値はチャンネルの autonomy config (未実装) から渡す想定で、
  * ここは「渡されなかったときに無制限にしない」ための床。
  */
 export const DEFAULT_JOB_BUDGET = 20;
 
 /**
- * そのタスクが今まで何回差し戻されたか (§6 の「差し戻し 2 回で要人間」を数える純関数)。
+ * そのタスクが今まで何回差し戻されたか (「差し戻し 2 回で要人間」を数える純関数)。
  * 履歴が台帳なので、回数を別フィールドで持たずここから数える — 二重管理にしない。
  */
 export function sendBackCount(task) {
@@ -99,7 +99,7 @@ export function sendBackCount(task) {
 }
 
 /**
- * touch を宣言していない終端でないタスク (§3.9)。
+ * touch を宣言していない終端でないタスク。
  *
  * **1 件でもあると、そのボードでは組織提案が全件拒否される** — 発議側の競合判定
  * (`taskConflicts` — src/proposals.js) は touch 不明のタスクを「どこを触っているか
@@ -156,7 +156,7 @@ export function canSpendJob(task) {
   return Boolean(task) && !NON_SPENDING_STATES.includes(task?.state);
 }
 
-/** 残り job (§3.5「使い切ったら blocked」の判定を 1 箇所に置く) */
+/** 残り job (「使い切ったら blocked」の判定を 1 箇所に置く) */
 export function remainingJobs(task) {
   const spent = Number(task?.jobsSpent) || 0;
   const budget = Number(task?.jobBudget) || 0;
@@ -167,7 +167,7 @@ export function remainingJobs(task) {
 const isoAt = (now) => new Date(now).toISOString();
 
 /**
- * タスクが触るファイル (§3.9 の末尾)。**起票の時点で必須**にしてある。
+ * タスクが触るファイル (末尾)。**起票の時点で必須**にしてある。
  *
  * 発議の競合判定 (`taskConflicts` — src/proposals.js) は、touch を持たないタスクを
  * 「どこを触っているか分からない」として**何とでも競合する**と見なす (fail-closed)。
@@ -207,7 +207,7 @@ export function normalizeTouch(value, name = 'touch') {
 }
 
 /**
- * 2 つの touch 集合が同じファイルを掴んでいるか (§9.1(b) の重複ゲート)。
+ * 2 つの touch 集合が同じファイルを掴んでいるか (重複ゲート)。
  *
  * 比較は `samePathLoose` (src/repopath.js) — 大小文字だけが違うパスは同じ実体として
  * 扱う。発議側の競合判定 (`entriesConflict` — src/proposals.js) と同じ規則で、
@@ -228,7 +228,7 @@ export function touchOverlaps(a, b) {
 }
 
 /**
- * スカウトへ見せるボードの現状 (§9.1a)。
+ * スカウトへ見せるボードの現状。
  *
  * **非終端すべて + 直近に merged になったもの。** proposed / approved しか見せないと、
  * 誰かが review まで進めた仕事が一覧から消え、同じものがもう一度起票される
@@ -278,7 +278,7 @@ function mergedAtOf(task) {
 }
 
 /**
- * 起票をボードへ載せる前の制動 (§9.1b 重なり + §9.2a 枠)。**ボードには触らない** —
+ * 起票をボードへ載せる前の制動 (重なり + 枠)。**ボードには触らない** —
  * ここで落ちたものは proposed にすらならないので、次の巡回でまた起票できる。
  *
  * 順序は **重なり → 枠**。重なりで落ちたものに枠を消費させると、重複を 1 件書いただけで
@@ -383,7 +383,7 @@ export class TaskBoardStore extends JsonStore {
       });
   }
 
-  /** スレッドからタスクを引く (§3.2 スレッドと 1:1 — job 側は自分のスレッドしか知らない) */
+  /** スレッドからタスクを引く (スレッドと 1:1 — job 側は自分のスレッドしか知らない) */
   findByThread(threadId) {
     if (threadId === null || threadId === undefined || threadId === '') return null;
     const key = String(threadId);
@@ -406,9 +406,9 @@ export class TaskBoardStore extends JsonStore {
   }
 
   /**
-   * 起票 (スカウトの出力がここへ入る — §3.3)。
+   * 起票 (スカウトの出力がここへ入る)。
    *
-   * `touch` は必須 (§3.9)。起票の時点で「どこを触る仕事か」を宣言させないと、
+   * `touch` は必須。起票の時点で「どこを触る仕事か」を宣言させないと、
    * 発議側がそのタスクとの競合を判定できない (normalizeTouch のコメント参照)。
    *
    * @returns {object} 作られたタスク
@@ -444,7 +444,7 @@ export class TaskBoardStore extends JsonStore {
     return task;
   }
 
-  /** 承認 (§3.2 裁定: 起票 Opus・承認 Fable)。着手はここを通った後だけ */
+  /** 承認 (裁定: 起票 Opus・承認 Fable)。着手はここを通った後だけ */
   approve(id, options = {}) {
     return this.transition(id, 'approved', options);
   }
@@ -452,9 +452,9 @@ export class TaskBoardStore extends JsonStore {
   /**
    * 着手。スレッドとブランチをここで結び付ける。
    *
-   * `branch` 省略時は §3.6 の `task/<id>` (1 タスク = 1 マージコミット = revert 一発)。
+   * `branch` 省略時は `task/<id>` (1 タスク = 1 マージコミット = revert 一発)。
    *
-   * `touch` を渡すと起票時の宣言を差し替える (§3.9 — touch を持つのは `propose` / `start`)。
+   * `touch` を渡すと起票時の宣言を差し替える (touch を持つのは `propose` / `start`)。
    * 着手の時点で対象が絞れた・広がったことは実際にあるので、**履歴に残したうえで**
    * 更新できるようにしてある。省略時は据え置き。
    */
@@ -479,18 +479,18 @@ export class TaskBoardStore extends JsonStore {
     });
   }
 
-  /** レビュー提出 (worker の完了 report をブリッジが見て進める — §3.5) */
+  /** レビュー提出 (worker の完了 report をブリッジが見て進める) */
   submitForReview(id, options = {}) {
     return this.transition(id, 'review', options);
   }
 
-  /** 完了 = main へ昇格済み (§3.6)。merge コミットなどは note に残す */
+  /** 完了 = main へ昇格済み。merge コミットなどは note に残す */
   complete(id, options = {}) {
     return this.transition(id, 'merged', options);
   }
 
   /**
-   * 差し戻し (§3.2 裁定 2026-08-28)。レビューが通らなかったので実装中へ戻す。
+   * 差し戻し (裁定 2026-08-28)。レビューが通らなかったので実装中へ戻す。
    *
    * 承認まで戻さないのは、スレッドも作業ブランチもそのまま使えるから —
    * 同じスレッドの続きとして直させる方が、文脈を捨てずに済む。
@@ -500,7 +500,7 @@ export class TaskBoardStore extends JsonStore {
     return this.transition(id, 'in-progress', { now, by, note: reason });
   }
 
-  /** 封鎖 = 要人間 (§6)。理由は履歴に残す — 人間が覗いたとき何で止まったか分かるように */
+  /** 封鎖 = 要人間。理由は履歴に残す — 人間が覗いたとき何で止まったか分かるように */
   block(id, { reason = '', now = Date.now(), by = null } = {}) {
     return this.transition(id, 'blocked', { now, by, note: reason });
   }
@@ -541,7 +541,7 @@ export class TaskBoardStore extends JsonStore {
   }
 
   /**
-   * job 予算を消費する (§3.5 のタスク単位予算)。状態は動かさず履歴も汚さない —
+   * job 予算を消費する (タスク単位予算)。状態は動かさず履歴も汚さない —
    * 履歴は「誰が何を決めたか」の台帳で、job の消費は計数だから。
    *
    * 使い切ったときに `blocked` にするかはスケジューラの判断なので、ここではしない。
@@ -560,14 +560,14 @@ export class TaskBoardStore extends JsonStore {
   }
 
   /**
-   * touch を持っていないタスクへ後から宣言を入れる (**移行専用** — §3.9)。
+   * touch を持っていないタスクへ後から宣言を入れる (**移行専用**)。
    *
    * `propose` が touch を必須にする前に起票されたタスクだけが対象。
    * **既に持っているタスクは断る** — 上書きを許すと、発議の競合判定と `linkTask` の
    * 範囲照合の根拠を、走っている最中に広げられる口になる (着手時の差し替えは `start`)。
    * 終端のタスクも断る (競合判定の材料ではないので、閉じた記録を書き換える理由が無い)。
    *
-   * **履歴は積まない。** 履歴は §3.2 の状態遷移の台帳で、後から埋めた宣言は遷移ではない。
+   * **履歴は積まない。** 履歴は状態遷移の台帳で、後から埋めた宣言は遷移ではない。
    *
    * @throws {Error} 既に touch があるとき / 終端のとき / touch が正規形でないとき
    */
@@ -598,7 +598,7 @@ export class TaskBoardStore extends JsonStore {
     if (!canTransition(task.state, to)) {
       throw new Error(
         `タスク ${task.id} は ${task.state} から ${to} へ進めません `
-        + `(docs/social-engineering.md §3.2 の遷移表に無い)`,
+        + '(タスクの遷移表 TRANSITIONS に無い)',
       );
     }
     const at = isoAt(now);

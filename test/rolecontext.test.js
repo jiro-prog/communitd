@@ -462,7 +462,7 @@ test('編成から自分が外れていれば自己呼び出しも案内しな�
   assert.doesNotMatch(text, /自己呼び出し/);
 });
 
-// ---- 案件に結ばれた job の実行文脈 (docs/society-ledger.md・S2-3a) ----
+// ---- 案件に結ばれた job の実行文脈 ----
 
 const CASE = {
   caseId: 'C-3',

@@ -5,6 +5,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **コードとテストのコメントが、公開されていない設計文書を出典に指していた。**
+  `docs/social-engineering.md` などへの参照 (テストの架空のパスを除いて約 90 行) と、文書名なしの
+  章番号 (`§3.9` など、約 600 箇所) を取り除いた。出典を外すと意味が通らない箇所は本文を書き直した。
+  利用者に見える文言も同じ文書を名指ししていたので直した — タスク・提案の遷移違反のエラーは
+  実装側の遷移表の名前 (`TRANSITIONS` / `PROPOSAL_TRANSITIONS`) を指し、`kt-metrics` の注記は
+  出典を外した。
+
+### Added
+
+- **`npm run lint` が文書への参照も見る** (`scripts/check-doc-refs.mjs`、単独なら
+  `npm run check:docs`)。Markdown の相対リンクと、`src/`・`scripts/` に書いた `docs/*.md` が
+  追跡しているファイルを指していなければ落とす。
+
 ## [0.1.6] - 2026-09-12
 
 ### Changed

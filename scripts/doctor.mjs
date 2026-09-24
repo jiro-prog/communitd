@@ -1,4 +1,4 @@
-// 導入診断 CLI (docs/implementation-plan.md P7)。**読むだけ** — config も Discord も data/ も変えない。
+// 導入診断 CLI。**読むだけ** — config も Discord も data/ も変えない。
 //
 //   node --env-file=.env scripts/doctor.mjs
 //

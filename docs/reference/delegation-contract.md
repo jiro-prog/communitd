@@ -66,10 +66,10 @@
 | 手段 | 無いとどうなるか |
 | --- | --- |
 | `--permission-mode default` へ狭める | `acceptEdits` は `Edit(パス)` の照合を**丸ごと迂回**する (touch 外が書き換わった) |
-| `--setting-sources ''` で外部 settings を落とす | user / project の `permissions.allow` が `--allowedTools` に**勝って権限を付与する** (T0 §2.4)。`permissions.allow: ["Edit"]` を 1 行足すだけで破れた |
+| `--setting-sources ''` で外部 settings を落とす | user / project の `permissions.allow` が `--allowedTools` に**勝って権限を付与する**。`permissions.allow: ["Edit"]` を 1 行足すだけで破れた |
 | `--tools` を読み取り系 + `Edit` に限定 | 組み込みツールが残り、別経路で書ける。**空集合も明示的に渡す** (省略すると全ツールが使える) |
 | `--allowedTools` の書込みを `Edit(./パス)` だけにする | 裸の `Edit` が残ると全ファイルが対象になる |
-| `--disallowedTools` で明示的に落とす | `Agent` / `Task` は**指定しなくても呼べる** (T0 §6c) ため、省略では止まらない |
+| `--disallowedTools` で明示的に落とす | `Agent` / `Task` は**指定しなくても呼べる**ため、省略では止まらない |
 
 加えて `--strict-mcp-config` で MCP を遮断し、**参照ディレクトリ (`claudeAddDirs`) も開かない**
 (`--add-dir` は読取専用にできないので、残すと touch 集合どころか作業ツリーの外へ書ける)。

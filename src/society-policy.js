@@ -1,6 +1,5 @@
 /**
- * 自律社会の設定 (`config.policy.json` の `society`) — 仕様は docs/society-ledger.md と
- * docs/social-engineering.md §12.4。
+ * 自律社会の設定 (`config.policy.json` の `society`)。
  *
  * **既定は `off`** — 書いていない配備で社会が動き出さない (`autonomy` / `initiative` と同じ fail-closed)。
  * 検証は allowlist 方式にしてある。未知キーを黙って無視すると「書いたつもりの設定が効いていない」に
@@ -16,8 +15,8 @@ export const SOCIETY_MODES = Object.freeze(['off', 'observe', 'active']);
 export const DEFAULT_SOCIETY_MODE = 'off';
 
 /**
- * `observe` で起こしてよい Action の kind (docs/society-ledger.md §12「observe = 記録と
- * 読取り専用の観測・相談 Action だけ。task 起票・割当変更・コード反映は行わない」)。
+ * `observe` で起こしてよい Action の kind (observe = 記録と
+ * 読取り専用の観測・相談 Action だけ。task 起票・割当変更・コード反映は行わない)。
  *
  * **設定には出さない固定の集合**。observe は「人がまだ任せていない」段階の呼び方なので、
  * どこまで起こしてよいかを配備ごとに書き換えられるようにすると、observe と active の
@@ -27,7 +26,7 @@ export const DEFAULT_SOCIETY_MODE = 'off';
 export const OBSERVE_ACTION_KINDS = Object.freeze(['consult', 'investigate', 'measure', 'assess']);
 
 /**
- * 総予算 B (受付 / 日)。§12.4 の推奨値 24 — E1 一巡の見積 15〜20 受付に余裕を足した数で、
+ * 総予算 B (受付 / 日)。推奨値 24 — E1 一巡の見積 15〜20 受付に余裕を足した数で、
  * 既存 autonomy チャンネル上限の合計 (120) 以下。
  */
 export const DEFAULT_SOCIETY_MAX_JOBS_PER_DAY = 24;
@@ -35,7 +34,7 @@ export const DEFAULT_SOCIETY_MAX_JOBS_PER_DAY = 24;
 /** 確保枠の割合 (B のうち追跡・観測のために通常業務から守る分) */
 export const SOCIETY_RESERVED_RATIO = 0.1;
 
-/** 引受け申し出の再確認間隔 (分)。§12.4 の時定数 */
+/** 引受け申し出の再確認間隔 (分) */
 export const DEFAULT_OFFER_RECHECK_MIN = 5;
 
 /** `society` が持てるキー (増やすときは validateSociety も直す) */
@@ -49,7 +48,7 @@ export const SOCIETY_MANDATE_KEYS = Object.freeze([
 /** Mandate が持てるキー (`resources`) */
 export const SOCIETY_MANDATE_RESOURCE_KEYS = Object.freeze(['maxJobsPerDay', 'channels']);
 
-/** Mandate の状態 (§2)。`ended` の Mandate からは新しい Case を作らない */
+/** Mandate の状態。`ended` の Mandate からは新しい Case を作らない */
 export const MANDATE_STATES = Object.freeze(['active', 'suspended', 'ended']);
 
 /**
@@ -70,18 +69,18 @@ function isPositiveInt(v) {
   return Number.isSafeInteger(v) && v > 0;
 }
 
-/** 総予算 B のうち追跡・観測に確保する枠 = max(1, ceil(B × 0.10)) (§12.4) */
+/** 総予算 B のうち追跡・観測に確保する枠 = max(1, ceil(B × 0.10)) */
 export function reservedJobsPerDay(maxJobsPerDay = DEFAULT_SOCIETY_MAX_JOBS_PER_DAY) {
   const b = isPositiveInt(maxJobsPerDay) ? maxJobsPerDay : DEFAULT_SOCIETY_MAX_JOBS_PER_DAY;
   return Math.max(1, Math.ceil(b * SOCIETY_RESERVED_RATIO));
 }
 
 /**
- * `authority` を書いていないときの担当 (§12.4)。
+ * `authority` を書いていないときの担当。
  *
  * **コードは bot キーを決め打ちしない** — 顔ぶれは配備ごとに違うので、`config.bots` の
  * 先頭の bot を採る。候補が居なければ null で、稼働条件の検証が「担当が居ない」として落とす。
- * codex ランタイムの bot は構造化出力を返せないので候補から外す (§3.8 の duty と同じ制約)。
+ * codex ランタイムの bot は構造化出力を返せないので候補から外す (duty と同じ制約)。
  *
  * **倒すのは既定を解決するときだけ。** 明示的に書いた bot が居ないときに黙って別の bot へ
  * 倒すと、書いた設定が効いていないことに気付けない — そちらは validateSociety が落とす。
@@ -163,7 +162,7 @@ function normalizeEscalate(value) {
  * policy の Mandate から台帳に置く**版の写し** (`M-` 記録) を作る。
  *
  * 台帳が参照するのは写しであって config ではない — 実行中に policy を書き換えても、
- * 走っている Case が見る Mandate の版は動かない (§2「台帳には版の写しを置き、実行時はその版を参照する」)。
+ * 走っている Case が見る Mandate の版は動かない (「台帳には版の写しを置き、実行時はその版を参照する」)。
  *
  * @param {object} policyMandate `resolveSociety(config).mandates[key]`
  * @param {string} id 台帳が採番した `M-<n>`
@@ -199,7 +198,7 @@ export function mandateRecord(policyMandate = {}, id, now) {
 }
 
 /**
- * 受諾時点の実効権限 (`既存能力 ∩ Mandate ∩ Claim.scope` — docs/society-ledger.md §3・受入 C05)。
+ * 受諾時点の実効権限 (`既存能力 ∩ Mandate ∩ Claim.scope`)。
  *
  * **受諾で権限が増えないことを、受諾の瞬間にもう一度確かめる**ための判定。申し出を作った時点と
  * 受諾の時点の間に bot が落ちたり編成が変わったりするので、申し出たときに通ったことは根拠にならない。
@@ -207,7 +206,7 @@ export function mandateRecord(policyMandate = {}, id, now) {
  *
  * 見るもの:
  * - **起動しているか** (`bots[botKey]` があり userId を持つ) — 居ない相手は引き受けられない
- * - **claude ランタイムか** — codex は `--json-schema` を持たず、受諾を構造化で返せない (§3.8)
+ * - **claude ランタイムか** — codex は `--json-schema` を持たず、受諾を構造化で返せない
  * - **そのチャンネルの構造化出力が有効か** — 切ってある場は成果物へ向かわない場
  * - **Mandate の channels に入っているか** (Mandate が channels を持つときだけ)
  * - **スレッドの編成 (roster) が許しているか** — 宛先の allowlist を受諾だけ迂回しない
@@ -273,10 +272,10 @@ export function checkEffectivePermission({
  * `off` は機構ごと止める設定なので、止めたまま担当を書き忘れた config が起動できないのは食い違う
  * (`initiative.applyChannel` と同じ扱い — Sol 指摘 2026-08-31)。
  *
- * 稼働条件 (§12.4):
+ * 稼働条件:
  * - `authority` の bot が実在する — 担当不在で `active` は起動を拒否する
  * - その bot が `runtime: "codex"` でない — codex は `--json-schema` を持たず、引受け・裁定を
- *   構造化出力で受け取れない (§3.8 の duty と同じ制約)
+ *   構造化出力で受け取れない (duty と同じ制約)
  *
  * @param {object} config 合成後の config
  * @param {{bots?: object|null}} [deps] bot 定義 (省略すると config.bots を見る)

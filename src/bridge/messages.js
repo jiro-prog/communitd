@@ -54,7 +54,7 @@ export function createMessageWiring({
   const MAX_SELF_HOPS = limits.maxSelfHops;
 
   /**
-   * タスクのスレッドで走る job の作業ディレクトリ (docs/social-engineering.md §8-2)。
+   * タスクのスレッドで走る job の作業ディレクトリ。
    * どこで走るかの判断は `planTaskCwd` (scheduler.js) が持ち、ここは git を叩く側。
    *
    * @returns {Promise<{cwd?: string, error?: string}>} cwd 無し = チャンネル本体のまま走る
@@ -128,7 +128,7 @@ export function createMessageWiring({
     // 人間の発言はホップカウンタをリセット
     if (!msg.author.bot && msg.channel.isThread()) {
       hops.reset(msg.channel.id);
-      // 受信箱もここで閉じる (§10.3)。**新しい検知は要らない** — 会話の主導権が
+      // 受信箱もここで閉じる。**新しい検知は要らない** — 会話の主導権が
       // 人間へ戻った瞬間 = 質問に何か返した瞬間、とみなす。作者に既読ボタンを
       // 押させると、押し忘れで受信箱が腐り、腐った受信箱は見られなくなる
       closeInboxForThread(msg.channel.id);
@@ -172,7 +172,7 @@ export function createMessageWiring({
       ).catch(() => {});
       return;
     }
-    // タスクのスレッドなら、そのタスク専用の作業ツリーで走らせる (§8-2)。**cc を組む前に
+    // タスクのスレッドなら、そのタスク専用の作業ツリーで走らせる。**cc を組む前に
     // 決める** — レーン鍵・セッション記録・承認の照合・verify はすべて cc.cwd を見るので、
     // 後から差し替えると上のコメントと同じ食い違いが起きる
     const worktree = await taskWorktreeFor({ configured, canonical, bot, channel: msg.channel });
@@ -185,7 +185,7 @@ export function createMessageWiring({
     // worktree で走る worker と本体で走る reviewer が同じ契約を見られるように
     const cc = { ...configured, cwd: worktree.cwd ?? canonical, repoRoot: canonical };
 
-    // 再開要求の受付側の照合 (§11.3 — レビュー指摘 2026-09-05 A)。期限切れ・受付済み・送れなかったと
+    // 再開要求の受付側の照合 (レビュー指摘 2026-09-05 A)。期限切れ・受付済み・送れなかったと
     // 記録された要求の投稿が遅れて届いても起動しない。**hop と予算を消費する前**に見る
     // (見送る job でタスクの予算を減らさない)。印の無い投稿はそのまま通る
     if (msg.author.bot && msg.channel.isThread() && recovery) {
@@ -200,7 +200,7 @@ export function createMessageWiring({
       }
     }
 
-    // 社会 (自律社会) の起動の照合 (docs/society-ledger.md §5)。**本文の印だけでは実行しない** —
+    // 社会 (自律社会) の起動の照合。**本文の印だけでは実行しない** —
     // 保存済みの Action と突き合わせて、送っていない・宛先違い・再配送・終端の案件を断る。
     // `screenTrigger` と同じく **hop と予算を消費する前**に見る (見送る job で減らさない)
     let societyAction = null;
@@ -325,7 +325,7 @@ export function createMessageWiring({
             trigger: { messageId: msg.id, byBotKey: fromBotKey, self: fromBotKey === bot.key },
             intent: { contractExpected: requiresContract(msg.content), nonce: readContractNonce(msg.content) },
             placeholderId: placeholder?.id ?? null,
-            // 社会の起動なら操作 ID を受付の記録に残す — 照合はこれを鍵に外側を探す (§7)
+            // 社会の起動なら操作 ID を受付の記録に残す — 照合はこれを鍵に外側を探す
             society: societyAction,
           });
         } catch (err) {
@@ -333,13 +333,13 @@ export function createMessageWiring({
           console.error(`[jobruns] ${jobId}: 受付を記録できないため起動しません: ${err.message}`);
           return;
         }
-        // この job を起こした投稿が再開要求 (§11.3) なら、受付した時点で要求を閉じる —
+        // この job を起こした投稿が再開要求なら、受付した時点で要求を閉じる —
         // 送信完了から受付までの窓で同じ task をもう一度起こさないための照合点
         if (taskId && recovery) {
           const accepted = recovery.noteAccepted({ taskId, triggerMessageId: msg.id, botKey: bot.key, runId: jobId });
           if (accepted) console.log(`[recovery] #${taskId} の再開要求 ${taskId}-${accepted.generation} を受付済みにしました (job ${jobId})`);
         }
-        // 社会の受付 (§5): **受付記録と消費の確定が保存できるまで実行キューへ渡さない。**
+        // 社会の受付: **受付記録と消費の確定が保存できるまで実行キューへ渡さない。**
         // ここで書けないまま走らせると、外では job が動いているのに台帳は「送っただけ」に
         // 見え、照合が同じ Action をもう一度起こしうる
         if (societyAction) {
@@ -382,9 +382,9 @@ export function createMessageWiring({
           laneKey,
           threadId: thread.id,
           botKey: bot.key,
-          // 自律運転の勘定はチャンネル単位 (§3.7 のバックオフ) — job の成否をそこへ返す
+          // 自律運転の勘定はチャンネル単位 (バックオフ) — job の成否をそこへ返す
           channelName: cc.channelName,
-          // 発議機構が起こした job は**バックオフの証拠に数えない** (§3.7)。
+          // 発議機構が起こした job は**バックオフの証拠に数えない**。
           // 起こした 1 通で決めるので、通常のタスクスレッドへ出た裁定依頼も取り違えない
           initiativeJob: isInitiativeTrigger(msg.content),
           placeholder,

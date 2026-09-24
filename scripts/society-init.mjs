@@ -1,4 +1,4 @@
-// 社会台帳 `data/society.json` の明示初期化 (docs/society-ledger.md §1)。
+// 社会台帳 `data/society.json` の明示初期化。
 //
 //   node scripts/society-init.mjs [--file <path>]
 //

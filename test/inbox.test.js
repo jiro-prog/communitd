@@ -580,7 +580,7 @@ test('受信箱が配線されていなければ ⚠️ を返す (黙って空�
   assert.equal(h.log[1], 'edit:⚠️ 受信箱の機能が無効です');
 });
 
-// ---- 復旧待ち (§11.2) ----
+// ---- 復旧待ち ----
 
 const recoveryRow = (over = {}) => ({
   task: { id: '77', title: 'doc_path_lint に死活検査を足す', state: 'in-progress', threadId: 'T77' },

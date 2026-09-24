@@ -80,7 +80,7 @@ test('/case の引数は 4 つの操作へ振り分ける (足りない組み合
 });
 
 test('/case の resume は単独の操作として振り分ける', () => {
-  // 停止の解除は明示の操作だけ (§12.2 (g)) — 認可は interactions 側の owner 限定の門
+  // 停止の解除は明示の操作だけ — 認可は interactions 側の owner 限定の門
   assert.deepEqual(resolveCaseRequest({ resume: 'C-1' }), { ok: true, request: { action: 'resume', id: 'C-1' } });
   assert.deepEqual(resolveCaseRequest({ resume: ' C-2 ' }), { ok: true, request: { action: 'resume', id: 'C-2' } });
   assert.deepEqual(resolveCaseRequest({ resume: '  ' }), { ok: true, request: { action: 'list' } });

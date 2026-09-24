@@ -12,7 +12,7 @@ function tempFile(name = 'pause.json') {
 
 const T0 = Date.parse('2026-08-28T09:00:00.000Z');
 
-// ---- 自律運転の kill switch (docs/social-engineering.md §3.7) ----
+// ---- 自律運転の kill switch ----
 
 test('止めていなければ動いている扱い (ファイルが無くても落ちない)', () => {
   const store = new PauseStore(tempFile());
@@ -70,7 +70,7 @@ test('再開すると解け、それも再起動を跨ぐ', () => {
   assert.equal(new PauseStore(tempFile()).resume({ by: 'U1', now: T0 }), null);
 });
 
-// ---- 読込の 4 分類 (docs/social-engineering.md §12.3 (1)) ----
+// ---- 読込の 4 分類 ----
 // ① 有効な JSON の中の値が不正 ② ファイルが不正な JSON ③ 読込エラー ④ 初回 (不在)。
 // ①だけが「ファイルは読めている」— ②③ はファイル単位の破損で、扱いが違う
 
@@ -189,7 +189,7 @@ test('保存に失敗したらメモリも巻き戻す (JsonStore の流儀)', (
   assert.equal(store.paused, false, '書けていないのに止まったことになっている');
 });
 
-// ---- スケジューラの勘定 (docs/social-engineering.md §3.9) ----
+// ---- スケジューラの勘定 ----
 
 test('TickStateStore はチャンネルごとに勘定を持ち越す (壊れた値は無いものとして扱う)', () => {
   const path = join(mkdtempSync(join(tmpdir(), 'communitd-tick-')), 'tick-states.json');

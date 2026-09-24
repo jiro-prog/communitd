@@ -6,8 +6,7 @@
 // 反映のための再起動だけは手動。
 //
 // **読むのは policy + secrets、書くのは policy だけ** — 検証と Discord 接続には
-// 起動時と同じ合成後の config が要るが、秘密と合成結果は保存しない
-// (docs/social-engineering.md §3.9)。
+// 起動時と同じ合成後の config が要るが、秘密と合成結果は保存しない。
 import { REST, Routes } from 'discord.js';
 import * as nodeFs from 'node:fs';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';

@@ -117,7 +117,7 @@ test('台帳が読めなければ退避せず在処に残し、記録が無い�
   assert.ok(warning, errors.join('\n'));
   assert.match(warning, /記録が無いことを「仕事が無い」と読まないこと/);
   assert.match(warning, /退避していません/);
-  // 退避すると次の起動が「初回」に見える (§12.3 (1))。照合も掃除も壊れたファイルに触らない
+  // 退避すると次の起動が「初回」に見える。照合も掃除も壊れたファイルに触らない
   assert.equal(readFileSync(file, 'utf8'), '{ not json');
   assert.deepEqual(readdirSync(dirname(file)), ['job-runs.json']);
 });

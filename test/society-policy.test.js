@@ -181,7 +181,7 @@ test('society: observe / active は担当 bot が実在し codex でないこと
   }
 });
 
-test('society: 既定の担当は config.bots の先頭だが、明示指定は倒さない (§12.4)', () => {
+test('society: 既定の担当は config.bots の先頭だが、明示指定は倒さない', () => {
   // **コードは bot キーを決め打ちしない** — 顔ぶれは配備ごとに違う
   const oneBot = { channels: { 'society-trial': {} }, bots: { second: {} }, society: { mode: 'observe' } };
   assert.equal(defaultSocietyAuthority(oneBot), 'second');
@@ -260,7 +260,7 @@ test('society: 担当を bots ではなく注入で渡せる (config を組み�
   assert.deepEqual(validateSociety(config, { bots: { fable: {} } }), []);
 });
 
-// ---- 受諾時の実効権限 (docs/society-ledger.md §3・受入 C05) ----
+// ---- 受諾時の実効権限 ----
 
 const BOTS = {
   opus: { runtime: 'claude', online: true },

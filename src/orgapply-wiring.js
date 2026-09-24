@@ -1,5 +1,4 @@
-// 採択された org / process 提案を「当てて検収へ回す」までの配線
-// (docs/social-engineering.md §3.9「org-apply」)。
+// 採択された org / process 提案を「当てて検収へ回す」までの配線。
 //
 // 判断は `src/apply.js` (当ててよいか・どの手を打つか)、実行は `src/orgapply.js`
 // (注入された git と fs で順番に走らせる) が持つ。ここが持つのは **その 2 つと
@@ -31,7 +30,7 @@ const brief = (text, max = 200) => {
   return flat.length > max ? `${flat.slice(0, max)}…` : flat;
 };
 
-/** 適用 task のブランチ。**1 提案 = 1 マージコミット** (§3.6 と同じ形) */
+/** 適用 task のブランチ。**1 提案 = 1 マージコミット** (と同じ形) */
 export function applyBranchFor(taskId) {
   return `task/${taskId}`;
 }
@@ -45,7 +44,7 @@ export function applyTaskTitle(proposal) {
 
 /**
  * 適用 task の理由欄。**この task が担うのは検収だけ**だと明記する —
- * 当てたのはブリッジで、task に修正担当も書込み権限も無い (§3.9)。
+ * 当てたのはブリッジで、task に修正担当も書込み権限も無い。
  */
 export function applyTaskRationale(proposal) {
   return `提案 #${proposal?.id} (${proposal?.class}) の適用。`
@@ -251,7 +250,7 @@ export async function startOrgApply({
   // **承認と着手の間に await を置かない** (Fable 検収 2026-09-03)。`approve` を先に打つと
   // Discord 待ちの窓で task が `approved` のまま残り、同じ tick で並走する `autonomyTick` の
   // `planTick` が `approved` を全部 `start-task` にする — **書込み権限つきの worker job** が
-  // 適用 task で起きてしまい、「適用 task に修正担当も書込み権限も無い」(§3.9) が破れる。
+  // 適用 task で起きてしまい、「適用 task に修正担当も書込み権限も無い」が破れる。
   // `proposed` は planTick が触らず、`requestApproval` はスカウトの起票からしか呼ばれない
   try {
     board.approve(task.id, { by, note: `提案 #${proposal.id} の適用 (ブリッジが起こしました)` });
@@ -341,7 +340,7 @@ export async function startOrgApply({
  * 当たった。**receipt が先、task の遷移は後。**
  *
  * 適用 task には修正担当も書込み権限も無いので、`noteTaskCompletion` の
- * 「worker の完了 report を見て review へ進める」経路は使えない (§3.9)。
+ * 「worker の完了 report を見て review へ進める」経路は使えない。
  * `recordReceipt` が通ったことをもってブリッジが `in-progress → review` を進める。
  */
 async function settleSuccess({ store, board, proposal, task, threadId, receipt, submitReview, by, now }) {
@@ -374,7 +373,7 @@ async function settleFailure({ store, board, proposal, task, result, release, by
 }
 
 /**
- * この適用は通らなかった、の後始末。**順序が不変条件** (§3.9):
+ * この適用は通らなかった、の後始末。**順序が不変条件**:
  *
  *   1. 適用 task を `dropped`(superseded) — 検収の宛先を先に閉じる
  *   2. 作業ツリーとブランチを解放 — まだ錠が掛かっているので、次の適用は始まらない
@@ -428,7 +427,7 @@ export async function abandonApplyTask({
 }
 
 /**
- * 検収を通った適用を統合先へ入れる (§3.9)。
+ * 検収を通った適用を統合先へ入れる。
  *
  * **merge するのは receipt の commit OID だけ** — ブランチ名で merge すると、
  * コミットの後にその枝へ足された未承認の commit まで入る (`planMerge`)。

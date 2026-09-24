@@ -71,7 +71,7 @@ function harness(t, {
     },
     limits: {},
   };
-  // 読めない sessions.json は退避せずその場に残る (§12.3 (1))。**読むのは構築時**なので、
+  // 読めない sessions.json は退避せずその場に残る。**読むのは構築時**なので、
   // store を作る前に壊しておく
   if (brokenSessions) {
     mkdirSync(join(root, 'data'), { recursive: true });
@@ -234,7 +234,7 @@ test('sessions.json が読めなくてもモデルの応答は配送し、本文
   );
 });
 
-test('verify NG の戻し先 (投げ手) を postTurn へ渡す — 契約の fromBotKey が正本 (§12.3 (3))', async (t) => {
+test('verify NG の戻し先 (投げ手) を postTurn へ渡す — 契約の fromBotKey が正本', async (t) => {
   const h = harness(t);
   // 契約つきの job は**契約の投げ手**。起動メッセージは別の bot の client から投げられる
   // ことがある (レビュー召喚・再開要求) ので、投稿者では取り違える

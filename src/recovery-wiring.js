@@ -1,4 +1,4 @@
-// 止まった仕事の検知と再開 (docs/implementation-plan.md P2〜P4 / docs/social-engineering.md §11)。
+// 止まった仕事の検知と再開。
 //
 // ここは**順序と排他だけ**を持つ層。判断は src/taskstatus.js (状態) と src/recovery.js (再開の
 // 可否) の純粋関数、記録は src/jobruns.js、Discord・Git・子プロセスは注入で受ける。
@@ -84,7 +84,7 @@ export function createRecoveryService({
   postAs = null,
   reissueReview = null,
   gitDirty = () => null,
-  // 自動復旧 (§11.4) の材料: チャンネルの日次予算の残 / 適用 task か (自動復旧の対象外)
+  // 自動復旧の材料: チャンネルの日次予算の残 / 適用 task か (自動復旧の対象外)
   dayJobsLeftFor = () => null,
   isApplyTask = () => false,
   // 日次予算の予約と払い戻し (通常の着手と同じ勘定 `jobsToday` — レビュー指摘 2026-09-05)。
@@ -110,7 +110,7 @@ export function createRecoveryService({
   const recoveryOf = (taskId) => (recoveryStore ? recoveryStore.recoveryOf(taskId) : null);
 
   /**
-   * 自動復旧が根拠にする台帳のうち読めないもの (§12.3 (1))。
+   * 自動復旧が根拠にする台帳のうち読めないもの。
    * 「止まっているか (pause)」「何が仕事か (tasks)」「何回起こしたか (recovery)」
    * 「何が走ったか (job-runs)」のどれが欠けても、起こしてよいかは決められない
    */
@@ -301,7 +301,7 @@ export function createRecoveryService({
   }
 
   /**
-   * 受付側の照合 (§11.3 — レビュー指摘 2026-09-05 A)。bot が投げた起動メッセージが再開要求の印を
+   * 受付側の照合 (レビュー指摘 2026-09-05 A)。bot が投げた起動メッセージが再開要求の印を
    * 持っていたら、その要求が**いま有効か**を台帳で確かめる。期限切れ・受付済み (再配送)・送れなかったと
    * 記録済み・宛先違い・別の投稿なら起動しない。印の無い投稿は判定しない (通常の handoff を断らない)。
    * **hop と予算を消費する前**に呼ぶこと (見送る job で減らさない)。
@@ -347,7 +347,7 @@ export function createRecoveryService({
   }
 
   /**
-   * `/retry` の実体 (§11.3)。**手動も自動も同じ入口**。
+   * `/retry` の実体。**手動も自動も同じ入口**。
    * 順序: 状態の判定 → 子プロセスの照合 → 純粋な可否 → 世代の確保 (排他) → 起こす → 結果を記録。
    *
    * @param {{thread: {id: string}, id?: string|null, bot?: object|null, userId?: string|null,
@@ -496,7 +496,7 @@ export function createRecoveryService({
   }
 
   /**
-   * 自動復旧の tick (§11.4)。**観測 mode が既定** — 判断だけして起こさない。
+   * 自動復旧の tick。**観測 mode が既定** — 判断だけして起こさない。
    * `auto` のチャンネルでも、起こすのは `planRecovery` が `retry` と言ったものだけで、
    * 実際の起こし方は `/retry` と同じ入口 (`retry({kind:'auto'})`) を通る (連打・二重投入の排他も同じ)。
    *

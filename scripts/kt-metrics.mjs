@@ -1,9 +1,9 @@
-// ボードの数字を出す読み取り専用 CLI (docs/social-engineering.md §9.6)。
+// ボードの数字を出す読み取り専用 CLI。
 //
 //   node scripts/kt-metrics.mjs                             # 全チャンネル
 //   node scripts/kt-metrics.mjs --channel my-project        # 1 チャンネルだけ
 //   node scripts/kt-metrics.mjs --file data/tasks.json      # 別のボードを読む
-//   node scripts/kt-metrics.mjs --since 2026-09-01 --until 2026-09-07   # 期間 (JST の暦日。§11.5)
+//   node scripts/kt-metrics.mjs --since 2026-09-01 --until 2026-09-07   # 期間 (JST の暦日)
 //   node scripts/kt-metrics.mjs --runs data/job-runs.json --recovery data/recovery.json  # 実行記録と再開も
 //
 // 自律運転の出口は「作者の介入・残った merge 数・drop 率」で判定するのに、
@@ -48,7 +48,7 @@ const OPEN_STATES = ['proposed', 'approved', 'in-progress', 'review', 'blocked']
 export function summarizeBoard(tasks, { botKeys = [], now = Date.now(), since = null, until = null } = {}) {
   const known = new Set(Array.isArray(botKeys) ? botKeys : []);
   const byChannel = new Map();
-  // 期間 (§11.5)。**期間内に起きたイベント**と**期間末の状態**を分けて数える。
+  // 期間。**期間内に起きたイベント**と**期間末の状態**を分けて数える。
   // 期間を切らなければ従来どおり (全期間 = 現在の状態)
   const period = since !== null || until !== null;
   const from = Number.isFinite(since) ? since : Number.NEGATIVE_INFINITY;
@@ -178,7 +178,7 @@ export function summarizeRuns(runs, { since = null, until = null, now = Date.now
 
 /**
  * 再開の台帳 (data/recovery.json) の集計 — 手動 / 自動の件数と結果。
- * 結果の語彙は `RecoveryStore` (§11.3): accepted (受け付けられた) / sent (送信済み・受付待ち) /
+ * 結果の語彙は `RecoveryStore`: accepted (受け付けられた) / sent (送信済み・受付待ち) /
  * send-unknown (送達不明) / expired (猶予内に受付なし) / failed(理由) / pending (送信前)
  */
 export function summarizeRecovery(entries, { since = null, until = null, now = Date.now() } = {}) {
@@ -288,7 +288,7 @@ export function formatSummary(summary, { file = '', runs = null, recovery = null
       `差し戻し ${sum.sendBacks} 回`,
       `遷移主体: ${bots || '(bot なし)'} / scheduler ${sum.by.scheduler}`
       + ` / owner ${sum.by.owner} / 不明 ${sum.by.unknown}`
-      + ' (owner は板を動かした回数で、介入した分ではない — 分は docs/trial-log.md)',
+      + ' (owner は板を動かした回数で、介入した分ではない)',
       `proposed→merged: ${sum.lead.count} 件`
       + (sum.lead.count === 0
         ? ' (まだ着地していない)'
@@ -394,7 +394,7 @@ export function readRecords(file, label) {
 }
 
 /**
- * ボードを**読むだけ**で開く (§9.6)。`TaskBoardStore` を通さない理由は冒頭のコメント。
+ * ボードを**読むだけ**で開く。`TaskBoardStore` を通さない理由は冒頭のコメント。
  *
  * 落ちる条件は 3 つ — 読めない / JSON でない / トップレベルが `id → タスク` の object
  * でない。**どれも黙って空ボードにしない**: 集計は「0 件」と「読めなかった」を

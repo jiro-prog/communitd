@@ -1,7 +1,6 @@
 /**
  * 社会台帳のドメイン判断 — 目的 (Mandate) / 気づき (Finding) / 案件 (Case) / 引受け (Claim) /
  * 操作 (Action) / 証拠 (Evidence) の**純粋な**状態遷移と、保存時の不変条件。
- * 仕様は docs/society-ledger.md §2〜§7 (S1 の実装仕様)。
  *
  * **ここには I/O も時計も無い。** `now` は必ず引数で受ける (ミリ秒か ISO 文字列)。保存は
  * `src/society-store.js` の責務で、このモジュールは「スナップショット → 新しいスナップショット」
@@ -17,50 +16,50 @@ import { DEFAULT_OFFER_RECHECK_MIN } from './society-policy.js';
 
 // ---- 閉集合 (綴り違いを黙って通さない) ----
 
-/** Case の状態 (§3)。`resolved` は検収合格、`closed` は理由付きの終結で成功に数えない */
+/** Case の状態。`resolved` は検収合格、`closed` は理由付きの終結で成功に数えない */
 export const CASE_STATES = Object.freeze(['open', 'active', 'waiting', 'verifying', 'resolved', 'closed']);
 
 /** 終端。ここからは動かない (再発は `supersedes` 付きの新 Case) */
 export const CASE_TERMINAL_STATES = Object.freeze(['resolved', 'closed']);
 
-/** 待ちの理由 (§3)。**内部の待ちを人間待ち (`authority`) に変換しない** */
+/** 待ちの理由。**内部の待ちを人間待ち (`authority`) に変換しない** */
 export const WAITING_REASONS = Object.freeze([
   'dependency', 'offer', 'evidence', 'budget', 'authority', 'paused', 'reconcile',
 ]);
 
-/** 理由付き終結の理由 (§3)。`superseded` は新 Case の ID を持つ */
+/** 理由付き終結の理由。`superseded` は新 Case の ID を持つ */
 export const CLOSE_REASONS = Object.freeze(['duplicate', 'unnecessary', 'mandate-ended', 'superseded']);
 
-/** Claim の状態 (§4) */
+/** Claim の状態 */
 export const CLAIM_STATES = Object.freeze(['offered', 'accepted', 'declined', 'expired', 'released', 'handed-over']);
 
-/** Action の状態 (§5) */
+/** Action の状態 */
 export const ACTION_STATES = Object.freeze([
   'planned', 'sending', 'sent', 'accepted', 'running', 'settled', 'reconcile', 'cancelled',
 ]);
 
-/** 依存の到達条件 (§3) */
+/** 依存の到達条件 */
 export const DEPENDENCY_CONDITIONS = Object.freeze(['resolved', 'artifact-ready', 'service-ready']);
 
-/** 既存台帳への参照 (§7)。**状態は写さず参照だけ持つ** */
+/** 既存台帳への参照。**状態は写さず参照だけ持つ** */
 export const LINK_KINDS = Object.freeze(['task', 'proposal', 'run', 'commit', 'thread']);
 
-/** Finding の出所 (§2) */
+/** Finding の出所 */
 export const FINDING_SOURCE_KINDS = Object.freeze(['report', 'event', 'duty', 'sample']);
 
-/** Finding の処理 (§2) */
+/** Finding の処理 */
 export const FINDING_DISPOSITIONS = Object.freeze(['pending', 'adopted', 'dismissed']);
 
-/** 停止マーカーを付けられるのは人間と内部の判断だけ (§3) */
+/** 停止マーカーを付けられるのは人間と内部の判断だけ */
 export const STOP_SOURCES = Object.freeze(['human', 'internal']);
 
 /**
- * 停止の解除ができる操作 (§3)。**人間の発言 (`human-message`) では解除しない** —
+ * 停止の解除ができる操作。**人間の発言 (`human-message`) では解除しない** —
  * 「止めてください」と言った後の雑談で勝手に動き出すのを防ぐため、明示の操作だけを通す。
  */
 export const RESUME_SOURCES = Object.freeze(['owner-command', 'retry']);
 
-/** 種別ごとの ID 接頭辞 (§2)。再利用しない */
+/** 種別ごとの ID 接頭辞。再利用しない */
 export const ID_PREFIXES = Object.freeze({
   mandate: 'M', finding: 'F', case: 'C', claim: 'CL',
   action: 'A', evidence: 'E', observation: 'O', roleTrial: 'RT',
@@ -72,7 +71,7 @@ export const COLLECTION_PREFIXES = Object.freeze({
   actions: 'A', evidence: 'E', observations: 'O', roleTrials: 'RT',
 });
 
-/** 送信から何ミリ秒見つからなければ未受付と確定してよいか (§5・既存 `classifySendError` と同じ 2 分) */
+/** 送信から何ミリ秒見つからなければ未受付と確定してよいか (既存 `classifySendError` と同じ 2 分) */
 export const RECONCILE_TIMEOUT_MS = 2 * 60 * 1000;
 
 // ---- 小さな道具 ----
@@ -100,7 +99,7 @@ function toMs(now) {
   throw new TypeError('now にはミリ秒か ISO 文字列を渡す (cases.js は時計を持たない)');
 }
 
-/** 日時は UTC で保存する (§12.4 — 日次枠だけが JST) */
+/** 日時は UTC で保存する (日次枠だけが JST) */
 function iso(now) {
   return new Date(toMs(now)).toISOString();
 }
@@ -127,7 +126,7 @@ function isTerminal(caseRecord) {
 /**
  * その Action が属する Case が終端なら返す (そうでなければ null)。
  *
- * **終端の Case は動かさない** (§3「終端 → —」)。ただし Action の状態・結果・evidence・
+ * **終端の Case は動かさない** (「終端 → —」)。ただし Action の状態・結果・evidence・
  * 受付記録・消費の確定は残す — 閉じた後に判明した事実まで捨てると、外で起きたことを
  * 台帳に書けない経路ができてしまう (Fable 検収 (a))。
  */
@@ -147,13 +146,13 @@ function terminalResult(draft, actionId) {
   };
 }
 
-/** 既定の再確認時刻 (引受け申し出の再確認は 5 分 — §12.4) */
+/** 既定の再確認時刻 (引受け申し出の再確認は 5 分) */
 function defaultNextCheckAt(now, minutes = DEFAULT_OFFER_RECHECK_MIN) {
   return iso(toMs(now) + minutes * 60 * 1000);
 }
 
 /**
- * 次の契機 (§3 の不変条件) を 1 つのフィールドに畳む。
+ * 次の契機 (不変条件) を 1 つのフィールドに畳む。
  *
  * 仕様は「`runningAction` / `nextAction` / `waiting` の**いずれか**を必ず持つ」なので、
  * 3 本の別フィールドではなく **`nextTrigger` の 1 フィールド**にしてある — 別々に持つと
@@ -182,7 +181,7 @@ function waitingTrigger({ reason, condition, nextCheckAt, actionId = null }) {
 /**
  * 終わった Action を指したままの契機を立て直す (指していなければ何もしない)。
  *
- * **終わった Action を指す契機は保存できない** (§3 の不変条件) ので、Case を動かさない
+ * **終わった Action を指す契機は保存できない** (不変条件) ので、Case を動かさない
  * 経路 (停止中・旧世代) でも契機だけは外しておく必要がある。外さないと、
  * 「止めた後に返ってきた結果」ごと台帳に残せなくなる (Opus2 指摘 ①)。
  */
@@ -203,7 +202,7 @@ const PAUSED_CONDITION = '停止の解除を待つ (owner の再開操作か、t
 /**
  * 停止中の Case で、その Action を指していた契機を「解除待ち」へ倒す。
  *
- * **state は動かさない** (§3 — 止めた Case は明示の解除まで動かない)。`settleAction` の
+ * **state は動かさない** (止めた Case は明示の解除まで動かない)。`settleAction` の
  * 停止分岐と同じ形にそろえてあるので、止めた後に何が返ってきても契機は
  * `waiting(paused)` の 1 種類に収束する。
  *
@@ -231,7 +230,7 @@ function badWaiting(waiting) {
   return null;
 }
 
-// ---- ID 採番 (§2) ----
+// ---- ID 採番 ----
 
 /**
  * 次の ID を採る。**再利用しない** (`counters` は単調に増えるだけ)。
@@ -253,7 +252,7 @@ function takeId(draft, prefix) {
   return `${prefix}-${next}`;
 }
 
-// ---- Mandate (§2) ----
+// ---- Mandate ----
 
 /**
  * policy の Mandate (版の写し) を台帳へ置く。同じ key と version が既にあれば**採番せずそれを返す** —
@@ -273,7 +272,7 @@ export function registerMandate(snapshot, record, now) {
   return { ok: true, snapshot: draft, mandateId: id, created: true };
 }
 
-// ---- Finding (§2) と事象の同一性 (§3) ----
+// ---- Finding と事象の同一性 ----
 
 /**
  * 事象キー `(mandateId, sourceKind, subjectId, conditionId, episodeId)`。
@@ -296,7 +295,7 @@ function findingEventKey(finding) {
 }
 
 /**
- * 気づきを記録する。**原因・修正 diff・touch が未確定でも保存できる** (§2・受入 C02) —
+ * 気づきを記録する。**原因・修正 diff・touch が未確定でも保存できる** —
  * 「目的と実際が食い違っている」ことだけで残せないと、原因が分かるまで観測が消える。
  */
 export function addFinding(snapshot, input, now) {
@@ -335,7 +334,7 @@ export function addFinding(snapshot, input, now) {
 }
 
 /**
- * 気づきを採用して調査 Case を開く (§3 の `— → open`)。
+ * 気づきを採用して調査 Case を開く (`— → open`)。
  *
  * **編集先 (touch / files / diff) は入れない** (受入 C02) — 原因が分かる前に編集先を仮入力すると、
  * 「調べるまで分からないはずのこと」が台帳に既定値として残り、後から本当に確定した値と区別できない。
@@ -393,7 +392,7 @@ export function adoptFinding(snapshot, input, now) {
     dependencies: [],
     parentId: null,
     childIds: [],
-    // 開いた直後は「誰かが引き受ける」のを待っている。責任の空白を作らないための待ち (§4)
+    // 開いた直後は「誰かが引き受ける」のを待っている。責任の空白を作らないための待ち
     nextTrigger: waitingTrigger({
       reason: 'offer',
       condition: 'owner の Claim が accepted になる',
@@ -428,7 +427,7 @@ export function dismissFinding(snapshot, findingId, reason, now) {
   return { ok: true, snapshot: draft, findingId };
 }
 
-// ---- Claim (§4) ----
+// ---- Claim ----
 
 function claimsOf(draft, caseId, responsibility) {
   return Object.values(draft.claims ?? {})
@@ -445,7 +444,7 @@ function issuedGeneration(draft, caseId, responsibility) {
 }
 
 /**
- * 引受けの申し出 (`offered`)。**責任は移らない** — 送っただけでは Case は動かない (§4)。
+ * 引受けの申し出 (`offered`)。**責任は移らない** — 送っただけでは Case は動かない。
  */
 export function offerClaim(snapshot, input, now) {
   const draft = clone(snapshot);
@@ -476,20 +475,20 @@ export function offerClaim(snapshot, input, now) {
 }
 
 /**
- * 受諾 (`accepted`)。ここで初めて責任が移る (§4)。
+ * 受諾 (`accepted`)。ここで初めて責任が移る。
  *
  * - **同一責務の accepted は同時 1 件** — 二人目は `declined` に理由付きで落ちる (先に保存した方が勝ち)。
  * - `permissionOk` は受諾時点の実効権限 (`既存能力 ∩ Mandate ∩ Claim.scope`) の再検証結果。
  *   S1 は台帳の層なので**注入で受ける** (実際の照合は S2 で既存の権限解決へ結ぶ)。
  * - owner の受諾で Case が動くときは `plan` (最初の Action) を**同じ update で**渡す。
- *   渡さないと「担当は居るが次の契機が無い Case」ができ、§3 の不変条件を満たせない。
+ *   渡さないと「担当は居るが次の契機が無い Case」ができ、Case の不変条件を満たせない。
  * - `plan` の代わりに `waiting` (理由と条件) を渡してもよい。**plan とは排他**で、
  *   使うのは「引き受けさせるが最初の一手は起こせない」場面だけ (observe の門で
  *   `implement` を断るときなど)。担当は決まったのに動けないのだから、Case は待ちになる。
  *
  * ⚠️ **`ok: false` でも `snapshot` を保存する呼び出しがある。** `occupied` (二人目) と
  * `permission` (権限の再検証に落ちた) は Claim を `declined` にした**新しいスナップショット**を
- * 返す — 呼び出し側が `ok` だけ見て捨てると、§4 の「後から declined に落ちて理由が残る」が
+ * 返す — 呼び出し側が `ok` だけ見て捨てると、「後から declined に落ちて理由が残る」が
  * 消える。断られた理由も台帳に残すこと (S2 の配線側の注意点・Opus2 申し送り)。
  */
 export function acceptClaim(snapshot, claimId, options, now) {
@@ -509,7 +508,7 @@ export function acceptClaim(snapshot, claimId, options, now) {
     return { ok: false, code: 'expired', reason: claim.reason, snapshot: draft, claimId };
   }
 
-  // 二人目は「先に保存された方が勝ち」で declined に落とし、**理由を残す** (§4)
+  // 二人目は「先に保存された方が勝ち」で declined に落とし、**理由を残す**
   const holder = acceptedClaim(draft, claim.caseId, claim.responsibility);
   if (holder) {
     claim.state = 'declined';
@@ -541,7 +540,7 @@ export function acceptClaim(snapshot, claimId, options, now) {
     return fail(
       snapshot, 'plan-required',
       `Case ${target.id} を active にするには最初の Action (plan) を同じ update で渡す — `
-      + '「担当は居るが次の契機が無い」状態は保存できない (§3 の不変条件)',
+      + '「担当は居るが次の契機が無い」状態は保存できない (不変条件)',
     );
   }
 
@@ -607,7 +606,7 @@ export function declineClaim(snapshot, claimId, reason, now) {
 /**
  * 引受けが解けたときの共通処理 (辞退 `released` / 交代 `handed-over` / 担当消失 `expired`)。
  *
- * **次の Claim が accepted になるまで Case を `waiting(offer)` にする** (§4) — 責任の空白を作らない。
+ * **次の Claim が accepted になるまで Case を `waiting(offer)` にする** — 責任の空白を作らない。
  * 新しい世代を accepted にする前に、旧世代の Action は `cancelled` か `reconcile` に倒して
  * 確定操作をできなくする (遅れて返ってきた結果で Case が動かないようにするため)。
  */
@@ -698,7 +697,7 @@ export function handOverClaim(snapshot, claimId, input, now) {
 /**
  * 担当が消えた (bot 不在・期限切れ) — `expired`。辞退と同じく Case は `waiting(offer)` へ。
  *
- * **引受け期限の経過だけで生きた job を再実行しない** (§4) ので、外に出した Action は
+ * **引受け期限の経過だけで生きた job を再実行しない**ので、外に出した Action は
  * `cancelled` ではなく `reconcile` に倒す (照合が済むまで未受付と決めない)。
  */
 export function expireClaim(snapshot, claimId, reason, now) {
@@ -724,7 +723,7 @@ export function expireClaim(snapshot, claimId, reason, now) {
   return { ok: true, snapshot: draft, claimId, cancelledActionIds: cancelled };
 }
 
-// ---- Action / Outbox (§5) ----
+// ---- Action / Outbox ----
 
 function releaseReservation(draft, action, now) {
   if (!action.budget?.reserved) return;
@@ -735,7 +734,7 @@ function releaseReservation(draft, action, now) {
 }
 
 /**
- * 新しい Action へ**次の契機を向け直してよいか** (§3)。
+ * 新しい Action へ**次の契機を向け直してよいか**。
  *
  * 契機は Case ごとに 1 つしかないので、Action を作るたびに奪うと「いま進んでいる仕事」が
  * 見えなくなる。owner が居る案件へ相談を出しただけで契機が相談へ移り、その相談が返って
@@ -796,7 +795,7 @@ function planActionOn(draft, input, now) {
     note: isNonEmptyString(input.note) ? input.note : null,
     contractRef: isNonEmptyString(input.contractRef) ? input.contractRef : null,
     state: 'planned',
-    // 予算はここで予約する (§5)。送る前に取っておかないと、送信中に別の action が同じ枠を使う
+    // 予算はここで予約する。送る前に取っておかないと、送信中に別の action が同じ枠を使う
     budget: {
       source: isNonEmptyString(input.budget?.source) ? input.budget.source : null,
       reserved: true,
@@ -819,7 +818,7 @@ function planActionOn(draft, input, now) {
 }
 
 /**
- * 起動意図を保存する (`planned`)。**Case の変更と同じ update に入る形**にしてある (§5) —
+ * 起動意図を保存する (`planned`)。**Case の変更と同じ update に入る形**にしてある —
  * 「送ったが台帳に無い」も「台帳にあるが送っていない」も、境界①の片側だけが残ると照合できない。
  */
 export function planAction(snapshot, input, now) {
@@ -828,7 +827,7 @@ export function planAction(snapshot, input, now) {
   if (target && target.state === 'waiting') {
     return fail(
       snapshot, 'waiting',
-      `Case ${target.id} は waiting — 条件成立の証拠を付けて resumeFromWaiting で戻す (§3)`,
+      `Case ${target.id} は waiting — 条件成立の証拠を付けて resumeFromWaiting で戻す`,
     );
   }
   const planned = planActionOn(draft, input, now);
@@ -839,7 +838,7 @@ export function planAction(snapshot, input, now) {
 }
 
 /**
- * 送信直前 (`sending`)。**`/pause` 中は新しい sending を作らない** (§3) — 照合と後始末は続ける。
+ * 送信直前 (`sending`)。**`/pause` 中は新しい sending を作らない** — 照合と後始末は続ける。
  */
 export function markSending(snapshot, actionId, options, now) {
   const draft = clone(snapshot);
@@ -882,7 +881,7 @@ export function markSent(snapshot, actionId, input, now) {
 
 /**
  * 受信側が同じ Action ID の job を **1 件だけ**受け付けた (`accepted`)。
- * 受付記録 (`delivery.runId`) と消費確定 (`budget.charged`) を同じ update で保存する (§5)。
+ * 受付記録 (`delivery.runId`) と消費確定 (`budget.charged`) を同じ update で保存する。
  */
 export function markAccepted(snapshot, actionId, input, now) {
   const draft = clone(snapshot);
@@ -921,8 +920,8 @@ export function markAccepted(snapshot, actionId, input, now) {
  *
  * Case を動かさない場合が 4 つある:
  * - **旧世代の Action** — 交代・辞退の後に届いた受付で責任主体や次の契機を書き換えない
- *   (§4「新世代を accepted にする前に旧世代の確定操作をできなくする」・Opus2 指摘 ②)
- * - **停止マーカー** — 止めた Case は受付が判明しても復活しない (§3)
+ *   (「新世代を accepted にする前に旧世代の確定操作をできなくする」・Opus2 指摘 ②)
+ * - **停止マーカー** — 止めた Case は受付が判明しても復活しない
  * - **担当が空いている** — `waiting(offer)` を消すと「誰が引き受けるのか待ち」が読めなくなる
  * - **自分以外を待っている** — 下記のとおり
  *
@@ -944,7 +943,7 @@ function noteDelivered(draft, action, now) {
       && next.reason === 'reconcile'
       && next.actionId === action.id;
     if (!waitingForThis) return;
-    // 待ち条件 (この Action の照合) が成立した証拠を残してから戻す (§3)
+    // 待ち条件 (この Action の照合) が成立した証拠を残してから戻す
     addEvidenceOn(draft, {
       caseId: target.id,
       actionId: action.id,
@@ -986,7 +985,7 @@ export function markRunning(snapshot, actionId, now) {
   return { ok: true, applied: true, snapshot: draft, actionId };
 }
 
-/** 送信結果が不明 (`reconcile`)。**無条件に再送しない** (§5) */
+/** 送信結果が不明 (`reconcile`)。**無条件に再送しない** */
 export function markReconcile(snapshot, actionId, reason, now) {
   const draft = clone(snapshot);
   const action = draft.actions?.[actionId];
@@ -1012,7 +1011,7 @@ function setReconcileWaiting(draft, action, now) {
   const target = draft.cases[action.caseId];
   if (!target || isTerminal(target)) return;
   if (target.nextTrigger?.actionId !== action.id) return;
-  // 止めた Case は照合へ倒しても `active → waiting` に落とさない (§3「止めた Case は動かない」)。
+  // 止めた Case は照合へ倒しても `active → waiting` に落とさない (「止めた Case は動かない」)。
   // 契機だけを解除待ちにしておけば、再開したときに元の state から続けられる
   if (pauseTriggerOn(draft, target, now)) return;
   target.nextTrigger = waitingTrigger({
@@ -1026,7 +1025,7 @@ function setReconcileWaiting(draft, action, now) {
 }
 
 /**
- * 取り消し (`cancelled`)。**未受付が確認できたときだけ予約を返す** (§5) —
+ * 取り消し (`cancelled`)。**未受付が確認できたときだけ予約を返す** —
  * 送信・受付が不明のまま返却すると、外で走っている job のぶんが二重に使える。
  */
 export function cancelAction(snapshot, actionId, input, now) {
@@ -1068,7 +1067,7 @@ function cancelActionOn(draft, action, { reason }, now) {
   touchCase(target, now);
 }
 
-/** その Action の Claim が「いまの世代」か (§4)。交代・辞退の後は false */
+/** その Action の Claim が「いまの世代」か。交代・辞退の後は false */
 function generationCurrent(draft, action) {
   const claim = draft.claims?.[action.claimId];
   if (!claim) return false;
@@ -1080,7 +1079,7 @@ function generationCurrent(draft, action) {
 /**
  * 結果の保存 (`settled`、境界③)。
  *
- * **settle の時点で Claim の世代が現在と一致しなければ Case を動かさない** (§4) —
+ * **settle の時点で Claim の世代が現在と一致しなければ Case を動かさない** —
  * 旧世代の遅延応答は evidence として残すが、確定には使わない。
  * 成果物ありなら `active → verifying`、そうでなければ `next` (次の action か待ち条件) を必ず付ける。
  *
@@ -1119,7 +1118,7 @@ export function settleAction(snapshot, actionId, input, now) {
   }
 
   if (isTerminal(target)) {
-    // **終端の Case は動かさない** (§3「終端 → —」)。結果と証拠は残すが、closeReason も
+    // **終端の Case は動かさない** (「終端 → —」)。結果と証拠は残すが、closeReason も
     // resolution も契機も触らない — 閉じた Case が結果の到着で待ちに戻ると、
     // 「終わった」と読めるものが後から動く (Fable 検収 (a))
     action.reason = `Case ${target.id} は ${target.state} (終端) なので結果を確定に使わない`;
@@ -1127,7 +1126,7 @@ export function settleAction(snapshot, actionId, input, now) {
   }
 
   if (!generationCurrent(draft, action)) {
-    // 旧世代の結果は**証拠としてだけ**残す。Case は動かさない (§4)
+    // 旧世代の結果は**証拠としてだけ**残す。Case は動かさない
     const note = addEvidenceOn(draft, {
       caseId: target.id,
       actionId: action.id,
@@ -1250,7 +1249,7 @@ function applyNextTrigger(draft, target, next, now, { settledActionId = null } =
 }
 
 /**
- * `waiting → active` (§3)。**条件が成立した証拠を必ず残す** — 「もう大丈夫そう」で戻すと、
+ * `waiting → active`。**条件が成立した証拠を必ず残す** — 「もう大丈夫そう」で戻すと、
  * 何が変わって動き出したのかが後から読めない。
  */
 export function resumeFromWaiting(snapshot, caseId, input, now) {
@@ -1266,7 +1265,7 @@ export function resumeFromWaiting(snapshot, caseId, input, now) {
     return fail(snapshot, 'plan-required', '再開するなら次の Action (plan) を同じ update で渡す');
   }
   if (!isNonEmptyString(target.owner)) {
-    // 責任主体が居ない Case を active にはできない (§3・保存できない形になる)。
+    // 責任主体が居ない Case を active にはできない (保存できない形になる)。
     // 待ちを解くより先に、引き受ける担当を決める必要がある
     return fail(
       snapshot, 'no-owner',
@@ -1283,7 +1282,7 @@ export function resumeFromWaiting(snapshot, caseId, input, now) {
   return { ok: true, snapshot: draft, caseId, actionId: planned.actionId, evidenceId: added.evidenceId };
 }
 
-// ---- 検収 (§3・§6) ----
+// ---- 検収 ----
 
 /**
  * 引き受けたことがある Claim の状態。**誘われただけ (`offered`) や、断った・期限切れ
@@ -1330,7 +1329,7 @@ function implementerKeys(draft, caseId) {
 /**
  * 検収合格 (`verifying → resolved`)。
  *
- * 必要条件 (§3・§6): 検収者 ≠ 実装者 / 検収者の bot・run ID・model ID / Case の `acceptance` の版 /
+ * 必要条件: 検収者 ≠ 実装者 / 検収者の bot・run ID・model ID / Case の `acceptance` の版 /
  * 対象の版 (`subjectRevision`)。どれか欠けたら合格にしない — 「誰がどの版を見て合格にしたか」が
  * 残らない合格は、後から検証できないので合格ではない。
  */
@@ -1345,7 +1344,7 @@ export function acceptVerification(snapshot, input, now) {
   const assessor = input?.assessor;
   for (const key of ['botKey', 'runId', 'modelId']) {
     if (!isNonEmptyString(assessor?.[key])) {
-      return fail(snapshot, 'assessor-identity', `検収者の ${key} が要る (bot 名だけでは足りない — §6)`);
+      return fail(snapshot, 'assessor-identity', `検収者の ${key} が要る (bot 名だけでは足りない)`);
     }
   }
   if (implementerKeys(draft, target.id).has(assessor.botKey)) {
@@ -1361,7 +1360,7 @@ export function acceptVerification(snapshot, input, now) {
     return fail(snapshot, 'subject-revision', '対象の版 (subjectRevision: commit / task revision / 台帳 revision) が要る');
   }
   if (!isPlainObject(input?.observed)) {
-    return fail(snapshot, 'observed-required', '検収の結論は observed (実行で確認された事実) に結ぶ (§6)');
+    return fail(snapshot, 'observed-required', '検収の結論は observed (実行で確認された事実) に結ぶ');
   }
 
   const added = addEvidenceOn(draft, {
@@ -1377,7 +1376,7 @@ export function acceptVerification(snapshot, input, now) {
   }, now);
   if (!added.ok) return { ...added, snapshot };
 
-  // 終端にする前に、まだ生きている Action を片付ける (§4 と同じ「確定操作をできなくする」)
+  // 終端にする前に、まだ生きている Action を片付ける (と同じ「確定操作をできなくする」)
   const swept = sweepLiveActions(draft, target.id, `Case ${target.id} が resolved になった`, now);
 
   target.state = 'resolved';
@@ -1394,7 +1393,7 @@ export function acceptVerification(snapshot, input, now) {
 }
 
 /**
- * 終端にする Case に残っている「生きた Action」を片付ける (§4「確定操作をできなくする」)。
+ * 終端にする Case に残っている「生きた Action」を片付ける (「確定操作をできなくする」)。
  *
  * - `planned` は外へ出ていないので `cancelled` にして**予約を返す**
  * - `sending | sent | accepted | running` は外で走っているかもしれないので `reconcile` へ倒す
@@ -1421,7 +1420,7 @@ function sweepLiveActions(draft, caseId, why, now) {
   return { cancelledActionIds, reconciledActionIds };
 }
 
-/** 不合格・証拠不足 (`verifying → active | waiting`)。**次の action か待ち条件を必ず付ける** (§3) */
+/** 不合格・証拠不足 (`verifying → active | waiting`)。**次の action か待ち条件を必ず付ける** */
 export function rejectVerification(snapshot, input, now) {
   const draft = clone(snapshot);
   const target = draft.cases?.[input?.caseId];
@@ -1440,7 +1439,7 @@ export function rejectVerification(snapshot, input, now) {
   return { ok: true, snapshot: draft, caseId: target.id, evidenceId, state: target.state };
 }
 
-// ---- 終結・親子・依存・参照・停止 (§3・§7) ----
+// ---- 終結・親子・依存・参照・停止 ----
 
 /** 理由付きの終結 (`closed`)。**成功に数えない** */
 export function closeCase(snapshot, caseId, input, now) {
@@ -1472,7 +1471,7 @@ export function closeCase(snapshot, caseId, input, now) {
 }
 
 /**
- * 親を子へ分割する。**親の `owner` はそのまま残る** (§3) —
+ * 親を子へ分割する。**親の `owner` はそのまま残る** —
  * 子が全部 `resolved` になっても親は自動で `resolved` にならない (親の検収は親の `acceptance` で別に行う)。
  */
 export function createChildCase(snapshot, parentId, input, now) {
@@ -1526,7 +1525,7 @@ export function createChildCase(snapshot, parentId, input, now) {
   return { ok: true, snapshot: draft, caseId: id, parentId };
 }
 
-/** 依存の登録。**循環 (A→B→A・3 つ以上の環) は登録の時点で断る** (§3) */
+/** 依存の登録。**循環 (A→B→A・3 つ以上の環) は登録の時点で断る** */
 export function addDependency(snapshot, caseId, dependency, now) {
   const draft = clone(snapshot);
   const target = draft.cases?.[caseId];
@@ -1554,7 +1553,7 @@ export function addDependency(snapshot, caseId, dependency, now) {
 }
 
 /**
- * 既存台帳への参照 (§7)。**明示的に結んだものだけ** — 既存 task の自動移行はしない
+ * 既存台帳への参照。**明示的に結んだものだけ** — 既存 task の自動移行はしない
  * (過去の正常運転を成功案件として台帳に書かないため)。
  */
 export function linkCase(snapshot, caseId, link, now) {
@@ -1583,7 +1582,7 @@ export function linkCase(snapshot, caseId, link, now) {
 }
 
 /**
- * 停止マーカーを付ける (§3)。tick・新しい担当・別 Case からの付替えで復活しない。
+ * 停止マーカーを付ける。tick・新しい担当・別 Case からの付替えで復活しない。
  * 解除は `resumeCase` の明示操作だけ。
  */
 export function stopCase(snapshot, caseId, input, now) {
@@ -1627,7 +1626,7 @@ function replanGap(draft, action) {
 }
 
 /**
- * 停止の解除。**`by: 'human-message'` は通さない** (§3) —
+ * 停止の解除。**`by: 'human-message'` は通さない** —
  * 人間の発言で解除できると、「止めて」と言った後の雑談で勝手に動き出す。
  *
  * 契機が `waiting(paused)` (= 止めた時点で走っていた仕事が停止で終わった形) なら、
@@ -1690,7 +1689,7 @@ export function resumeCase(snapshot, caseId, input, now) {
   return { ok: true, snapshot: draft, caseId, replanned, code };
 }
 
-// ---- Evidence / Observation / RoleTrial (§2・§6) ----
+// ---- Evidence / Observation / RoleTrial ----
 
 function addEvidenceOn(draft, input, now) {
   if (!isPlainObject(input?.source)) {
@@ -1708,7 +1707,7 @@ function addEvidenceOn(draft, input, now) {
     at: iso(now),
     subjectRevision: input.subjectRevision ?? null,
     methodVersion: input.methodVersion ?? null,
-    // **主張と観測を分ける** (§6) — 検収の結論は observed にだけ結ぶ
+    // **主張と観測を分ける** — 検収の結論は observed にだけ結ぶ
     observed: isPlainObject(input.observed) ? { ...input.observed } : null,
     claimed: isPlainObject(input.claimed) ? { ...input.claimed } : null,
     assessor: input.assessor ?? null,
@@ -1718,7 +1717,7 @@ function addEvidenceOn(draft, input, now) {
   return { ok: true, evidenceId: id };
 }
 
-/** 証拠を残す。**元ログの保持期限を越えて読めるよう、必要な値を写しておく** (§6) */
+/** 証拠を残す。**元ログの保持期限を越えて読めるよう、必要な値を写しておく** */
 export function addEvidence(snapshot, input, now) {
   const draft = clone(snapshot);
   const added = addEvidenceOn(draft, input, now);
@@ -1765,7 +1764,7 @@ export function createRoleTrial(snapshot, input, now) {
   return createTrialRecord(snapshot, ID_PREFIXES.roleTrial, input, now);
 }
 
-/** 不一致が続いている一期間 (§3)。bridge が発行し、同じ事象は同じ episode を使う */
+/** 不一致が続いている一期間。bridge が発行し、同じ事象は同じ episode を使う */
 export function openEpisode(snapshot, episodeId, input, now) {
   const draft = clone(snapshot);
   if (!isNonEmptyString(episodeId)) return fail(snapshot, 'invalid', 'episodeId が要る');
@@ -1782,10 +1781,10 @@ export function openEpisode(snapshot, episodeId, input, now) {
   return { ok: true, snapshot: draft, episodeId, created: true };
 }
 
-// ---- 照合 (§5・§7 の境界①〜③) ----
+// ---- 照合 (境界①〜③) ----
 
 /**
- * 外部 (Discord の投稿・JobRun) を **Action ID で**探し直す (§5 の `reconcile`)。
+ * 外部 (Discord の投稿・JobRun) を **Action ID で**探し直す (`reconcile`)。
  *
  * `probe` は `{messageFor(actionId) → messageId|null, runFor(actionId) → runId|null}`。
  * 本物の Discord / JobRun を注入する場所で、ここには I/O を持たせない。
@@ -1859,7 +1858,7 @@ export function reconcileActions(snapshot, probe, now, { hold = [] } = {}) {
 
     const sentAt = Date.parse(action.delivery.sentAt ?? action.delivery.sendingAt ?? action.createdAt);
     if (Number.isFinite(sentAt) && at - sentAt >= RECONCILE_TIMEOUT_MS) {
-      // 送信から 2 分たっても外に無い = 未受付が確認できた。**ここで初めて**予約を返す (§5)
+      // 送信から 2 分たっても外に無い = 未受付が確認できた。**ここで初めて**予約を返す
       cancelActionOn(draft, action, {
         reason: `照合で見つからなかった (送信から ${Math.round((at - sentAt) / 1000)} 秒)`,
       }, now);
@@ -1878,7 +1877,7 @@ export function reconcileActions(snapshot, probe, now, { hold = [] } = {}) {
   return { ok: true, snapshot: draft, sent: resolved, accepted, cancelled, pending, stale };
 }
 
-// ---- 保存時の不変条件 (§3) ----
+// ---- 保存時の不変条件 ----
 
 /**
  * スナップショットが保存してよい形か。**1 件でも返れば `update` は何も書かない**
@@ -1930,7 +1929,7 @@ export function validateSnapshot(snapshot) {
       if (!snapshot.findings[findingId]) errors.push(`cases.${id}.findingIds に無い Finding: ${findingId}`);
     }
     if (isTerminal(target)) {
-      // **終端 Case は次の契機を持たない** (§3「終端 → —」)。持っていると、
+      // **終端 Case は次の契機を持たない** (「終端 → —」)。持っていると、
       // tick も照合もそこを見て動き出せてしまう
       if (target.nextTrigger != null) {
         errors.push(
@@ -1990,7 +1989,7 @@ export function validateSnapshot(snapshot) {
   const cycle = findDependencyCycle(snapshot.cases);
   if (cycle) errors.push(`Case の依存が循環している: ${cycle.join(' → ')} — 保存できない`);
 
-  // 同一責務の accepted は同時 1 件 (§4)
+  // 同一責務の accepted は同時 1 件
   const holders = new Map();
   for (const [id, claim] of Object.entries(snapshot.claims)) {
     if (!CLAIM_STATES.includes(claim.state)) {
@@ -2065,7 +2064,7 @@ function validateNextTrigger(snapshot, id, target) {
   if (!isPlainObject(next)) {
     return [
       `cases.${id} (${target.state}) に次の契機が無い — `
-      + 'runningAction / nextAction / waiting のいずれかを必ず持つ (§3 の不変条件)',
+      + 'runningAction / nextAction / waiting のいずれかを必ず持つ (不変条件)',
     ];
   }
   if (next.kind === 'waiting') {

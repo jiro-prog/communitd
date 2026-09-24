@@ -45,7 +45,7 @@ function harness(t, {
 
   const cc = {
     channelName: 'kt', cwd: repo, repoRoot: repo,
-    // baseBranch は fixture の初期ブランチと揃える (merge の照合はここを見る — §12.3 (2))
+    // baseBranch は fixture の初期ブランチと揃える (merge の照合はここを見る)
     autonomy: {
       enabled: true, worker: { bots: workers }, reviewer, baseBranch: 'master',
       taskJobBudget: 20, scout: { maxOpenTasks: 6 },
@@ -266,7 +266,7 @@ test('applyReview: base へ取り込まれた merge だけが遷移が先・掃�
   assert.equal(h2.git('branch', '--list', 'task/1'), 'task/1', 'dropped の枝を消している');
 });
 
-test('applyReview: 取り込みを照合できない merge は review のまま (ボードも枝も動かさない — §12.3 (2))', async (t) => {
+test('applyReview: 取り込みを照合できない merge は review のまま (ボードも枝も動かさない)', async (t) => {
   const h = harness(t);
   const task = h.inReview();
   const tip = h.workOnBranch(task.branch); // 枝はまだ base に入っていない
@@ -310,7 +310,7 @@ test('applyReview: 取り込みを照合できない merge は review のまま 
   assert.equal(h2.board.get('1').state, 'review');
 });
 
-test('applyReview: 検収担当でない bot と実装した本人の判定は適用しない (§12.3 (2))', async (t) => {
+test('applyReview: 検収担当でない bot と実装した本人の判定は適用しない', async (t) => {
   const h = harness(t);
   const task = h.inReview();
   h.workOnBranch(task.branch);
@@ -339,7 +339,7 @@ test('applyReview: 検収担当でない bot と実装した本人の判定は�
   assert.equal(self.git('branch', '--list', 'task/1'), 'task/1');
 });
 
-test('applyReview: 適用 task の merge は receipt の commit と一致しないと適用しない (§12.3 (2))', async (t) => {
+test('applyReview: 適用 task の merge は receipt の commit と一致しないと適用しない', async (t) => {
   // 適用 task の merge を打つのはブリッジ自身なので、検収の時点でマージコミットは無い。
   // reviewer が書けるのは receipt の appliedCommit (案内に短縮 12 桁が載る) だけ
   const applied = 'a1b2c3d4e5f6'.repeat(3) + 'abcd'; // 40 桁
@@ -501,7 +501,7 @@ test('fileProposal: 検査を通った起票をボードへ載せて承認を頼
   assert.equal(h.board.get('1').state, 'proposed');
 
   assert.equal(await h.fileProposal({ contract: { body: 'なし', tasks: [] }, cc: h.cc, bot: h.bot('opus'), thread: h.thread }), '🌱 起票なし (0 件も正しい報告です)');
-  // 既にあるタスクと同じファイルを掴む起票は載せない (§9.1)
+  // 既にあるタスクと同じファイルを掴む起票は載せない
   const dup = await h.fileProposal({ contract: { body: 'x', tasks: [{ title: 'A2', rationale: 'r', touch: ['a.py'] }] }, cc: h.cc, bot: h.bot('opus'), thread: h.thread });
   assert.match(dup, /^🌱 起票できたものはありません\n⚠️ 載せられなかったもの: A2: /);
 

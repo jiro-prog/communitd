@@ -184,7 +184,7 @@ export function createJobRunner({
   }
 
   /**
-   * この job を頼んだ相手 (§12.3 (3) の「verify NG で戻す先」)。
+   * この job を頼んだ相手 (「verify NG で戻す先」)。
    *
    * **契約があればその `fromBotKey` が正本。** 起動メッセージは別の bot の client から
    * 投げられることがある (レビュー召喚・再開要求は担当以外の client が投稿する) ので、
@@ -244,7 +244,7 @@ export function createJobRunner({
       // 表示が更新できなくても承認そのものは進む (placeholder が消えていることもある)
       try { void editSafe(placeholder, text).catch(() => {}); } catch { /* 表示だけの失敗 */ }
     };
-    // 「⚙️ 作業中…」に段階・経過・最後に完了したツールを出す (§11.2)。情報源は実行記録と
+    // 「⚙️ 作業中…」に段階・経過・最後に完了したツールを出す。情報源は実行記録と
     // trace ファイルだけ。承認待ち (🔐) の表示は上書きしない。モデルが返ったら止める —
     // 以降の placeholder は終端の表示 (❌ / ⏹ / 削除) になるので、tick に上書きさせない
     const jobStartedAt = Date.now();
@@ -345,7 +345,7 @@ export function createJobRunner({
       // の指示を実行文脈で打ち消さないと、モデルは報告調のまま返す (sol 指摘 2026-08-14)
       const structuredOutput = resolveStructuredOutputEnabled(cc);
       // スケジューラが起こしたスカウト job だけは、その 1 job のあいだ種別が
-      // task-proposal に差し替わる (§3.3)。取り出した時点で消えるので次の job には残らない
+      // task-proposal に差し替わる。取り出した時点で消えるので次の job には残らない
       // 目印つきの投稿は**共有枠に触らない** (sol 指摘 2026-08-30) — 順序は
       // resolveJobContractKind が持つ。ここは枠の取り出し方を渡すだけ
       const declaredKind = resolveJobContractKind({
@@ -604,7 +604,7 @@ export function createJobRunner({
         // 幻セッションからの自己回復: 保存済み sessionId が CLI 側に存在しない場合は
         // entry を破棄し、履歴を遡り直した新規セッションで 1 回だけやり直す
         if (!res.ok && !res.aborted && sameCwd && /No conversation found/i.test(`${res.error ?? ''} ${res.detail ?? ''}`)) {
-          // 消せなくても新しいセッションでやり直す (§12.3 (1) / Opus2 レビュー Minor2)。
+          // 消せなくても新しいセッションでやり直す (/ Opus2 レビュー Minor2)。
           // sessions.json が読めないときは entry も読めていないのでここへは来ないが、
           // 書き込み側の失敗 (ディスク・権限) でモデルの再実行ごと落とさない
           try {
@@ -675,7 +675,7 @@ export function createJobRunner({
       // モデルが成功した時点でセッションと既読位置を確定する。以降の verify が NG / 停止でも
       // モデルは既に副作用を出しているため、戻すと次ターンで同じ発言が二重に流れるか、
       // 実在する session が分岐する。codex はステートレスなので対象外。
-      // **保存できなくても配送は止めない** (§12.3 (1) の後始末)。sessions.json は制御台帳では
+      // **保存できなくても配送は止めない** (後始末)。sessions.json は制御台帳では
       // なく「次も同じセッションを続けるための控え」なので、読めない台帳のせいでモデルの
       // 成果ごと internal-error にすると、失うものの方が大きい。失ったのは継続だけなので
       // 本文の末尾で断る (次の job は新しいセッションで始まる)
@@ -694,7 +694,7 @@ export function createJobRunner({
       }
 
       // ---- 構造化出力の受け取り (T6) ----
-      // **スキーマを渡した job では result がスキーマの JSON 文字列になる** (T0 §4.1) ので、
+      // **スキーマを渡した job では result がスキーマの JSON 文字列になる** ので、
       // 人間へ出すのは `本文` フィールド。様式に合わなければ素の result へ縮退して
       // 情報は落とさないが、**契約としては使わない** (保存も touch 制限の適用もしない)
       let outgoingText = res.result || '(空応答)';
@@ -822,7 +822,7 @@ export function createJobRunner({
         thread, bot, cc, res, gitBefore, placeholder, effectiveRoster,
         {
           verifyResult, traceSummary, askLedger, outgoingText, contractOut, contractNotes, run,
-          // verify が最終 NG のとき、元の handoff の代わりに戻す先 (§12.3 (3))
+          // verify が最終 NG のとき、元の handoff の代わりに戻す先
           issuerBotKey: issuerBotKeyOf(triggerMsg, claimed),
           // 案件付きの job では自由文の handoff を実行しない (次の起動は next.plan から)
           societyAction,

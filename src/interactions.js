@@ -94,15 +94,15 @@ export function createInteractionHandler({
   reissueReview = null,
   // 適用の基点を返す非同期関数 (git を読むのでここでは持たない)。省略すると基点なしで裁定する
   resolveBaseCommit = null,
-  // 復旧待ちの一覧 (`/inbox` の 4 節目 — §11.2)。省略すると節が出ない
+  // 復旧待ちの一覧 (`/inbox` の 4 節目)。省略すると節が出ない
   recoveryRows = null,
-  // `/retry` の実体 (§11.3 — board・実行記録・キュー・契約・bots を持つ index 側)。省略すると無効
+  // `/retry` の実体 (board・実行記録・キュー・契約・bots を持つ index 側)。省略すると無効
   retryTask = null,
-  // `/status` の実体 (§11.5)。チャンネル名を受けて 1 通の本文を返す。省略すると無効
+  // `/status` の実体。チャンネル名を受けて 1 通の本文を返す。省略すると無効
   statusReport = null,
-  // `/case` の実体 (docs/society-ledger.md)。台帳の読み書きは society の配線が持つ。省略すると無効
+  // `/case` の実体。台帳の読み書きは society の配線が持つ。省略すると無効
   caseCommand = null,
-  // `/stop` で案件へ停止マーカーを付ける実体 (§12.2 (g))。省略すると案件は止まらない
+  // `/stop` で案件へ停止マーカーを付ける実体。省略すると案件は止まらない
   // (社会を持たない配備・mode off はここが no-op になる)
   societyStop = null,
 }) {
@@ -120,7 +120,7 @@ export function createInteractionHandler({
   return async function onInteraction(bot, interaction) {
     if (interaction?.isButton?.()) {
       // 裁定カードとツール権限カードは**別系統**。custom ID の接頭辞で振り分け、
-      // 認可も台帳も共有しない (§3.9 — 数日待つ裁定を 30 分の承認と混ぜない)
+      // 認可も台帳も共有しない (数日待つ裁定を 30 分の承認と混ぜない)
       const proposalButton = parseProposalCustomId(interaction.customId);
       if (proposalButton) await handleProposalButton(interaction, proposalButton);
       else await handleApprovalButton(bot, interaction);
@@ -297,7 +297,7 @@ export function createInteractionHandler({
     } catch { /* カードを描き直せなくても許可の可否は確定している */ }
   }
 
-  // ---- 組織提案の裁定 (§3.9) ----
+  // ---- 組織提案の裁定 ----
 
   /**
    * 裁定の入口で毎回通す関門。**押した人・提案・現在の digest を一度に揃える。**
@@ -540,7 +540,7 @@ export function createInteractionHandler({
   }
 
   /**
-   * /status — このチャンネルの状況 (§11.5)。集計と描画は index 側 (`statusReport`) が
+   * /status — このチャンネルの状況。集計と描画は index 側 (`statusReport`) が
    * board・実行記録・pause・勘定を持って行い、ここはチャンネル名を渡して本文を出すだけ。
    * スレッドで打てば親チャンネルの状況になる (channelConfigFor と同じ解決)。
    */
@@ -590,7 +590,7 @@ export function createInteractionHandler({
     // **案件を開く / 相談を出す / 停止を解除するのは owner だけ** (Fable 裁定 2026-09-08)。
     // 予算と責任を動かす操作なので org 提案の裁定と同じ扱いにする。一覧と詳細は許可ユーザー
     // 全員が読める。ownerUserId が未設定なら誰も通さない (fail-closed — 設定漏れを「全員可」にしない)。
-    // 再開が owner 限定なのは §12.2 (g) —「解除は owner の操作か同じ認可の操作だけ」
+    // 再開が owner 限定なのは「解除は owner の操作か同じ認可の操作だけ」
     if (['new', 'offer', 'resume'].includes(resolved.request.action)
       && (!ownerUserId || interaction.user?.id !== ownerUserId)) {
       await respond(interaction, '⚠️ 案件を開く / 相談を出す / 停止を解除できるのは作者 (ownerUserId) だけです', acked);
@@ -613,7 +613,7 @@ export function createInteractionHandler({
   }
 
   /**
-   * /retry — 止まったタスクを同じ仕事の続きとして起こし直す (§11.3)。
+   * /retry — 止まったタスクを同じ仕事の続きとして起こし直す。
    *
    * `/review` と同じ型: 判断も実行も index 側 (`retryTask`)、ここは「タスクのスレッドで
    * 打たれたか」の門番と結果の表示だけ。認可は既存の許可ユーザー (入口で済んでいる)。
@@ -723,7 +723,7 @@ export function createInteractionHandler({
    * - **終端の提案** … `withdrawn` / `measured` / `adjudicated:rejected`。store 側も遷移表で
    *   断るが、理由が「終端からは動かせません」になるので、ここで状態を添えて返す
    * - **適用中の提案** … 錠 (`applyTaskId`) が掛かっている = 適用 task と作業ツリーが
-   *   生きている。先に閉じると検収の宛先が消えて後始末の道が無くなる (§3.9)
+   *   生きている。先に閉じると検収の宛先が消えて後始末の道が無くなる
    */
   async function withdrawProposal(interaction, proposal, reason, acked) {
     const shown = escapeForDisplay(String(proposal.id));
@@ -754,7 +754,7 @@ export function createInteractionHandler({
   }
 
   /**
-   * /inbox — 作者を待っているもの (停止・質問 / 稟議 / 要人間) の一覧 (§10.4)。
+   * /inbox — 作者を待っているもの (停止・質問 / 稟議 / 要人間) の一覧。
    *
    * **正本は動かさない。** 台帳を持つのは停止通知だけで、稟議と blocked は
    * ここで読むだけ。だから稟議 / blocked は `close` の対象にしない — あちらは
@@ -825,7 +825,7 @@ export function createInteractionHandler({
     });
     const threadId = inThread ? interaction.channel.id : null;
 
-    // 案件 (自律社会) の停止マーカーは **job を止めるより先に**付ける (§12.2 (g)) —
+    // 案件 (自律社会) の停止マーカーは **job を止めるより先に**付ける —
     // 先に印があれば、実行中 job の settle も待機中 job の取り消しも台帳の停止分岐に入り、
     // 結果は残しつつ案件は動かない。後から付けると、その間に届いた戻りが案件を進めてしまう
     let stopped = null;
@@ -943,7 +943,7 @@ export function createInteractionHandler({
   }
 
   /**
-   * /pause・/resume 処理 (docs/social-engineering.md §3.7 の kill switch)。
+   * /pause・/resume 処理 (自律運転の kill switch)。
    *
    * **止めるのは自律起動だけ。** 実行中の job は殺さず、人間のメンション・handoff・
    * 自己呼び出しは従来どおり通る — 「社会が勝手に動き出すのを止める」ためのもので、
@@ -957,7 +957,7 @@ export function createInteractionHandler({
       await respond(interaction, '⚠️ 自律運転の停止機能が無効です', acked);
       return;
     }
-    // 台帳が読めないときは停止扱いで固定 (§12.3 (1))。**どちらの操作も効かない** —
+    // 台帳が読めないときは停止扱いで固定。**どちらの操作も効かない** —
     // 書けば壊れた中身 (人が直すための証拠) が消えるし、解けてしまえば
     // 「pause.json を壊せば kill switch が外れる」経路になる
     const broken = pauseStore.broken ?? null;

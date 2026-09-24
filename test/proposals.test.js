@@ -734,7 +734,7 @@ test('allowlist から対象が外れた process-edit は withdrawn (class が�
 
 test('deliberating へ戻した提案は再裁定できる (旧 adjudication は履歴として扱う)', () => {
   // `#divert` は監査のため裁定記録を残す。戻した後もその digest を照合すると、
-  // 「裁定時と食い違っているから戻した」提案が二度と裁定できない — §3.9 の
+  // 「裁定時と食い違っているから戻した」提案が二度と裁定できない —
   // 「deliberating へ戻して再裁定」が実機で 1 件も通らなかった原因 (So 裁定 2026-09-04)
   const ctx = ctxWith();
   const s = store();
@@ -833,7 +833,7 @@ test('賛同と反論は同時に残り、意見が付いた提案は審議中�
 test('試用の期限切れは scheduler が拾えるように列挙できる', () => {
   const s = store();
   const p = accepted(s, roleEdit(), ctxWith());
-  // **試用は適用の後** (§3.9)。適用回路そのものは test/apply.test.js が見るので、
+  // **試用は適用の後**。適用回路そのものは test/apply.test.js が見るので、
   // ここは「当てて merge した」前提だけを作る
   const applying = ctxWith({ tasks: [{ id: '7', state: 'approved', touch: ['roles/sol.md'] }] });
   s.linkTask(p.id, '7', { ctx: applying, now: T0, apply: true });

@@ -1073,7 +1073,7 @@ test('config 分離: policy と secrets を 1 枚の config へ合成する', ()
 
 test('config 分離: secrets に置けるキーは allowlist で固定する', () => {
   // ownerUserId / ownerNames が secrets 側なのは、org-apply (policy にしか触れない)
-  // から裁定権者とその呼称を変更できなくするため (docs/social-engineering.md §3.9)
+  // から裁定権者とその呼称を変更できなくするため
   assert.deepEqual(SECRET_KEYS, ['guildId', 'allowedUserIds', 'ownerUserId', 'ownerNames']);
 });
 
@@ -1232,7 +1232,7 @@ test('structuredOutput の書き損じは起動時に落とす', () => {
   }
 });
 
-// ---- channels.<name>.autonomy (自律運転 — docs/social-engineering.md §3.7) ----
+// ---- channels.<name>.autonomy (自律運転) ----
 
 /**
  * 自律運転を書いたチャンネルの config。
@@ -1245,7 +1245,7 @@ function autonomyCfg(autonomy, channelExtra = {}) {
   });
 }
 
-test('autonomy: 未設定なら自律運転は止まっていて、数値は §3.7 の既定値', () => {
+test('autonomy: 未設定なら自律運転は止まっていて、数値は既定値', () => {
   assert.equal(DEFAULT_AUTONOMY_ENABLED, false);
   // 既定値そのものを固定する (SETUP.md の記述と乖離したら気付けるように)
   assert.equal(DEFAULT_MAX_CONCURRENT_TASKS, 2);
@@ -1267,7 +1267,7 @@ test('autonomy: 未設定なら自律運転は止まっていて、数値は §3
     maxConcurrentTasks: 2,
     maxJobsPerDay: 40,
     taskJobBudget: 20,
-    // 自動復旧 (§11.4) の既定は観測だけ — 書かない配備で勝手に起こし直さない
+    // 自動復旧の既定は観測だけ — 書かない配備で勝手に起こし直さない
     recovery: { mode: 'observe', graceMin: 5, maxAutoRetries: 2, retryDelaysMin: [5, 15] },
   });
   assert.deepEqual(resolveAutonomy(), a, '引数なしでも同じ形');
@@ -1463,7 +1463,7 @@ test('autonomy: worker が reviewer だけの編成は起動時に落とす (自
   );
 });
 
-// ---- 発議機構 (§3.9) ----
+// ---- 発議機構 ----
 
 const initiativeCfg = (initiative, over = {}) => cfg({
   bots: { fable: bot(), opus: bot() },
@@ -1504,7 +1504,7 @@ test('initiative: execBotKeys は実在する bot だけ・既定は空 (誰も�
   assert.ok(errors.some((e) => e.includes('居ない bot')), '存在しない bot に裁定権を与えている');
 });
 
-/** 適用回路として通る形のチャンネル (§3.9 — autonomy はあるが scout は持たない) */
+/** 適用回路として通る形のチャンネル (autonomy はあるが scout は持たない) */
 const applyChannels = (over = {}) => ({
   apply: {
     cwd: 'C:/tmp',
@@ -1690,7 +1690,7 @@ test('initiative: duty があるのに自律チャンネルの構造化出力が
   assert.deepEqual(validateConfig(noDuty, { contractKindOf: declared }), []);
 });
 
-// ---- duty (§3.8 bot 組織 OS) ----
+// ---- duty (bot 組織 OS) ----
 
 test('duty: 書かなければ持たない / 書けば既定を埋めて key 昇順で返す', () => {
   assert.deepEqual(resolveDuties({}), []);
@@ -1753,7 +1753,7 @@ test('duty: 綴り違い・型違い・pointer に書けないキーは起動時
   assert.ok(errs({ initiativeBudget: 1.5 }).some((e) => e.includes('initiativeBudget')));
 });
 
-// ---- 自律社会 (docs/society-ledger.md・§12.4) ----
+// ---- 自律社会 ----
 
 test('society: 書いていない config には何も言わない (既定は off)', () => {
   assert.deepEqual(validateConfig(cfg()), []);
