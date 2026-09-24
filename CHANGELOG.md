@@ -14,6 +14,15 @@
   実装側の遷移表の名前 (`TRANSITIONS` / `PROPOSAL_TRANSITIONS`) を指し、`kt-metrics` の注記は
   出典を外した。
 
+### Changed
+
+- **`src/config.js` (1600 行強) を項目ごとの `src/config-*.js` に分けた。** 設定ファイルの読み込み
+  (`config-sources`)・チャンネル (`config-channel`)・自律運転 (`config-autonomy`)・上限
+  (`config-limits`)・bot (`config-bots`)・発議 (`config-initiative`)。`src/config.js` は窓口として
+  全部を再公開するので、読み込む側は変わらない。`validateConfig` は `validateBots` /
+  `validateLimits` / `validateChannel` を順に呼ぶ形になったが、エラーの内容と順序は変えていない
+  (旧実装と 2 万通りの設定で突き合わせて一致)。
+
 ### Added
 
 - **`npm run lint` が文書への参照も見る** (`scripts/check-doc-refs.mjs`、単独なら

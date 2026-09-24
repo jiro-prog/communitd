@@ -23,7 +23,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
  * コードがそのパスを読みに行くだけで、ここに在るべきものではない。
  */
 export const PROJECT_SIDE_PATHS = Object.freeze([
-  'docs/direction.md', // 自律運転の方向性ドキュメントの既定値 (src/config.js DEFAULT_DIRECTION_FILE)
+  'docs/direction.md', // 自律運転の方向性ドキュメントの既定値 (src/config-autonomy.js DEFAULT_DIRECTION_FILE)
   'docs/HANDOFF.md', // 引継ぎ文書 (src/bridge/job.js HANDOFF_FILE)
 ]);
 
