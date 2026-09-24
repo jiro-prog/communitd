@@ -1,3 +1,4 @@
+// @ts-check
 // 人間が Discord で承認したツール権限の永続 (data/tools-extra.json)。
 //
 // **config.json は書き換えない。** あれは人間が手で書く正本で、機械が書き戻すと
@@ -190,6 +191,7 @@ export class ToolExtraStore {
   }
 }
 
+/** @param {unknown} v @returns {v is Record<string, any>} */
 function isPlainObject(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }

@@ -1,3 +1,4 @@
+// @ts-check
 import { spawn } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -90,7 +91,7 @@ function tomlPath(value) {
  * ので、同じ codex ランタイムのまま相談役の bot を立てられる。省略時は組み込み指示の
  * ままなので、既存の bot の振る舞いは変わらない。
  */
-export function renderCodexConfig({ sandbox, effort, instructionsFile = null }) {
+export function renderCodexConfig({ sandbox, effort, instructionsFile = /** @type {string|null} */ (null) }) {
   const lines = [];
   if (effort) lines.push(`model_reasoning_effort = "${effort}"`);
   if (instructionsFile) lines.push(`model_instructions_file = ${tomlPath(instructionsFile)}`);
@@ -127,7 +128,7 @@ const TEMP_REMOVE_RETRY_MS = [250, 1000, 4000];
 export function removeTempDir(
   dir,
   what,
-  { delays = TEMP_REMOVE_RETRY_MS, attempt = 0, rm = null } = {},
+  { delays = TEMP_REMOVE_RETRY_MS, attempt = 0, rm = /** @type {((dir: string) => void)|null} */ (null) } = {},
 ) {
   if (!dir) return;
   try {
@@ -163,7 +164,10 @@ export function removeTempDir(
  * 経路ごとに個別に消していると、後から増えた資源が片方だけ漏れる
  * (sol 指摘 2026-09-11: `spawn` の同期例外で認証コピーごと残っていた)。
  */
-function cleanupTempDirs({ outDir = null, isolatedHome = null } = {}) {
+function cleanupTempDirs({
+  outDir = /** @type {string|null} */ (null),
+  isolatedHome = /** @type {string|null} */ (null),
+} = {}) {
   removeTempDir(outDir, '一時出力ディレクトリ');
   removeTempDir(isolatedHome, '認証コピーを含む一時 CODEX_HOME');
 }
@@ -233,23 +237,30 @@ function copySandboxState(source, dir) {
  * 環境ではその bot だけ下げないと毎回落ちる (実測 2026-09-11)。省略すれば従来どおり
  * ユーザー設定を写すので、既存 bot の挙動は変わらない。
  */
-export function createIsolatedHome(sandbox, instructionsText = null, botEffort = null) {
+export function createIsolatedHome(
+  sandbox,
+  instructionsText = /** @type {string|null} */ (null),
+  botEffort = /** @type {string|null} */ (null),
+) {
   const source = realCodexHome();
   const auth = join(source, 'auth.json');
   if (!existsSync(auth)) return null;
 
   // 呼び出し側の検証 (src/config.js) を素通りした値は書き込まない — 未知の値を
   // config.toml へ書くと codex が 400 で落ち、原因が「隔離 config の中身」になって遠い
-  let effort = CODEX_EFFORTS.includes(botEffort) ? botEffort : null;
+  /** @type {string|null} */
+  let effort = typeof botEffort === 'string' && CODEX_EFFORTS.includes(botEffort) ? botEffort : null;
   if (!effort) {
     try {
       effort = readUserReasoningEffort(readFileSync(join(source, 'config.toml'), 'utf8'));
     } catch { /* config が無くても既定の推論設定で動く */ }
   }
 
+  /** @type {string|null} */
   let dir = null;
   try {
     dir = mkdtempSync(join(tmpdir(), 'communitd-codexhome-'));
+    /** @type {string|null} */
     let instructionsFile = null;
     if (instructionsText !== null) {
       instructionsFile = join(dir, 'instructions.md');
@@ -293,7 +304,7 @@ export function runCodex({
   // 未設定・1 語なら spawn の直前に PATH から解決する (src/clicmd.js)
   codexCmd = null,
   // 解決をテストから固定するための差し替え口 (実機の PATH に判定を委ねない)
-  resolveCmdImpl = null,
+  resolveCmdImpl = /** @type {((cmd: string|string[]|null) => string[]|null)|null} */ (null),
   cwd,
   model,
   // bot ごとの推論量 (`bots.<key>.effort`)。省略すればユーザー ~/.codex/config.toml の値
@@ -306,7 +317,7 @@ export function runCodex({
   scrubEnvKeys = [],
   handle,
   // 子プロセスが立った直後に pid と時刻を知らせる (実行記録 — src/jobruns.js)。runClaude と同じ口
-  onSpawn = null,
+  onSpawn = /** @type {((info: {pid: number|null, at: number, runtime: string}) => void)|null} */ (null),
   // spawn の差し替え口 (runClaude と同じ流儀)。同期例外のような「起動そのものが失敗する」
   // 経路は実機で作れないので、後始末をテストで固定するにはここが要る
   spawnImpl = spawn,
@@ -325,6 +336,7 @@ export function runCodex({
 
   // 指示の差し替えは spawn 前に読む。読めないまま走らせると組み込み指示のまま起動し、
   // 相談役として立てた bot が Codex のコーディングエージェントとして応答してしまう
+  /** @type {string|null} */
   let instructionsText = null;
   if (instructionsFile) {
     try {
@@ -375,6 +387,7 @@ export function runCodex({
   // 出力先を作れないこと自体はありうる (TEMP に書けない等)。**素の throw にしない** —
   // 呼び出し側は Promise を待っているので、同期例外だと隔離 home を抱えたまま job が
   // internal-error で落ちる
+  /** @type {string|null} */
   let outDir = null;
   try {
     outDir = mkdtempImpl(join(tmpdir(), 'communitd-codex-'));

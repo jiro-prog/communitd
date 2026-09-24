@@ -1,3 +1,4 @@
+// @ts-check
 // リポジトリ相対パスの正規形と実体解決。
 //
 // 提案の `targets[]` / `change.touch` / diff のパスは、**書ける範囲を決める鍵**なので
@@ -29,7 +30,7 @@ export function isSafeRepoPath(p) {
   if (typeof p !== 'string' || p === '') return false;
   if (p.includes('\\')) return false; // Windows 区切りは受けない
   if (p.includes(':')) return false; // ドライブレター / 代替データストリーム (ADS)
-  if ([...p].some((ch) => ch.codePointAt(0) < 0x20)) return false; // 制御文字
+  if ([...p].some((ch) => (ch.codePointAt(0) ?? 0) < 0x20)) return false; // 制御文字
   if (p.startsWith('/')) return false; // 絶対パス
   return p.split('/').every((seg) => {
     if (seg === '' || seg === '.' || seg === '..') return false;
@@ -53,7 +54,10 @@ export function underPathLoose(path, prefix) {
  * 作業ディレクトリを基点にパスの実体を解決する。
  *
  * @param {{cwd: string}} p
- * @returns {{root: string|null, check: (path: string) => object}}
+ * @returns {{root: string|null,
+ *   check: (path: string) => ({ok: true, kind: 'file'|'dir', abs: string}
+ *     | {ok: true, kind: 'missing', abs: string|null} | {ok: false, reason: string}),
+ *   read: (path: string) => string|null}}
  *   check は `{ok:true, kind:'file'|'dir'|'missing', abs}` か `{ok:false, reason}`。
  *   **判断できないものはすべて `ok:false`** — 呼び出し側は提案ごと落とす。
  */

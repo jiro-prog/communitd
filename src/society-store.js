@@ -41,6 +41,7 @@ export const SOCIETY_BROKEN_KINDS = Object.freeze([...LEDGER_BROKEN_KINDS, 'unkn
 /** 開いた結果 (`state`)。`ok` 以外では update を断る */
 export const SOCIETY_STORE_STATES = Object.freeze(['off', 'absent', 'broken', 'ok']);
 
+/** @param {unknown} v @returns {v is Record<string, any>} */
 function isPlainObject(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }

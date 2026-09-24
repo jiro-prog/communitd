@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * 社会台帳のドメイン判断 — 目的 (Mandate) / 気づき (Finding) / 案件 (Case) / 引受け (Claim) /
  * 操作 (Action) / 証拠 (Evidence) の**純粋な**状態遷移と、保存時の不変条件。
@@ -80,6 +81,7 @@ function isNonEmptyString(v) {
   return typeof v === 'string' && v.trim() !== '';
 }
 
+/** @param {unknown} v @returns {v is Record<string, any>} */
 function isPlainObject(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
@@ -554,6 +556,7 @@ export function acceptClaim(snapshot, claimId, options, now) {
   // owner のときだけ植えていた頃は、investigator / assessor として受けた bot に
   // 最初の Action が立たず、二度と起動されなかった (様式は accept に `next.plan` を必須にしている)。
   // 契機を動かすかは `planActionOn` の規則に任せる — owner 以外なら待ちも生きた契機も保たれる
+  /** @type {string|null|undefined} */
   let actionId = null;
   if (plan) {
     // **受けた Claim の下に植える。** 呼び出し側が `claimId` を渡しても上書きする —
@@ -610,7 +613,7 @@ export function declineClaim(snapshot, claimId, reason, now) {
  * 新しい世代を accepted にする前に、旧世代の Action は `cancelled` か `reconcile` に倒して
  * 確定操作をできなくする (遅れて返ってきた結果で Case が動かないようにするため)。
  */
-function endClaim(draft, claim, { state, reason, handoverTo = null }, now) {
+function endClaim(draft, claim, { state, reason, handoverTo = /** @type {string|null} */ (null) }, now) {
   claim.state = state;
   claim.reason = reason;
   claim.handoverTo = handoverTo;
@@ -1110,6 +1113,7 @@ export function settleAction(snapshot, actionId, input, now) {
   action.result = isPlainObject(input?.result) ? { ...input.result } : null;
   action.updatedAt = iso(now);
 
+  /** @type {string|null|undefined} */
   let evidenceId = null;
   if (isPlainObject(input?.evidence)) {
     const added = addEvidenceOn(draft, { ...input.evidence, caseId: target.id, actionId: action.id }, now);
@@ -1202,7 +1206,12 @@ function pointsAtOtherLiveAction(draft, target, settledActionId) {
  * その場合でも**いま終わった Action を指している契機だけは立て直す** — 終わった Action を
  * 指したままの契機も保存できないため。
  *
- * @param {string|null} settledActionId いま終わった Action (契機を立て直す必要があるかの判定に使う)
+ * @param {Record<string, any>} draft
+ * @param {Record<string, any>} target
+ * @param {unknown} next
+ * @param {number|string} now
+ * @param {{settledActionId?: string|null}} [options] settledActionId = いま終わった Action
+ *        (契機を立て直す必要があるかの判定に使う)
  */
 function applyNextTrigger(draft, target, next, now, { settledActionId = null } = {}) {
   if (!isPlainObject(next)) {
@@ -1428,6 +1437,7 @@ export function rejectVerification(snapshot, input, now) {
   if (target.state !== 'verifying') return fail(snapshot, 'bad-state', `Case ${target.id} は ${target.state}`);
   if (target.stop) return fail(snapshot, 'stopped', `Case ${target.id} は停止マーカーが付いている`);
 
+  /** @type {string|null|undefined} */
   let evidenceId = null;
   if (isPlainObject(input?.evidence)) {
     const added = addEvidenceOn(draft, { ...input.evidence, caseId: target.id, conclusion: 'rejected' }, now);
@@ -1654,6 +1664,7 @@ export function resumeCase(snapshot, caseId, input, now) {
   target.resumedAt = iso(now);
   target.resumedBy = input.by;
 
+  /** @type {string|null|undefined} */
   let replanned = null;
   let code = 'resumed';
   if (target.nextTrigger?.kind === 'waiting' && target.nextTrigger.reason === 'paused') {
@@ -1679,7 +1690,7 @@ export function resumeCase(snapshot, caseId, input, now) {
       code = 'needs-plan';
       target.nextTrigger = waitingTrigger({
         reason: 'evidence',
-        condition: `停止は解除したが前の一手を立て直せない (${gap ?? `${planned.code}: ${planned.reason}`}) — `
+        condition: `停止は解除したが前の一手を立て直せない (${gap ?? `${planned?.code}: ${planned?.reason}`}) — `
           + 'owner の next.plan か /case offer で次の一手を決める',
         nextCheckAt: defaultNextCheckAt(now),
       });
@@ -1798,6 +1809,9 @@ export function openEpisode(snapshot, episodeId, input, now) {
  * `pending` に入れる (2 分の取り消しもしない)。外側を確かめられないまま未受付と決めると、
  * 届いている起動を取り消してしまう (Fable 検収 2026-09-07 の裁定)。
  *
+ * @param {object} snapshot
+ * @param {{runFor?: (actionId: string) => unknown, messageFor?: (actionId: string) => unknown}|null} probe
+ * @param {number|string} now
  * @param {{hold?: string[]}} [options] 既定は空 = 従来どおり全件を判断する
  */
 export function reconcileActions(snapshot, probe, now, { hold = [] } = {}) {

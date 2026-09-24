@@ -1,3 +1,4 @@
+// @ts-check
 // bot 間ループガード。「bot の発言が次の bot を呼ぶ」連鎖をスレッド単位で数え、
 // 上限に達したら止める。人間が発言したらリセットする (会話の主導権は人間側)。
 // 状態は in-memory (プロセス再起動で消えてよい — 再起動後は人間の発言から始まる)。
@@ -188,6 +189,7 @@ export class HopTracker {
  * 理由を区別せず「止まった」として扱えばよく、区別が要るときは taskBudget() を見る。
  *
  * @param {HopTracker} tracker
+ * @param {string} threadId
  * @param {{spend: boolean}} options spend=false なら残量を見るだけ (減らさない)
  * @returns {{ok: boolean, warn: boolean}}
  */

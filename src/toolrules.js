@@ -82,7 +82,7 @@ const CONTROL_CHARS = new RegExp(String.raw`[\u0000-\u001f\u007f]`, 'g');
  * 拒否 1 件を grant 候補へ変える。
  *
  * @param {{tool_name?: string, toolName?: string, tool_input?: object, toolInput?: object}} denial
- * @param {{cwd?: string}} ctx canonical cwd (grant に焼き込む)
+ * @param {{cwd?: string|null}} ctx canonical cwd (grant に焼き込む)
  * @returns {{ok: true, grant: object, rule: string}
  *          |{ok: false, tool: string, reason: string, suggestion?: string}}
  *          suggestion = 自動承認はできないが人間が config.json へ貼れる候補

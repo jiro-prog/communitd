@@ -92,9 +92,23 @@ npm run lint      # eslint (flat config) + 文書への参照チェック
   相対リンクと、`src/`・`scripts/` に書いた `docs/*.md` が**追跡しているファイルを指しているか**を
   見ます。公開されていない文書を出典に書くと、読む人には行き止まりになるためです。
 
-型検査 (`tsc --checkJs`) は**まだ導入していません**。`jsconfig.json` は置いてあるので
-エディタの補完は効きますが、CI には入れていません (現状 3000 件超の指摘が出ます。
-ほとんどは JSDoc の書き方の問題で、実バグではありません)。
+## 型検査
+
+```sh
+npm run typecheck # tsc -p tsconfig.check.json
+```
+
+型検査は**先頭に `// @ts-check` を書いたファイルだけ**を見ます (`strictNullChecks` 付き)。
+全体に掛けると 3000 件を超える指摘が出るため (ほとんどは JSDoc の書き方の問題で、実バグでは
+ありません)、直したファイルから 1 つずつ印を付けて、印の付いたファイルが崩れないようにしています。
+CI の lint job でも回ります。
+
+- 新しく作るファイルには `// @ts-check` を付けてください。
+- 既存のファイルに付けるときは、型を黙らせる (`any` やキャスト) より JSDoc を実際の形に合わせる
+  ほうを選んでください。よくある直し方: `let x = null` には `/** @type {T|null} */` を付ける、
+  `@param {object}` を読むプロパティの分だけ書き下す、`{ok: true, …} | {ok: false, …}` を返す
+  関数には `@returns` を書く (推論だと `ok` が `boolean` に広がって絞り込めない)。
+- `jsconfig.json` はエディタ用で、全体を checkJs で見ます (件数を見る調査用)。
 
 ## コードの流儀
 
@@ -112,7 +126,7 @@ npm run lint      # eslint (flat config) + 文書への参照チェック
 ## PR を出すとき
 
 - コミットメッセージは**何を・なぜ**を 1 行目に。本文で背景を書くのは歓迎です (日本語・英語可)。
-- `npm test` と `npm run lint` が通っていること。CI でも回ります。
+- `npm test` と `npm run lint` と `npm run typecheck` が通っていること。CI でも回ります。
 - 振る舞いが変わる変更は [CHANGELOG.md](CHANGELOG.md) の `Unreleased` に 1 行足してください。
 - **触らなくてよいもの:** `config.policy.json` (作者の実運用設定)、`roles/*.md` (bot の役割文)、
   `docs/` のうち `docs/reference/` 以外 (内部の記録)。これらは公開スナップショットには

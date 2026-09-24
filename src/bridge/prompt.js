@@ -1,3 +1,4 @@
+// @ts-check
 // スレッドの transcript からモデルへ渡す prompt を組む (src/index.js から切り出し)。
 // 取捨の判断は src/transcript.js (selectTranscript)、添付の取得は src/attachments.js。
 // ここは Discord の fetch と整形だけを持つ。
@@ -59,7 +60,8 @@ export function attachmentSuffix(msg, refs) {
 /**
  * @param {object} deps
  * @param {Map<string, {key: string, userId: string|null}>} deps.bots 起動中の bot (自分たちの投稿の判定に使う)
- * @param {{fetchLimit: number, transcriptCharBudget: number, attachments: object}} deps.limits
+ * @param {{fetchLimit: number, transcriptCharBudget: number,
+ *   attachments: import('../attachments.js').AttachmentLimits}} deps.limits
  */
 export function createPromptBuilder({ bots, limits }) {
   const FETCH_LIMIT = limits.fetchLimit;

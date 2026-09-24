@@ -176,7 +176,7 @@ export function resolveCliCommand({
  *   ここを素通しにすると `codexCmd: ["codex"]` と書いただけで spawn が ENOENT になる
  * - 未設定・空 … 既定の名前 (`spec.name`) を PATH から引く
  *
- * @param {string|string[]|undefined} configured 設定値
+ * @param {string|string[]|null|undefined} configured 設定値
  * @param {object} spec CLI の在り処 (CLAUDE_CLI / CODEX_CLI)
  * @param {object} [deps] 注入 (platform / env / exists / readFile / nodeBin)
  * @returns {string[]|null}
@@ -203,7 +203,7 @@ export function cliCmdHint({ configKey, example } = {}) {
  * 解決できなかった理由。**PATH のせいにしない** — 設定に絶対パスを書いた人には PATH は
  * 無関係で、「PATH に見つかりません」と言われると直す場所を探せない (Opus2 指摘 2026-09-10)。
  *
- * @param {string|string[]|undefined} configured 設定値 (どこを直せばよいかはこれで決まる)
+ * @param {string|string[]|null|undefined} configured 設定値 (どこを直せばよいかはこれで決まる)
  * @param {object} spec CLI の在り処 (CLAUDE_CLI / CODEX_CLI)
  */
 export function cliCmdReason(configured, spec) {

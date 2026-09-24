@@ -1,3 +1,4 @@
+// @ts-check
 // 設定ファイル (policy / secrets) の読み込みと合成。
 
 import { isPlainObject } from './config-util.js';

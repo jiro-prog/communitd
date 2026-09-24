@@ -1,3 +1,4 @@
+// @ts-check
 // Discord へ出す文字列の加工 (純粋関数)。
 //
 // メンションの解決・無害化は src/mentions.js が持つ (制御マーカーの解釈と
@@ -26,6 +27,7 @@ const FENCE_LINE = /^[ \t]*(`{3,})[ \t]*(.*?)[ \t]*$/;
 function scanFences(src) {
   const marks = [];
   const fences = [];
+  /** @type {{fence: string, info: string}|null} */
   let open = null;
   let at = 0;
   for (const line of src.split('\n')) {
@@ -52,6 +54,7 @@ function scanFences(src) {
 
 /** offset までを出力した時点で開いているブロック (無ければ null) */
 function openAt(marks, offset) {
+  /** @type {{fence: string, info: string}|null} */
   let open = null;
   for (const mark of marks) {
     if (mark.at > offset) break;
@@ -92,6 +95,7 @@ export function chunkText(text, size) {
   const { marks, fences } = scanFences(src);
   const chunks = [];
   let pos = 0;
+  /** @type {{fence: string, info: string}|null} */
   let carry = null; // 前のチャンクを閉じたので開き直すブロック
 
   for (;;) {
@@ -109,6 +113,7 @@ export function chunkText(text, size) {
     // (詰めると開いていない位置まで戻ることがあり、そのときは補完自体が要らなくなる)
     let budget = size - prefix.length;
     let cut = pos;
+    /** @type {{fence: string, info: string}|null} */
     let open = null;
     let suffix = '';
     for (let i = 0; i < 4; i++) {

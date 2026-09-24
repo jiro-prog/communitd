@@ -1,3 +1,4 @@
+// @ts-check
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
 
@@ -21,9 +22,11 @@ export const LEDGER_BROKEN_KINDS = Object.freeze(['read-error', 'syntax-error', 
 export class JsonStore {
   constructor(filePath) {
     this.filePath = filePath;
+    /** @type {Record<string, any>} */
     this.data = {};
     // **公開するのは getter の `broken`** (JobRunStore は文字列で返す互換 API を持つので、
     // 素の値はここに置いて派生側から読み替えられるようにする)
+    /** @type {{kind: string, reason: string, at: string, code?: string|null}|null} */
     this.brokenInfo = null;
     if (existsSync(filePath)) {
       const read = readLedgerFile(filePath);
@@ -128,7 +131,7 @@ function brokenWriteMessage(filePath, broken) {
  * 文字列を返すので、どちらも `{file, reason}` へそろえる。**store を持たない配線
  * (テストの偽物) も混ざる**ので、`broken` を持たないものは健全として扱う。
  *
- * @param {Array<{filePath?: string, broken?: object|string|null}|null|undefined>} stores
+ * @param {Array<{filePath?: string, broken?: {reason?: string, kind?: string}|string|null}|null|undefined>} stores
  * @returns {Array<{file: string, reason: string}>}
  */
 export function brokenLedgers(stores = []) {
@@ -225,6 +228,8 @@ export class ContractStore extends JsonStore {
    *
    * 期限切れはここでも掃除する (起動しなかった handoff の契約を溜めない)。
    *
+   * @param {string} threadId
+   * @param {string} botKey
    * @param {{fromBotKey: string, nonce: string, now?: number, ttlMs?: number}} key
    * @returns {object|null}
    */
@@ -328,9 +333,9 @@ export class PauseStore extends JsonStore {
     return {
       paused: true,
       by: 'system',
-      reason: `${basename(this.filePath)} が読めない: ${this.brokenInfo.reason}`,
+      reason: `${basename(this.filePath)} が読めない: ${this.brokenInfo?.reason}`,
       broken: true,
-      at: this.brokenInfo.at,
+      at: this.brokenInfo?.at,
     };
   }
 

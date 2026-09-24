@@ -1,3 +1,4 @@
+// @ts-check
 // 「⚙️ 作業中…」の placeholder に、いまの段階・経過・最後に観測できた活動を出す。
 //
 // 情報源は増やさない: 段階は実行記録の側が知っていて、ツールは `hooks: true` のチャンネルで
@@ -15,10 +16,10 @@ export const PROGRESS_INTERVAL_MS = 30 * 1000;
  * @param {object} p
  * @param {string} p.displayName
  * @param {string} p.channelName
- * @param {string} [p.model]
- * @param {string} p.stage 実行記録の段階 (starting / model / verify / deliver)
- * @param {number|null} p.startedAt job が走り出した時刻 (ms)
- * @param {number} p.now
+ * @param {string|null} [p.model]
+ * @param {string} [p.stage] 実行記録の段階 (starting / model / verify / deliver)
+ * @param {number|null} [p.startedAt] job が走り出した時刻 (ms)
+ * @param {number} [p.now]
  * @param {boolean} [p.hooks] 軌跡が取れるチャンネルか
  * @param {number|null} [p.toolCalls] 完了したツールの数
  * @param {{tool: string, arg?: string|null, at?: number|null}|null} [p.lastTool] 最後に完了したツール
@@ -26,13 +27,13 @@ export const PROGRESS_INTERVAL_MS = 30 * 1000;
 export function formatProgressLine({
   displayName, channelName, model = null, stage = 'model', startedAt = null, now = Date.now(),
   hooks = false, toolCalls = null, lastTool = null,
-} = {}) {
+}) {
   const head = `⚙️ ${displayName} 作業中… (${channelName}${model ? ` / model: ${model}` : ''})`;
   const parts = [`段階: ${stageLabel(stage)}`];
   const elapsed = elapsedLabel(startedAt, now);
   if (elapsed) parts.push(`経過 ${elapsed}`);
   if (hooks) {
-    if (Number.isSafeInteger(toolCalls) && toolCalls > 0) {
+    if (typeof toolCalls === 'number' && Number.isSafeInteger(toolCalls) && toolCalls > 0) {
       parts.push(`ツール ${toolCalls} 件`);
       if (lastTool?.tool) {
         const ago = elapsedLabel(lastTool.at ?? null, now);
@@ -80,7 +81,7 @@ export function elapsedLabel(from, now) {
  * @param {() => object|null} p.snapshot いまの状態 (`formatProgressLine` の引数 + `suspended`)。
  *   null / `suspended: true` なら何もしない (承認待ちの表示を上書きしない)
  * @param {(text: string) => Promise<unknown>} p.edit placeholder の編集
- * @param {(snap: object) => void} [p.onChange] 新しい活動を観測したとき (実行記録へ写す)
+ * @param {((snap: object) => void)|null} [p.onChange] 新しい活動を観測したとき (実行記録へ写す)
  * @param {number} [p.intervalMs]
  * @param {(fn: () => void, ms: number) => unknown} [p.setIntervalImpl]
  * @param {(handle: unknown) => void} [p.clearIntervalImpl]
@@ -92,12 +93,15 @@ export function createProgressReporter({
   intervalMs = PROGRESS_INTERVAL_MS,
   setIntervalImpl = setInterval,
   clearIntervalImpl = clearInterval,
-} = {}) {
+}) {
+  /** @type {{unref?: () => void}|null} */
   let timer = null;
+  /** @type {string|null} */
   let lastText = null;
   let lastToolCalls = null;
   let stopped = false;
   // 進行中の編集。stop() はこれを待つ — 終端の ❌ / ⏹ を直後の tick が上書きしないため
+  /** @type {Promise<void>|null} */
   let editing = null;
   const period = Number.isSafeInteger(intervalMs) && intervalMs >= PROGRESS_INTERVAL_MS
     ? intervalMs
@@ -136,7 +140,7 @@ export function createProgressReporter({
   return {
     start() {
       if (timer !== null || stopped) return;
-      timer = setIntervalImpl(() => { void tick(); }, period);
+      timer = /** @type {{unref?: () => void}} */ (setIntervalImpl(() => { void tick(); }, period));
       timer?.unref?.();
     },
     /** 止めて、進行中の編集があればそれを待つ (終端の表示を上書きさせない) */

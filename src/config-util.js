@@ -1,3 +1,4 @@
+// @ts-check
 // 設定の検証と解釈が共通で使う、値の形の判定。
 
 export function inRange(v, [min, max]) {
@@ -8,6 +9,7 @@ export function isNonEmptyString(v) {
   return typeof v === 'string' && v.trim() !== '';
 }
 
+/** @param {unknown} v @returns {v is Record<string, any>} */
 export function isPlainObject(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }

@@ -1,3 +1,4 @@
+// @ts-check
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -15,6 +16,16 @@ export const VERIFY_TAIL_LINES = 20;
  * shell: true は `npm test` のような shell 文字列をそのまま受けるために必要。
  * これは allowedTools の外にある任意コマンド実行経路なので、値の出所は作者管理の
  * config.json だけに限定し、エージェント出力や承認データから組み立てない。
+ *
+ * @param {object} p
+ * @param {string} p.command 検証コマンド (shell 文字列)
+ * @param {string} p.cwd
+ * @param {number} [p.timeoutMs]
+ * @param {number} [p.maxOutputChars]
+ * @param {string[]} [p.scrubEnvKeys] 子へ渡さない環境変数
+ * @param {{stopRequested?: boolean, abort?: () => void}|null} [p.handle] 停止の口 (撃たれたら走らせない・走っていれば止める)
+ * @param {boolean} [p.detachGroup]
+ * @param {typeof spawn} [p.spawnImpl]
  */
 export function runVerify({
   command,
@@ -31,7 +42,7 @@ export function runVerify({
   // claude のグループに残るので**ブリッジからの停止では孫まで届く** — 総和では確実になる
   detachGroup = true,
   spawnImpl = spawn,
-} = {}) {
+}) {
   if (handle?.stopRequested) {
     return Promise.resolve({
       ran: false,

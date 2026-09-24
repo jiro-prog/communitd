@@ -76,6 +76,8 @@ export const DEFAULT_LIMITS = {
   maxTextCharsTotal: 16000,
 };
 
+/** @typedef {typeof DEFAULT_LIMITS} AttachmentLimits */
+
 export function resolveLimits(overrides = {}) {
   return { ...DEFAULT_LIMITS, ...overrides };
 }
@@ -425,7 +427,8 @@ export function safeBaseName(name, mediaType) {
  * 通した添付が画像側からは「未対応」に見え、二重に報告される (sol 指摘 2026-08-05)。
  *
  * @param {Array<{messageId: string, attachments: Array<object>}>} sources 古い順
- * @returns {Promise<{images: Array<object>, texts: Array<object>, failures: Array<object>,
+ * @returns {Promise<{images: Array<{attachmentId: string}>, texts: Array<{attachmentId: string}>,
+ *   failures: Array<{as?: string, name: string, reason: string}>,
  *   skipped: number, textSkipped: number, unsupported: number}>}
  */
 export async function collectAttachments(sources, { limits = DEFAULT_LIMITS, fetchImpl = fetch } = {}) {
@@ -543,6 +546,9 @@ export function writeImageFiles(images, dir) {
  * 渡せなかった添付をモデルへ明示する行 (黙って落とすと「無かった」と誤読される)。
  * 未対応の件数は **画像でもテキストでもなかったものだけ** を数える —
  * テキストとして通した添付をここに含めると、渡してあるものを渡していないと報告する。
+ *
+ * @param {{failures?: Array<{as?: string, name: string, reason: string}>, skipped?: number,
+ *   textSkipped?: number, unsupported?: number}} [collected]
  */
 export function describeAttachmentFailures(
   { failures = [], skipped = 0, textSkipped = 0, unsupported = 0 } = {},

@@ -1,3 +1,4 @@
+// @ts-check
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { CLAUDE_CLI, cliCmdHint, cliCmdReason, resolveCliCommand, resolveConfiguredCommand } from './clicmd.js';
@@ -41,7 +42,7 @@ export function runClaude({
   // spawn の直前に PATH から引き直す (Windows の .cmd シム対策 — src/clicmd.js)
   claudeBin = 'claude',
   // 解決をテストから固定するための差し替え口 (実機の PATH に判定を委ねない)
-  resolveCmdImpl = null,
+  resolveCmdImpl = /** @type {((cmd: string|string[]|null|undefined) => string[]|null)|null} */ (null),
   cwd,
   model,
   effort,
@@ -55,7 +56,7 @@ export function runClaude({
   allowedTools = [],
   // T6: 契約の touch 制限で使う絞り込み。**どれも「狭める」向きにしか渡さない**
   // (組み込みツール自体の限定 / 明示的な拒否 / MCP の遮断)
-  tools = null,
+  tools = /** @type {string[]|null} */ (null),
   disallowedTools = [],
   strictMcp = false,
   settingSources = null,
@@ -68,7 +69,7 @@ export function runClaude({
   // 子プロセスが立った直後に pid と時刻を知らせる (実行記録 — src/jobruns.js)。
   // 「モデルが起動した = ここから先は副作用がありうる」の境目を記録するためだけの口で、
   // 起動そのものには関与しない。省略可・throw しても起動は続ける
-  onSpawn = null,
+  onSpawn = /** @type {((info: {pid: number|null, at: number, runtime: string}) => void)|null} */ (null),
   // 組み立てた引数をテストから検査するための差し替え口 (src/verify.js と同じ流儀)。
   // 権限に関わる引数が増えたので、「契約が無い job では 1 つも増えない」を固定できる形にする
   spawnImpl = spawn,
@@ -232,13 +233,13 @@ export function runClaude({
       }
     });
     child.stderr.on('data', (d) => { stderr += d; });
-    child.on('error', (err) => finish({
+    child.on('error', (/** @type {NodeJS.ErrnoException} */ err) => finish({
       ok: false,
       sessionId: sid,
       // 実行ファイルが見つからない / 直接起動できない (Windows の .cmd シム) の 2 つは
       // 生の errno だけでは原因が分からないので、設定の直し方を添える
       error: `spawn failed: ${err.message}`
-        + (['ENOENT', 'EINVAL'].includes(err.code) ? ` — ${CLAUDE_BIN_HINT}` : ''),
+        + (['ENOENT', 'EINVAL'].includes(err.code ?? '') ? ` — ${CLAUDE_BIN_HINT}` : ''),
     }));
     child.on('close', (code) => {
       if (aborted) {

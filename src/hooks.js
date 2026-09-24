@@ -1,3 +1,4 @@
+// @ts-check
 import { fileURLToPath } from 'node:url';
 import { HOOK_GRACE_MS } from './broker.js';
 
@@ -33,6 +34,7 @@ export function buildHookSettings(options = {}) {
   return JSON.parse(JSON.stringify({ hooks }));
 }
 
+/** @param {unknown} value @returns {value is Record<string, any>} */
 function isPlainObject(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);

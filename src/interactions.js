@@ -1208,6 +1208,9 @@ export async function admitJob({
  * (sol 指摘)。全体の上限は hardExitMs。
  *
  * @param {object} p
+ * @param {import('./queue.js').JobQueue} [p.jobs]
+ * @param {object} [p.lifecycle]
+ * @param {string} [p.cancelMessage] 待機中の job の placeholder に書く文言
  * @param {number} p.drainMs      中断完了を待つ上限。**hardExitMs より短いこと**。
  *        0 なら drain しない
  * @param {number} p.hardExitMs   Discord API が固まっても必ず終わる保険
@@ -1216,7 +1219,7 @@ export async function admitJob({
  * @param {(ms: number) => Promise<void>} p.drain  中断完了待ち
  * @param {() => Promise<unknown>} p.destroyClients Discord client の切断
  * @param {() => void} p.exit     プロセス終了 (process.exit)
- * @param {() => unknown} [p.abortOrgApply] **job ではない子プロセス**の中断。
+ * @param {(() => unknown)|null} [p.abortOrgApply] **job ではない子プロセス**の中断。
  *        org-apply の verify は tick から走るのでキューに居らず、`stopJobs` では撃てない
  *        (`/stop` の対象外なのも同じ理由 — あれはスレッド単位の job 停止)
  * @returns {Promise<boolean>} 自分が終了処理を走らせたなら true (二重呼び出しは false)

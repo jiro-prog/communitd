@@ -17,7 +17,8 @@
     "doctor": "node --env-file=.env scripts/doctor.mjs",
     "lint": "eslint . && node scripts/check-doc-refs.mjs",
     "check:docs": "node scripts/check-doc-refs.mjs",
-    "test": "node scripts/test.mjs"
+    "test": "node scripts/test.mjs",
+    "typecheck": "tsc -p tsconfig.check.json"
   },
   "engines": {
     "node": ">=20.6"
@@ -28,8 +29,10 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/node": "^20.19.43",
     "eslint": "^10.10.0",
-    "globals": "^17.12.0"
+    "globals": "^17.12.0",
+    "typescript": "^7.0.2"
   },
   "repository": {
     "type": "git",
