@@ -1,3 +1,4 @@
+// @ts-check
 // 実行中の job からの承認要求を、人間が押すまで待たせる層 (T5)。
 //
 // PreToolUse hook は claude の子プロセスで、ブリッジ本体は別プロセス。localhost に
@@ -41,7 +42,8 @@ export const MAX_ASK_INPUT_CHARS = 8000;
 /**
  * ask 1 件をどう扱うか (純粋関数)。
  *
- * @param {object} ask hook の payload (tool_name / tool_input)
+ * @param {{tool_name?: string, toolName?: string, tool_input?: object, permission_mode?: string}} ask
+ *        hook の payload (tool_name / tool_input)
  * @param {{cwd?: string|null, allowedRules?: string[],
  *          isApproved?: (grant: object) => boolean}} ctx
  *        allowedRules = この job へ実際に渡した --allowedTools。
@@ -221,7 +223,7 @@ export class ApprovalBroker {
    */
   stop(reason = 'job が終了したため承認を待てません') {
     this.stopped = true;
-    clearInterval(this.timer);
+    clearInterval(this.timer ?? undefined);
     this.timer = null;
     for (const [id, controller] of this.pending) {
       controller.abort();
@@ -259,6 +261,7 @@ export class ApprovalBroker {
     // 待ち上限はここ 1 か所だけが持つ。decide 側にも期限を置くと、
     // どちらが先に切れたかで挙動が変わる
     const controller = new AbortController();
+    /** @type {NodeJS.Timeout|null} */
     let timer = null;
     const expired = new Promise((resolveExpired) => {
       timer = setTimeout(() => {
@@ -279,7 +282,7 @@ export class ApprovalBroker {
       this.onError(err);
       answer = { decision: 'deny', reason: '承認処理でエラーが発生したため実行しません' };
     } finally {
-      clearTimeout(timer);
+      clearTimeout(timer ?? undefined);
       this.pending.delete(id);
     }
     this.answer(id, answer);

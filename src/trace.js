@@ -1,3 +1,4 @@
+// @ts-check
 import { appendFileSync, readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -99,6 +100,7 @@ export function summarizeTrace(entries = []) {
   let total = 0;
   let failed = 0;
   let reads = 0;
+  /** @type {number|null} */
   let readsBeforeFirstEdit = null;
 
   for (const entry of entries) {

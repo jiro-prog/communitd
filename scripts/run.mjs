@@ -1,3 +1,4 @@
+// @ts-check
 // npm start のラッパー。ブリッジ本体を子プロセスで起動し、Discord からの
 // restart (終了コード 42) のときだけ再起動する。
 // クラッシュ (それ以外のコード) では再起動せずラッパーごと終了する —
@@ -11,6 +12,7 @@ import { RESTART_EXIT_CODE, shouldRestart } from '../src/restart.js';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ENTRY = resolve(ROOT, 'src', 'index.js');
 
+/** @type {import('node:child_process').ChildProcess|null} */
 let child = null;
 let stopping = false;
 
@@ -46,7 +48,7 @@ function start() {
 
 // Ctrl+C / kill は子へ伝えて自分も終わる (再起動しない)。
 // 子側は SIGINT/SIGTERM で待機 job の placeholder を ⏹ に直してから終了する。
-for (const sig of ['SIGINT', 'SIGTERM']) {
+for (const sig of /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM'])) {
   process.on(sig, () => {
     stopping = true;
     if (child) child.kill(sig);

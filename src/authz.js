@@ -1,3 +1,4 @@
+// @ts-check
 // 発言者の認可判定 (純粋関数)。入口の identity 境界はチャンネル「名」でなく ID で縛る。
 
 /**
@@ -6,7 +7,7 @@
  * 「設定されていれば照合する」ではなく常に照合する (設定漏れ = 全開放にしない)。
  *
  * @param {object} p
- * @param {object} p.config      config.json
+ * @param {{guildId?: string, allowedUserIds?: string[]}} p.config  合成後の config
  * @param {string} p.guildId     発言のあった Guild ID (DM なら null)
  * @param {string} p.authorId    発言者 ID
  * @param {boolean} p.isBot      発言者が bot か

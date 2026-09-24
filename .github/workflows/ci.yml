@@ -18,6 +18,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+      # `// @ts-check` を付けたファイルだけの型検査 (tsconfig.check.json)
+      - run: npm run typecheck
 
   test:
     # 開発は Windows・CI は ubuntu だと、パスの意味論の違いが公開してから出る

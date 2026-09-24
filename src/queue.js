@@ -1,3 +1,4 @@
+// @ts-check
 import { resolve } from 'node:path';
 
 // cwd レーン単位のジョブキュー (副作用なし — タイマーも I/O も持たない)。

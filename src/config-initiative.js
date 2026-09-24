@@ -1,3 +1,4 @@
+// @ts-check
 // 発議と組織裁定 (`initiative`) と、bot ごとの duty の解釈と検証。
 
 import { resolve } from 'node:path';

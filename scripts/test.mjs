@@ -1,3 +1,4 @@
+// @ts-check
 // `npm test` の入口。
 //
 // **シェルにも Node の版にも依存させない。** `node --test test/*.test.js` は

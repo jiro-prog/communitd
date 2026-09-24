@@ -1,3 +1,4 @@
+// @ts-check
 // 再起動と停止の配線 (src/index.js から切り出し)。
 // 自分自身を起動し直すことはできないので、終了コード 42 で終わり
 // scripts/run.mjs (npm start のラッパー) に再起動させる。中身は src/interactions.js の
@@ -20,12 +21,12 @@ export const SHUTDOWN_HARD_EXIT_MS = 15000;
 /**
  * @param {object} deps
  * @param {string} deps.root                  data/restart-notice.json の置き場の根
- * @param {Map<string, object>} deps.bots
+ * @param {Map<string, {client: import('discord.js').Client}>} deps.bots
  * @param {import('../queue.js').JobQueue} deps.jobs
  * @param {object} deps.lifecycle
  * @param {import('../jobruns.js').JobRunStore} deps.jobRuns
  * @param {(ms: number, label?: string) => Promise<void>} deps.waitForJobsDrained
- * @param {() => unknown} [deps.abortOrgApply] 適用回路の verify を撃つ口
+ * @param {(() => unknown)|null} [deps.abortOrgApply] 適用回路の verify を撃つ口
  *        (src/bridge/orgapply.js の `abortVerify`)。**job ではないので stopJobs では撃てない**
  * @param {(code: number) => void} [deps.exit] プロセス終了 (テストから差し替える)
  */

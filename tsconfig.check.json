@@ -1,0 +1,15 @@
+{
+  "//": [
+    "CI の型検査 (`npm run typecheck`)。**`// @ts-check` を先頭に書いたファイルだけを見る** —",
+    "全体に checkJs を掛けると 3000 件を超える指摘が出る (ほとんどは JSDoc の書き方の問題) ので、",
+    "直したファイルから 1 つずつ印を付けて、印の付いたファイルが二度と崩れないようにする。",
+    "エディタ用の jsconfig.json は全体を checkJs で見る調査用のまま残してある。"
+  ],
+  "extends": "./jsconfig.json",
+  "compilerOptions": {
+    "checkJs": false,
+    "strictNullChecks": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.js", "scripts/**/*.mjs"]
+}

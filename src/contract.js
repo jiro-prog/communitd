@@ -1749,6 +1749,7 @@ export function renderForKind(kind, contract, narrowed = null) {
   return '';
 }
 
+/** @param {unknown} v @returns {v is Record<string, any>} */
 function isPlainObject(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }

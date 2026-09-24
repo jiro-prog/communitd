@@ -1,3 +1,4 @@
+// @ts-check
 // 承認済み diff を実際に当てる実行層。
 //
 // 判断は `src/apply.js` が持つ (当ててよいか・どの手を打つか)。ここはその手順を
@@ -84,8 +85,8 @@ export function withApplyLock(key, run) {
  * 次の適用が現況を読み始めると、**後始末が次の枝を撤去する** (Sol 指摘 2026-09-01)。
  * receipt の記録も task の遷移もここへ入れる。
  *
- * @param {{proposal: object, plan: object, taskId: string, branch: string,
- *          repoRoot: string, deps: object, settle?: function}} p
+ * @param {{proposal: object, plan: Record<string, any>, taskId: string, branch: string,
+ *          repoRoot: string, deps: Record<string, any>, settle?: Function|null}} p
  *   plan は `checkApplicable` / `prepareApply` が返したもの (基点・適用後の内容・files)。
  *   deps は `{git, writeFile, deleteFile, ensureDir, validateApplied, verify,
  *   listWorktrees, listBranches}`:
@@ -104,7 +105,7 @@ export function withApplyLock(key, run) {
  */
 export async function applyProposal({
   proposal, plan, taskId, branch, repoRoot, deps = {}, settle = null,
-} = {}) {
+}) {
   const required = [
     'git', 'writeFile', 'deleteFile', 'ensureDir', 'validateApplied', 'verify',
     'listWorktrees', 'listBranches',
@@ -323,8 +324,11 @@ async function runApply({ proposal, plan, taskId, branch, repoRoot, deps }) {
  *
  * 算出した結果は `plan.applied` とも突き合わせる。食い違ったら「裁定時に見た内容と
  * 基点の内容が違う」ので当てない — 直す先は作業ツリーではなく提案 (再裁定) になる。
+ *
+ * @returns {Promise<{ok: true, applied: Record<string, string|null>} | {ok: false, stage: string, reason: string}>}
  */
 async function computeFromBase({ plan, path, git }) {
+  /** @type {Record<string, string|null>} */
   const applied = {};
   for (const file of plan.files) {
     let before = null;

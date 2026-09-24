@@ -1,3 +1,4 @@
+// @ts-check
 // 子プロセスの生存確認 (前プロセスの子が生きていないことを確認できるまで、同じタスクを
 // 起こさない)。
 //
@@ -107,7 +108,7 @@ export function parseUnixProcess(text) {
  * @returns {'alive'|'gone'|'unknown'}
  */
 export function judgeLiveness(spawn, inspected, { toleranceMs = SPAWN_TIME_TOLERANCE_MS } = {}) {
-  if (!spawn || !Number.isSafeInteger(spawn.pid) || spawn.pid <= 0) return 'unknown';
+  if (!spawn || typeof spawn.pid !== 'number' || !Number.isSafeInteger(spawn.pid) || spawn.pid <= 0) return 'unknown';
   if (!inspected || inspected.error) return 'unknown';
   if (!inspected.alive) return 'gone';
   const recordedAt = msOfTime(spawn.at);
@@ -124,8 +125,10 @@ function runCommand(file, args) {
   return new Promise((resolvePromise, reject) => {
     execFile(file, args, { windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
       if (err) {
-        const wrapped = new Error(`${file} exited with code ${err.code ?? '?'}: ${String(err.message).slice(0, 200)}`);
-        wrapped.exitCode = Number.isInteger(err.code) ? err.code : null;
+        const wrapped = Object.assign(
+          new Error(`${file} exited with code ${err.code ?? '?'}: ${String(err.message).slice(0, 200)}`),
+          { exitCode: Number.isInteger(err.code) ? err.code : null },
+        );
         reject(wrapped);
         return;
       }

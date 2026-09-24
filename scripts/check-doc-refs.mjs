@@ -1,3 +1,4 @@
+// @ts-check
 // リポジトリ内の文書への参照が、実在するファイルを指しているかを見る (CI の lint job で回す)。
 //
 //   node scripts/check-doc-refs.mjs      # npm run check:docs

@@ -100,6 +100,7 @@ export async function collectThreadPosts({
   return { complete: false, posts, pages: maxPages };
 }
 
+/** @param {unknown} v @returns {v is Record<string, any>} */
 function isPlainObject(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }

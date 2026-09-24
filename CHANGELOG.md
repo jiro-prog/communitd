@@ -25,6 +25,11 @@
 
 ### Added
 
+- **型検査を段階的に入れた (`npm run typecheck`、CI の lint job でも回る)。** TypeScript の
+  `tsc` で、**先頭に `// @ts-check` を付けたファイルだけ**を `strictNullChecks` 付きで見る
+  (`tsconfig.check.json`)。まず `src/` と `scripts/` の 38 ファイルに付けた。付けるために JSDoc を
+  実際の形に合わせた (`let x = null` の型、`@param {object}` の中身、`ok` で分かれる戻り値など)。
+  コードの変更は型のための言い換えだけで、振る舞いは変えていない。
 - **`npm run lint` が文書への参照も見る** (`scripts/check-doc-refs.mjs`、単独なら
   `npm run check:docs`)。Markdown の相対リンクと、`src/`・`scripts/` に書いた `docs/*.md` が
   追跡しているファイルを指していなければ落とす。

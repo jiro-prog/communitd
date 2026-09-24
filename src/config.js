@@ -1,3 +1,4 @@
+// @ts-check
 // 設定 (config.policy.json + config.secrets.json) の読み込み・合成・解釈・起動時検証。
 // ファイル読み込みは注入した fs で行うので副作用なし (Discord ログインへ走る index.js と
 // 分離し、テストから直接 import できるようにしてある)。

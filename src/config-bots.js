@@ -1,3 +1,4 @@
+// @ts-check
 // bot の定義 (`bots.<key>`) と CLI の起動コマンド (`claudeBin` / `codexCmd`) の検証。
 
 import { CLAUDE_EFFORTS } from './claude.js';
