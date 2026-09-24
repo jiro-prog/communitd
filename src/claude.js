@@ -115,7 +115,7 @@ export function runClaude({
   if (rolePromptFile) args.push('--append-system-prompt-file', rolePromptFile);
   if (settingsFile) args.push('--settings', settingsFile);
   // 最終出力をスキーマへ拘束する。結果 JSON の structured_output にパース済みで入る
-  // (T0 §4.1)。**result はそのスキーマの JSON 文字列になる**ので、人間向けの散文は
+  //。**result はそのスキーマの JSON 文字列になる**ので、人間向けの散文は
   // スキーマ側の `本文` フィールドで受ける (src/contract.js)
   if (jsonSchema) args.push('--json-schema', JSON.stringify(jsonSchema));
   // 外部 settings (user / project / local) を読み込ませない。
@@ -129,7 +129,7 @@ export function runClaude({
   // 省略すると絞ったつもりで全ツールが使える。実測: `--tools ""` は全ツール無効になる)
   if (Array.isArray(tools)) args.push('--tools', tools.join(','));
   if (allowedTools.length > 0) args.push('--allowedTools', ...allowedTools);
-  // Agent / Task は --allowedTools に書かなくても呼べる (T0 §6c) ので、
+  // Agent / Task は --allowedTools に書かなくても呼べるので、
   // 止めるには明示的な拒否が要る
   if (disallowedTools.length > 0) args.push('--disallowedTools', ...disallowedTools);
   // MCP サーバを 1 つも読まない (書けないと分かったモデルが MCP へ迂回するのを塞ぐ)
@@ -269,8 +269,8 @@ export function runClaude({
         ok: !json.is_error,
         sessionId: json.session_id ?? sid,
         result: json.result ?? '',
-        // --json-schema を渡したときだけ入る (パース済みのオブジェクト — T0 §4.1)。
-        // stream-json 経路でも同じキーに入る (T0 §4.3) ので分岐は要らない
+        // --json-schema を渡したときだけ入る (パース済みのオブジェクト)。
+        // stream-json 経路でも同じキーに入るので分岐は要らない
         structuredOutput: json.structured_output ?? null,
         costUsd: json.total_cost_usd,
         numTurns: json.num_turns,

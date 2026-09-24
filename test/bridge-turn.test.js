@@ -96,7 +96,7 @@ test('本文 → 制御メンション の順に届け、handoff の宛先を実
 
 const VERIFY_NG = { ok: false, code: 1, command: 'npm test', output: 'FAIL a.test.js', durationMs: 1200 };
 
-test('verify NG は結果まで配送したうえで元の handoff を止め、投げ手へ戻す (§12.3 (3))', async (t) => {
+test('verify NG は結果まで配送したうえで元の handoff を止め、投げ手へ戻す', async (t) => {
   const h = harness(t);
   const contract = {
     body: '直しました\n\n[[handoff:sol]]', background: '背景', purpose: '目的', touch_set: ['a.js'],
@@ -341,7 +341,7 @@ test('outgoingContext は編成を反映した bot 一覧と owner を返す', (
   assert.notEqual(ctx.bots.find((b) => b.key === 'opus').inRoster, false);
 });
 
-// ---- 案件に結ばれた job の配送 (docs/society-ledger.md §5・S2-3a) ----
+// ---- 案件に結ばれた job の配送 ----
 
 const CASE_ACTION = { caseId: 'C-1', actionId: 'A-1', claimGeneration: 1 };
 

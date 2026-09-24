@@ -1,4 +1,4 @@
-// touch を持たない既存タスクへ宣言を後付けする移行 CLI (docs/social-engineering.md §3.9)。
+// touch を持たない既存タスクへ宣言を後付けする移行 CLI。
 //
 //   node scripts/migrate-task-touch.mjs                        # 現状を出すだけ (何も書かない)
 //   node scripts/migrate-task-touch.mjs --apply 9=src/a.ts,src/b.ts 31=src/c.ts

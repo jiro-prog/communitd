@@ -87,7 +87,7 @@ test('enabled でなければ何もしない (日付の繰越だけは進む)', 
 });
 
 test('担当が居なければ何もしない (着手もスカウトも)', () => {
-  // reviewer が居ないと着手しても main まで運べない (§3.6) ので、始めない。
+  // reviewer が居ないと着手しても main まで運べないので、始めない。
   // state は初期値 = スカウトが due の状態にして、スカウトまで止まることを見る
   for (const over of [{ worker: { bots: [] } }, { reviewer: null }, { worker: { bots: [] }, reviewer: null }]) {
     const out = planTick({
@@ -501,7 +501,7 @@ test('proposedTasks: 起票をボードへ渡す形にし、job 予算を頭打�
   );
 });
 
-test('proposedTasks: job 予算に下限を敷く (worker 1 + review 1 + 予備 2 — §9.2b)', () => {
+test('proposedTasks: job 予算に下限を敷く (worker 1 + review 1 + 予備 2)', () => {
   const one = (over) => ({
     body: 'x', tasks: [{ title: 'A', rationale: 'ra', touch: ['src/a.ts'], ...over }],
   });
@@ -518,7 +518,7 @@ test('proposedTasks: job 予算に下限を敷く (worker 1 + review 1 + 予備 
   assert.equal(budget(one({ job_budget: 2 }), 3), 3);
 });
 
-test('planFiling の枠は planTick がスカウトを起こす条件と同じ定義 (§9.2a)', () => {
+test('planFiling の枠は planTick がスカウトを起こす条件と同じ定義', () => {
   // 枠の定義が 2 か所でずれると「起こしたのに 1 件も載らない」巡回ができる。
   // 実体は src/board.js 側にあるので、ここで planTick と突き合わせて固定する
   const maxOpenTasks = 3;
@@ -543,7 +543,7 @@ test('planFiling の枠は planTick がスカウトを起こす条件と同じ�
   }
 });
 
-// ---- 発議の巡回 (§3.9 の第 3 action) ----
+// ---- 発議の巡回 (第 3 action) ----
 
 /** duty を持つ bot (resolveDutyBots の戻りと同じ形) */
 const dutyBot = (botKey, over = {}) => ({
@@ -962,7 +962,7 @@ const MERGE_FACTS = {
   branch: 'task/1',
 };
 
-test('planReview: merge は git の事実が 4 つ揃ったときだけ完了へ (§12.3 (2))', () => {
+test('planReview: merge は git の事実が 4 つ揃ったときだけ完了へ', () => {
   const out = planReview({ body: 'x', verdict: 'merge', merge_commit: 'abc1234' }, { git: MERGE_FACTS });
   assert.deepEqual(out, {
     action: 'complete',
@@ -976,7 +976,7 @@ test('planReview: merge は git の事実が 4 つ揃ったときだけ完了へ
   );
 });
 
-test('planReview: 照合できない merge は hold — 遷移させない (§12.3 (2))', () => {
+test('planReview: 照合できない merge は hold — 遷移させない', () => {
   // **事実を渡さない呼び出しは hold。** 「照合していない」を「照合できた」へ倒さない
   const bare = planReview({ body: 'x', verdict: 'merge', merge_commit: 'abc1234' });
   assert.equal(bare.action, 'hold');
@@ -1007,7 +1007,7 @@ test('planReview: 照合できない merge は hold — 遷移させない (§12
 });
 
 test('planReview: 適用 task の merge は planMerge が照合するので git の事実を要求しない', () => {
-  // §12.3 (2) — org-apply は receipt の OID と verify を planMerge が見てから
+  // org-apply は receipt の OID と verify を planMerge が見てから
   // ブリッジ自身が merge を打つ。ここで二重に git を要求すると、その経路が止まる
   const out = planReview({ verdict: 'merge', merge_commit: 'abc1234' }, { mergeCheckedBy: 'planMerge' });
   assert.deepEqual(out, { action: 'complete', note: 'merge abc1234 (planMerge が照合)' });
@@ -1039,7 +1039,7 @@ test('planReview: block はそのまま要人間 / 知らない判定は何も�
   assert.equal(planReview().action, 'none');
 });
 
-test('planReview: drop は対象を破棄へ (差し戻し回数に影響されない — §9.4)', () => {
+test('planReview: drop は対象を破棄へ (差し戻し回数に影響されない)', () => {
   assert.deepEqual(
     planReview({ verdict: 'drop', reason: '#45 の重複' }),
     { action: 'drop', reason: '#45 の重複' },
@@ -1071,7 +1071,7 @@ test('applyReview の drop はボードを閉じてから掃除する (duty イ�
   const drop = body.slice(dropAt, body.indexOf("plan.action === 'block'"));
   assert.ok(dropAt > 0 && drop.length > 0, 'drop の枝が無い');
   assert.match(drop, /board\.drop\(task\.id, \{ by: bot\.key, reason: plan\.reason \}\)/);
-  // **遷移が先・掃除は後** (§9.5)。撤去に失敗しても dropped は取り消さない
+  // **遷移が先・掃除は後**。撤去に失敗しても dropped は取り消さない
   assert.match(drop, /cleanupTaskWorktree\(\{ cc, task, action: 'drop' \}\)/, '掃除を呼んでいない');
   assert.ok(
     drop.indexOf('board.drop(') < drop.indexOf('cleanupTaskWorktree('),
@@ -1246,7 +1246,7 @@ test('担当以外のフッタ無し報告は完了に数えず、そのこと�
   assert.ok(body.includes('.catch(() => {})'), '投稿の失敗を握っていない');
 });
 
-test('承認には重複を見つける材料を渡す (§9.3 — 今回の起票は参考欄から除く)', () => {
+test('承認には重複を見つける材料を渡す (今回の起票は参考欄から除く)', () => {
   const source = bridgeSource('board');
   const cut = (start, end) => {
     const from = source.indexOf(start);

@@ -1,4 +1,4 @@
-// 導入診断 (docs/implementation-plan.md P7 / docs/social-engineering.md §11.6)。**読むだけ・純粋。**
+// 導入診断。**読むだけ・純粋。**
 //
 // 初めての利用者が「設定は通っているか・CLI は居るか・作業ディレクトリと Git は要件を満たすか・
 // data/ に書けるか」を、モデルも Discord も動かさずに確かめるための判定。
@@ -193,11 +193,11 @@ export function diagnose({
   if (writable === false) add('fail', 'data', 'data/ に書けない — 実行記録を保存できない job は起動しないので、全 job が止まる');
   else if (writable === true) add('ok', 'data', 'data/ に書ける');
   else add('warn', 'data', 'data/ の書き込み可否を確かめられなかった (無ければ起動時に作られる)');
-  // 自律起動の門になる台帳 (src/index.js の GATE 側と同じ顔ぶれ。§12.3 (1))
+  // 自律起動の門になる台帳 (src/index.js の GATE 側と同じ顔ぶれ)
   const GATE_LEDGERS = new Set(['pause.json', 'tasks.json', 'recovery.json', 'job-runs.json', 'tick-states.json', 'proposals.json']);
   for (const file of dataFiles) {
     const rel = file.slice(root.length + 1);
-    // 社会台帳だけは「不在」の意味が mode で変わるので下でまとめて見る (§12.2 (h))
+    // 社会台帳だけは「不在」の意味が mode で変わるので下でまとめて見る
     if (basename(file) === 'society.json') continue;
     // 壊れたときの影響は台帳で違う (src/index.js の門と同じ分け方 — Opus2 レビュー 2026-09-07 Minor1)。
     // 門になる 6 台帳は自律起動ごと止まり、それ以外は書き込みだけ断られる
@@ -218,12 +218,12 @@ export function diagnose({
     if (text === null || text === undefined) continue;
     const parsed = attempt(() => JSON.parse(text), undefined);
     if (parsed === undefined || !parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      // 2026-09-07 (§12.3 (1)) から退避しない = このまま起動すると壊れたまま残る
+      // 2026-09-07 から退避しない = このまま起動すると壊れたまま残る
       add('fail', 'data', `${rel} が JSON として読めない — ${effect}。直すか手で退避する`);
     }
   }
 
-  // ---- 社会台帳 (docs/society-ledger.md §1) ----
+  // ---- 社会台帳 ----
   // **他の台帳と唯一違うのは「不在」の扱い。** 既存の台帳は不在 = 初回だが、society は
   // observe / active で不在なら起動停止 (初回と推測しない)。off なら触れないので何も言わない。
   const societyFile = dataFiles.find((f) => basename(f) === 'society.json') ?? null;

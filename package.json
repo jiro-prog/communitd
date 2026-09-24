@@ -15,7 +15,8 @@
     "start": "node scripts/run.mjs",
     "add-project": "node --env-file=.env scripts/add-project.mjs",
     "doctor": "node --env-file=.env scripts/doctor.mjs",
-    "lint": "eslint .",
+    "lint": "eslint . && node scripts/check-doc-refs.mjs",
+    "check:docs": "node scripts/check-doc-refs.mjs",
     "test": "node scripts/test.mjs"
   },
   "engines": {

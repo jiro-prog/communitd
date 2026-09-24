@@ -488,7 +488,7 @@ test('/case: new と offer の引数を実体へそのまま渡す', async () =>
 
 test('/case: 案件を開く / 相談を出す / 停止を解除するのは owner だけ (一覧と詳細は全員)', async () => {
   // 予算と責任を動かす操作なので org 提案の裁定と同じ扱い (Fable 裁定 2026-09-08)。
-  // 再開が同じ門なのは §12.2 (g) —「解除は owner の操作か同じ認可の操作だけ」
+  // 再開が同じ門なのは「解除は owner の操作か同じ認可の操作だけ」
   const opens = { new: 'quality', goal: 'x', acceptance: 'y' };
   const offers = { id: 'C-1', bot: 'opus' };
   const resumes = { resume: 'C-1' };

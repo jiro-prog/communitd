@@ -1,4 +1,4 @@
-// 発議と組織提案のライフサイクル (docs/social-engineering.md §3.9)。
+// 発議と組織提案のライフサイクル。
 //
 // 提案は `review → merged` を前提にする task board へは載せず、ここ (`data/proposals.json`) を
 // 正本にする。採択後にコード変更が要るものだけ board へタスク化し、`taskIds[]` で結ぶ。
@@ -38,7 +38,7 @@ export const TARGET_OPS = Object.freeze(['add', 'edit', 'remove']);
 /** 関係 bot の意見。賛同と反論は同時に存在してよい */
 export const POSITION_STANCES = Object.freeze(['second', 'contest']);
 
-/** 状態機械 (§3.9)。`adjudicated` の採否は `decision` が持つ */
+/** 状態機械。`adjudicated` の採否は `decision` が持つ */
 export const PROPOSAL_STATES = Object.freeze([
   'raised', 'deliberating', 'adjudicated', 'trial', 'measured', 'withdrawn',
 ]);
@@ -108,7 +108,7 @@ const isStringArray = (v) => Array.isArray(v) && v.every((x) => isNonEmptyString
 const isoAt = (now) => new Date(now).toISOString();
 
 /**
- * 秘密側のファイルは派生物まで含めて対象外 (§3.9・§6 の安全境界)。
+ * 秘密側のファイルは派生物まで含めて対象外 (安全境界)。
  *
  * **大小文字を無視して比べる。** Windows では `CONFIG.SECRETS.JSON` が同じ実体を指すうえ、
  * 秘密ファイルがまだ無い環境では resolver 側の別名検出も効かない (存在しないので
@@ -121,7 +121,7 @@ export function isSecretPath(path) {
   return lower === secret || lower.startsWith(`${secret}.`);
 }
 
-// ---- kind の表 (§3.9「subjectKeys の生成規則」) ----
+// ---- kind の表 (「subjectKeys の生成規則」) ----
 //
 // 各 kind は target 1 件を `{key, required, allowed, ops}` へ写す関数を持つ。
 //   key      … その target が生む subjectKey
@@ -728,7 +728,7 @@ export function checkProposal(input, ctx) {
   const touch = input.change.touch;
   if (typeof ctx?.checkPath !== 'function') return fail('ctx.checkPath がありません (パスの実体を確かめられません)');
   // **秘密側は何よりも先に落とす。** 後段の実体判定でもだいたい落ちるが、
-  // 安全境界は「なぜ落ちたか」が読める順番で置く (§3.9・§6)
+  // 安全境界は「なぜ落ちたか」が読める順番で置く
   for (const path of [...touch, ...required, ...allowed]) {
     if (isSecretPath(path)) return fail(`${SECRETS_FILE} はどの提案の対象にもできません`);
   }
@@ -1311,7 +1311,7 @@ export class ProposalStore extends JsonStore {
     if (proposal.state !== 'deliberating') {
       throw new Error(
         `提案 ${proposal.id} は ${proposal.state} から adjudicated へ進めません `
-        + '(docs/social-engineering.md §3.9 の状態機械に無い)',
+        + '(提案の状態機械 PROPOSAL_TRANSITIONS に無い)',
       );
     }
     if (!canAdjudicate(proposal, actor, { ownerUserId, execBotKeys })) {
@@ -1407,7 +1407,7 @@ export class ProposalStore extends JsonStore {
     // **旧 `adjudication` を照合するのは、その裁定がまだ生きている状態だけ** (作者裁定 2026-09-04)。
     // `#divert` は監査のために裁定記録を残すので、一度 `deliberating` へ戻した提案は
     // 「digest が裁定時と食い違っている」のが前提そのもの。ここで照合すると**再裁定が
-    // 構造的に不可能**になり、戻した提案は二度と閉じられない (§3.9 の「deliberating へ
+    // 構造的に不可能**になり、戻した提案は二度と閉じられない (「deliberating へ
     // 戻して再裁定」が実機で通らなかった原因)。戻った後の記録は履歴として残すだけ。
     if (proposal.adjudication && LIVE_ADJUDICATION_STATES.includes(proposal.state)) {
       const digest = proposalDigest(snapshotOf(proposal, ctx, {
@@ -1465,7 +1465,7 @@ export class ProposalStore extends JsonStore {
 
   /**
    * 試用開始。**`process | org` だけが通る道** — `work` は task 化して完了後に
-   * `measured` へ直接進む (§3.9)。期限は input.trial の deadline をそのまま使う。
+   * `measured` へ直接進む。期限は input.trial の deadline をそのまま使う。
    *
    * ここでは digest を照合しない。org の試用は**適用の後**に始まるので、
    * 対象ファイルが裁定時から動いているのが正常な状態になる。
@@ -1477,7 +1477,7 @@ export class ProposalStore extends JsonStore {
     }
     // **試用は適用の後。** org / process の採択は必ず diff を伴うので、当てるまで
     // 「仮に置いた」状態は存在しない。receipt が無いまま試用を始めると、期限監視だけが
-    // 動いて中身は入っていない提案ができる (§3.9)
+    // 動いて中身は入っていない提案ができる
     if (!isPlainObject(proposal.receipt) || proposal.receipt.digest !== proposal.adjudication?.digest) {
       throw new Error(`提案 ${id} はまだ適用されていません (裁定 digest に対応する receipt が要ります)`);
     }
@@ -1531,7 +1531,7 @@ export class ProposalStore extends JsonStore {
   /**
    * 採択後に作った task を結ぶ (組織記憶は proposal 側を正本にする)。
    *
-   * **task 化は「実作業を起こす」関門なので digest まで照合する** (§3.9)。
+   * **task 化は「実作業を起こす」関門なので digest まで照合する**。
    * 裁定時の内容と食い違っていれば task は作らせず、再裁定へ戻す。
    *
    * 結ぶ相手が**実在し、この提案の範囲を触る task であること**も確かめる。
@@ -1658,7 +1658,7 @@ export class ProposalStore extends JsonStore {
    * 適用が通らなかったとき (検収の差し戻し・verify NG)。
    *
    * **戻す先は作業ツリーではなく提案。** 直す対象は diff なので、新しい revision を
-   * 作って再裁定を受け、承認後にきれいな枝へ当て直す (§3.9)。旧 task の終端化
+   * 作って再裁定を受け、承認後にきれいな枝へ当て直す。旧 task の終端化
    * (`dropped` / 理由 `superseded`) と worktree の解放は呼び出し側の仕事だが、
    * **提案側の 3 つ — 試行の記録・`applyTaskId` の解放・`deliberating` への差し戻し —
    * は 1 回の書き込みで行う。** 途中で落ちると「適用中のまま誰も進められない」提案が残る。
@@ -1760,7 +1760,7 @@ export class ProposalStore extends JsonStore {
     if (!PROPOSAL_TRANSITIONS[proposal.state]?.includes(to)) {
       throw new Error(
         `提案 ${proposal.id} は ${proposal.state} から ${to} へ進めません `
-        + '(docs/social-engineering.md §3.9 の状態機械に無い)',
+        + '(提案の状態機械 PROPOSAL_TRANSITIONS に無い)',
       );
     }
     const at = isoAt(now);

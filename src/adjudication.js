@@ -1,4 +1,4 @@
-// 組織提案の裁定 UI と、bot の構造化裁定 (docs/social-engineering.md §3.9)。
+// 組織提案の裁定 UI と、bot の構造化裁定。
 //
 // 裁定権は class で分かれる。
 //   org               … 作者 (CEO) だけ。Discord interaction で検証した owner が押す
@@ -7,7 +7,7 @@
 //                       空なら誰も裁定できない** (src/config.js の resolveExecBotKeys)。
 //                       bot はボタンを押せないので UI 経路は持たない
 //
-// **既存のツール権限 approval とは何も共有しない** (§3.9)。あちらは TTL 30 分の
+// **既存のツール権限 approval とは何も共有しない**。あちらは TTL 30 分の
 // in-memory で、再起動で失効するのが正しい短命な承認。こちらは数日待つ裁定で、
 // 正本は ProposalStore の永続レコード。custom ID から**永続 proposal ID を直接引く**。
 //
@@ -248,7 +248,7 @@ export function cardTargets(proposal, { fallbackChannelId = null } = {}) {
  * @param {{adjudication: object}} report 検証済みの report 契約
  * @param {{botKey: string, store: object, ctx: object, ownerUserId: string|null,
  *          execBotKeys: string[], baseCommit?: string|null, now?: number}} deps
- *   baseCommit は適用の基点 (§3.9)。git を読むのは呼び出し側の仕事なので、
+ *   baseCommit は適用の基点。git を読むのは呼び出し側の仕事なので、
  *   ここは受け取って store へ渡すだけ
  * @returns {{ok: boolean, note: string, proposal?: object, notifyOwner?: boolean}}
  */

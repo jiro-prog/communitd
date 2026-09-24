@@ -1,10 +1,10 @@
-// 自律社会の配線 (docs/society-implementation-plan.md S2 / docs/society-ledger.md)。
+// 自律社会の配線。
 //
 // S1 で入った台帳 (`src/society-store.js`) と純粋な遷移 (`src/cases.js`) を、
 // 起動・配送・受付・照合へ結ぶ層。**判断は持たない** — 遷移の可否は cases.js が決め、
 // ここが持つのは「順序」と「外側 (Discord・実行記録) との突き合わせ」だけ。
 //
-// 守っている順序 (§7): ① society.json に意図 (`planned` → `sending`) → ② 外部操作 (投稿) →
+// 守っている順序: ① society.json に意図 (`planned` → `sending`) → ② 外部操作 (投稿) →
 // ③ society.json に結果 (`sent` / `cancelled` / `reconcile`)。①と③の間で落ちたら、
 // 次の tick の照合が **Action ID を鍵に**外側を探し、見つかれば③を完成させ、
 // 見つからなければ `reconcile` に残す。再実行しても 1 回に収束する。
@@ -32,7 +32,7 @@ const QUIET_STOPS = Object.freeze(['off', 'not-ready']);
  *
  * **`[[...]]` の文法は使わない** — あれは「起動を決める」記法で、種類を増やすと
  * プロトコル版の管理対象になる (`src/contract.js` の契約タグと同じ流儀)。
- * **本文の印だけでは実行できない** (§5): 受信側は保存済みの Action と照合して初めて受け付ける。
+ * **本文の印だけでは実行できない**: 受信側は保存済みの Action と照合して初めて受け付ける。
  */
 const ACTION_TAG_ONLY = /^`案件:(A-\d+)`$/;
 
@@ -166,7 +166,7 @@ export function createSocietyWiring({
 }) {
   const mode = typeof society?.mode === 'string' ? society.mode : 'off';
   const enabled = mode !== 'off';
-  /** 未受付のまま置いておける時間 = 引受け申し出の再確認 × 2 (§12.4 の時定数から) */
+  /** 未受付のまま置いておける時間 = 引受け申し出の再確認 × 2 (時定数から) */
   const unacceptedGraceMs = Math.max(1, Number(society?.offerRecheckMin) || 5) * 2 * 60 * 1000;
 
   /**
@@ -263,7 +263,7 @@ export function createSocietyWiring({
   }
 
   /**
-   * 止める仕事の種類 (§3「`/pause` 中は新しい `sending` を作らない。照合と後始末は続ける」)。
+   * 止める仕事の種類 (「`/pause` 中は新しい `sending` を作らない。照合と後始末は続ける」)。
    *
    * @returns {{dispatch: string|null, reconcile: string|null}} 止める理由 (null = 回してよい)
    */
@@ -292,7 +292,7 @@ export function createSocietyWiring({
     }
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const out = transition(store.snapshot);
-      // **断られても保存する**モード (§4)。`acceptClaim` の `occupied` / `permission` は
+      // **断られても保存する**モード。`acceptClaim` の `occupied` / `permission` は
       // 「2 人目を declined に落として理由を残す」遷移で、`ok: false` でも
       // 返ったスナップショットに記録が入っている — 捨てると理由が消える
       if (!out.ok && !(keepRefusal && isPlainObject(out.snapshot))) {
@@ -339,10 +339,10 @@ export function createSocietyWiring({
     return { ok: false, code: 'conflict', reason: '版が動き続けています (次の tick でやり直します)' };
   }
 
-  // ---- Mandate の写し (§2) ----
+  // ---- Mandate の写し ----
 
   /**
-   * 設定の Mandate を台帳へ**版ごとに写す** (§2「台帳には版の写しを置き、実行時はその版を参照する」)。
+   * 設定の Mandate を台帳へ**版ごとに写す** (「台帳には版の写しを置き、実行時はその版を参照する」)。
    *
    * 台帳が読むのは写しであって config ではないので、写しが 1 つも無い配備では Case を作れない
    * (`caseContext` の authority も写しから引く)。**同じ key + version が既にあれば触らない** —
@@ -388,7 +388,7 @@ export function createSocietyWiring({
     return { ok: true, added };
   }
 
-  // ---- 相談 (§4 の offered) ----
+  // ---- 相談 (offered) ----
 
   /**
    * 裁定責務 (authority) の Claim を確かめ、無ければ **相談なしで accepted にする**。
@@ -419,11 +419,11 @@ export function createSocietyWiring({
   }
 
   /**
-   * 相談を出す (§4)。**1 つの update** で
+   * 相談を出す。**1 つの update** で
    * authority の Claim (無ければ) → 引受けの申し出 (`offered`) → 相談の Action (`planned`) を作る。
    *
    * 3 つを分けると、申し出だけが残って誰も聞かれていない Case や、
-   * 相談だけ飛んで台帳に申し出が無い Case ができる (§7 の「意図と操作を同じ update に」)。
+   * 相談だけ飛んで台帳に申し出が無い Case ができる (「意図と操作を同じ update に」)。
    * 送るのは tick の `dispatchPlanned`。
    */
   function offer({
@@ -460,7 +460,7 @@ export function createSocietyWiring({
     return { ok: true, claimId, actionId };
   }
 
-  // ---- 配送 (§5 の planned → sending → sent) ----
+  // ---- 配送 (planned → sending → sent) ----
 
   /**
    * その宛先へ送っても案件の戻りが返らない理由 (無ければ null)。
@@ -628,10 +628,10 @@ export function createSocietyWiring({
     return dispatched;
   }
 
-  // ---- 受付 (§5 の accepted) ----
+  // ---- 受付 (accepted) ----
 
   /**
-   * 印付きの起動を保存済みの Action と照合する。**本文の印だけでは実行させない** (§5)。
+   * 印付きの起動を保存済みの Action と照合する。**本文の印だけでは実行させない**。
    *
    * @returns {{ok: true, action: object|null}|{ok: false, reason: string}}
    *   `action` が null = 印の無い通常のメンション (従来どおり通す)
@@ -676,7 +676,7 @@ export function createSocietyWiring({
       return refuse(`案件 ${action.caseId} は ${record?.state ?? '不明'} (終端) です`);
     }
     if (record.stop) {
-      // **止めた案件の起動は受け付けない** (§12.2 (g))。送った後に人が止めた形なので、
+      // **止めた案件の起動は受け付けない**。送った後に人が止めた形なので、
       // ここで取り消して予約を返しておかないと、誰も受けない Action が枠を握ったまま残る
       cancelStoppedAction(action, `案件 ${action.caseId} は停止中 (/stop) — 受け付けずに取り消しました`);
       return {
@@ -693,7 +693,7 @@ export function createSocietyWiring({
   /**
    * 止めた案件へ届いた起動を取り消して予約を返す (受け付けないと決めた直後に呼ぶ)。
    *
-   * `sent` からは直接取り消せない (§5 の遷移表) ので、**照合へ倒してから**未受付を確定させる —
+   * `sent` からは直接取り消せない (遷移表) ので、**照合へ倒してから**未受付を確定させる —
    * いま受付を断ったのだから未受付は確定している。台帳にも「送った → 受けなかった → 返した」
    * の順で残る。契機の立て直しは `cases.js` の停止分岐が `waiting(paused)` で受ける。
    */
@@ -712,7 +712,7 @@ export function createSocietyWiring({
   }
 
   /**
-   * 案件に結ばれた job の実行文脈の材料 (§2〜§5)。台帳を読むだけで、無ければ null。
+   * 案件に結ばれた job の実行文脈の材料。台帳を読むだけで、無ければ null。
    *
    * `authority` は Mandate の写しにある決定権者 — **案件の裁定を誰が持つか**は
    * 設定 (`society.mandates.<key>.authority`) で決まっていて、bot が名乗るものではない。
@@ -750,7 +750,7 @@ export function createSocietyWiring({
   /**
    * 門に当たった plan の代わりに置く待ち。**人間待ち (`authority`)** にするのは、
    * observe が「人がまだ任せていない」という人間の決めた制限だから — 内部の待ちに翻訳すると、
-   * 時計や tick で解けるものに見えてしまう (§3「内部の待ちを人間待ちに変換しない」の裏返し)。
+   * 時計や tick で解けるものに見えてしまう (「内部の待ちを人間待ちに変換しない」の裏返し)。
    */
   function observeWaiting(kind) {
     return {
@@ -812,12 +812,12 @@ export function createSocietyWiring({
         mandateId: record?.mandateId,
         expected: contract.finding.expected,
         actual: contract.finding.actual,
-        // **誰の観測かを残す** — 出所の無い気づきは後から評価できない (§6)
+        // **誰の観測かを残す** — 出所の無い気づきは後から評価できない
         source: { kind: 'report', botKey: action.target?.botKey ?? null, runId },
         subject: {
           subjectId: contract.finding.subject_id,
           conditionId: contract.finding.condition_id,
-          // 事象の一期間は**ブリッジが決める** (§3) — bot に名乗らせない
+          // 事象の一期間は**ブリッジが決める** — bot に名乗らせない
           episodeId: `${action.caseId}:${contract.finding.condition_id}`,
         },
         hypothesis: contract.finding.hypothesis ?? null,
@@ -841,7 +841,7 @@ export function createSocietyWiring({
         observed: contract.result.observed ?? [],
         claimed: contract.result.claimed ?? [],
       };
-      // **観測と主張を分けて証拠に残す** (§6) — 検収は observed にだけ結ばれる
+      // **観測と主張を分けて証拠に残す** — 検収は observed にだけ結ばれる
       settleInput.evidence = {
         source: { kind: 'bot', botKey: action.target?.botKey ?? null, runId, actionId },
         observed: {
@@ -851,7 +851,7 @@ export function createSocietyWiring({
         claimed: { statements: contract.result.claimed ?? [] },
       };
     }
-    // 相談の戻り (§4)。**受諾の記録は settle とは別の update** で、順序も決まっている —
+    // 相談の戻り。**受諾の記録は settle とは別の update** で、順序も決まっている —
     // 先に相談を settle して Case を `waiting(offer)` にし、その後で受諾が active にする。
     // 逆にすると、受諾で立てた契機を settle が上書きしてしまう
     const offerClaimId = isNonEmptyString(action.offerClaimId) ? action.offerClaimId : null;
@@ -956,7 +956,7 @@ export function createSocietyWiring({
   }
 
   /**
-   * 相談への返事を Claim へ写す (§4)。**受諾は「書いたから成立する」ものではない** —
+   * 相談への返事を Claim へ写す。**受諾は「書いたから成立する」ものではない** —
    * 実効権限を再検証し、同じ責務を先に受けた人が居れば 2 人目は declined に落ちる。
    *
    * `occupied` / `permission` はどちらも `ok: false` だが、**返ったスナップショットに
@@ -976,7 +976,7 @@ export function createSocietyWiring({
       return notes;
     }
 
-    // 受諾 — 実効権限を**受諾の時点で**もう一度確かめる (§3・受入 C05)
+    // 受諾 — 実効権限を**受諾の時点で**もう一度確かめる
     const permission = checkPermission(action, offered);
     // **受諾の最初の一手は新しい Claim に結ぶ** — mapNext は「いまの Action の Claim」を
     // 入れるが、受諾では相談を出した authority ではなく受けた本人の Claim が持ち主になる
@@ -1063,7 +1063,7 @@ export function createSocietyWiring({
   }
 
   /**
-   * 受付の記録 (`accepted` + 消費の確定)。**これが保存できるまで実行キューへ渡さない** (§5)。
+   * 受付の記録 (`accepted` + 消費の確定)。**これが保存できるまで実行キューへ渡さない**。
    * @returns {{ok: boolean, code?: string, reason?: string}}
    */
   function noteAccepted(actionId, { runId, messageId = null } = {}, at = now()) {
@@ -1109,7 +1109,7 @@ export function createSocietyWiring({
     return out;
   }
 
-  // ---- 照合 (§5 の reconcile / §7 の境界①〜③) ----
+  // ---- 照合 (reconcile) ----
 
   /** 宛先スレッドを 1 回ずつ走査して、印 → messageId を集める */
   async function scanForMarkers(live) {
@@ -1172,7 +1172,7 @@ export function createSocietyWiring({
   /**
    * 外側 (Discord の投稿・実行記録) と台帳を Action ID で突き合わせる。
    *
-   * **走査が不完全なまま「見つからない」と確定しない** (§5)。probe の `null` は
+   * **走査が不完全なまま「見つからない」と確定しない**。probe の `null` は
    * 「探したが無かった」と読まれ、`reconcileActions` は送信から 2 分でそれを `cancelled` に
    * するので、走査できなかった Action を null で答えると届いている起動を取り消してしまう。
    *
@@ -1265,7 +1265,7 @@ export function createSocietyWiring({
   }
 
   /**
-   * 送ってはあるが受け付けられないまま置かれている Action を取り消して予約を返す (§5)。
+   * 送ってはあるが受け付けられないまま置かれている Action を取り消して予約を返す。
    *
    * **走査が complete で、実行記録にも無いときだけ**「未受付を確認した」と言える。
    * ここは Action 単位で判断するので、別のスレッドが走査できなくても止まらない。
@@ -1280,7 +1280,7 @@ export function createSocietyWiring({
       if (runIdFor(action.id) !== null) continue;
       const minutes = Math.round((at - sentAt) / 60000);
       const why = `送信から ${minutes} 分たっても受付が無いことを確認 (スレッド走査は完了・実行記録なし)`;
-      // `sent` からは直接取り消せない (§5 の遷移表)。**照合へ倒してから**未受付を確定させる —
+      // `sent` からは直接取り消せない (遷移表)。**照合へ倒してから**未受付を確定させる —
       // 台帳にも「送った → 照合した → 受付が無いと確かめた → 返した」の順で残る
       const marked = commit(`${action.id} の照合待ち`, (s) => markReconcile(s, action.id, why, at));
       if (!marked.ok) continue;
@@ -1297,7 +1297,7 @@ export function createSocietyWiring({
   }
 
   /**
-   * 返事の来ない申し出を期限で閉じる (§4「`offered` は `offerRecheckMin` ごとに再確認」)。
+   * 返事の来ない申し出を期限で閉じる (「`offered` は `offerRecheckMin` ごとに再確認」)。
    *
    * **相談がまだ生きているうちは触らない。** 送っただけ・走っている最中の申し出を
    * 期限で閉じると、返ってきた受諾が `not-offered` で弾かれて job が丸ごと無駄になる。
@@ -1348,7 +1348,7 @@ export function createSocietyWiring({
     return { expired };
   }
 
-  // ---- 停止と再開 (§12.2 (g)) ----
+  // ---- 停止と再開 ----
 
   /** まだ止められる案件か (終端・既に停止済みは対象外 — 上書きすると誰がいつ止めたかが消える) */
   function stoppable(record) {
@@ -1356,7 +1356,7 @@ export function createSocietyWiring({
   }
 
   /**
-   * `/stop` で止めた job の案件へ停止マーカーを付ける (§12.2 (g))。
+   * `/stop` で止めた job の案件へ停止マーカーを付ける。
    *
    * **job を止める前に呼ぶ。** 先に印が付いていれば、実行中 job の settle も待機中 job の
    * 取り消しも `settleAction` の停止分岐 (`code: 'stopped'`) に入り、結果は残しつつ Case は
@@ -1444,7 +1444,7 @@ export function createSocietyWiring({
     return { ok: true, code: out.result?.code ?? 'resumed', replanned: out.result?.replanned ?? null };
   }
 
-  // ---- `/case` の口 (§11 の手動操作) ----
+  // ---- `/case` の口 (手動操作) ----
 
   /** 終端でない = まだ誰かが見る必要がある案件 */
   const LIVE_CASE_STATES = ['open', 'active', 'waiting', 'verifying'];
@@ -1542,7 +1542,7 @@ export function createSocietyWiring({
 
   /**
    * 人が案件を開く (`/case new`)。気づきの採用と同じ道を通す — Case は Finding からしか
-   * 生えない (§3) ので、手で開くときも Finding を 1 件作ってから採用する。
+   * 生えないので、手で開くときも Finding を 1 件作ってから採用する。
    *
    * 事象キーは**開いた瞬間 (時刻 + 台帳の版) で一意にする** — 人が「新しく開く」と言った
    * のだから、同じ目的でも既存 Case へ追記せずに別の案件にする。版まで混ぜるのは、
@@ -1663,7 +1663,7 @@ export function createSocietyWiring({
       syncedMandates = true;
       syncMandates(at);
     }
-    // **照合は配送を止めていても回す** (§3)。順序も照合が先 — 外に出ているものを
+    // **照合は配送を止めていても回す**。順序も照合が先 — 外に出ているものを
     // 確定させる前に新しく送ると、同じ Case に二重の起動が並ぶ
     const reconciled = await reconcile(at);
     // 照合の後 (相談の Action が settled / cancelled に落ちてから) 期限を見る

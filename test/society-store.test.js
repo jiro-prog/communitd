@@ -245,7 +245,7 @@ test('society: 不変条件に落ちる mutate は書かず、メモリも動か
     const before = readFileSync(file);
 
     const out = store.update(1, (s) => {
-      // 次の契機を消す = §3 の不変条件に落ちる形
+      // 次の契機を消す = Case の不変条件に落ちる形
       s.cases['C-1'].nextTrigger = null;
       return s;
     });

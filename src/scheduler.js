@@ -1,4 +1,4 @@
-// スケジューラの判断 (docs/social-engineering.md §3.1・§7-4)。
+// スケジューラの判断。
 //
 // **ここに置くのは純粋関数だけ。** 時計を内部で読まず `now` を引数で受け、
 // Discord にもファイルにもボードにも書かない — 「いま何を起こすべきか」を選ぶところまでが
@@ -16,7 +16,7 @@ import {
 } from './config.js';
 import { jstDayKey } from './time.js';
 
-/** tick が選べる行動の種類。増やすときは設計 (§3.1) の裁定を経ること */
+/** tick が選べる行動の種類。増やすときは設計の裁定を経ること */
 export const ACTION_KINDS = Object.freeze(['start-task', 'scout', 'initiative']);
 
 /** 「走っている」とみなす状態 (同時実行数はこの合計で数える) */
@@ -26,7 +26,7 @@ const RUNNING_STATES = Object.freeze(['in-progress', 'review']);
 const OPEN_STATES = Object.freeze(['proposed', 'approved']);
 
 /**
- * 起票 1 件に必ず積む job 予算の下限 (§9.2(b))。
+ * 起票 1 件に必ず積む job 予算の下限。
  *
  * **worker 1 + review 1 + 予備 2。** スカウトの自己申告をそのまま通すと、3 ファイル新規の
  * タスクに 2 (= 予備 0) が付き、1 度でも詰まればその場で予算切れになる (#51 の実例)。
@@ -39,7 +39,7 @@ export const MIN_TASK_JOB_BUDGET = 4;
 /** 失敗 1 回目のバックオフ。以後 2 倍ずつ伸ばす */
 export const BACKOFF_BASE_MS = 5 * 60 * 1000;
 
-/** バックオフの上限 (§3.7「リミット検知で数時間停止」) */
+/** バックオフの上限 (「リミット検知で数時間停止」) */
 export const BACKOFF_MAX_MS = 4 * 60 * 60 * 1000;
 
 /**
@@ -51,11 +51,11 @@ export function initialState() {
     jobsToday: 0,
     dayKey: null,
     backoffUntil: 0,
-    // 何回続けて失敗したか (指数バックオフの肩)。§3.7 の状態に足した勘定で、
+    // 何回続けて失敗したか (指数バックオフの肩)。自律運転の状態に足した勘定で、
     // これが無いと「伸ばす」ができない
     backoffLevel: 0,
     lastScoutAt: 0,
-    // 発議の巡回 (§3.9)。`lastRunAt` は `<botKey>/<dutyKey>` → 最終実行時刻 (間隔の時計)、
+    // 発議の巡回。`lastRunAt` は `<botKey>/<dutyKey>` → 最終実行時刻 (間隔の時計)、
     // `spentToday` は botKey → 今日使った発議 job の数 (initiativeBudget の勘定)。
     // 日が変わったら消えるのは spentToday だけ — lastRunAt は暦日ではなく間隔で効く
     initiative: { lastRunAt: {}, spentToday: {} },
@@ -63,7 +63,7 @@ export function initialState() {
 }
 
 /**
- * 再起動をまたいで持ち越す勘定 (§3.9「定期巡回の最終実行時刻と日次消費は永続化し、
+ * 再起動をまたいで持ち越す勘定 (「定期巡回の最終実行時刻と日次消費は永続化し、
  * 再起動直後の連発を防ぐ」)。
  *
  * **バックオフは持ち越さない。** あれは「いま失敗が続いている」という走っている
@@ -163,7 +163,7 @@ export function planTick({
   if (at < base.backoffUntil) return stop();
 
   // 担当不在なら何もしない。worker が居なければ着手できず、reviewer が居なければ
-  // 着手しても main まで運べない (§3.6) — 走らせても review に溜まるだけなので、
+  // 着手しても main まで運べない — 走らせても review に溜まるだけなので、
   // 中途半端に始めずに止める
   const workers = Array.isArray(autonomy.worker?.bots) ? autonomy.worker.bots : [];
   if (workers.length === 0 || !autonomy.reviewer) return stop();
@@ -202,7 +202,7 @@ export function planTick({
     lastScoutAt = at;
   }
 
-  // 3. 発議の定期巡回 (§3.9) — 優先順位は start-task > scout > initiative。
+  // 3. 発議の定期巡回 — 優先順位は start-task > scout > initiative。
   //    **いちばん後ろに置く**のは、進行中の仕事と種の発見が先だから。ここまでで
   //    日次上限を使い切っていれば、その日はもう巡回しない (共有の上限を分け合う)
   let { initiative } = base;
@@ -274,7 +274,7 @@ function withinInitiativeBudget(state, botKey, budget) {
 }
 
 /**
- * イベント経由 (§3.9 の発議 3 経路のうち (2)) で発議 job を 1 本使う。
+ * イベント経由 (発議 3 経路のうち (2)) で発議 job を 1 本使う。
  *
  * **巡回と同じ財布から出す。** イベントだけ無制限にすると、差し戻しが続いた日に
  * 発議 job が湧いてチャンネルの日次上限を食い潰す。間隔 (`intervalMin`) と
@@ -332,7 +332,7 @@ function openProposalsFor(proposals, botKey, dutyKey) {
  * 起動メッセージを投稿する担当 (announcer) を worker と別にするのは規律ではなく必然で、
  * 自分の多行発言は shouldIgnoreOwnMessage が捨てる (src/trigger.js) —
  * worker 自身の client から投げても job は立たない。既定は reviewer
- * (§3.6 で必ず居る) で、居なければ worker 以外の誰か。
+ * (で必ず居る) で、居なければ worker 以外の誰か。
  *
  * @param {object} action tick が返した行動
  * @param {{tasks?: object[], autonomy?: object, availableBotKeys?: string[]}} context
@@ -366,7 +366,7 @@ export function resolveStartTask(action, { tasks = [], autonomy = {}, availableB
 }
 
 /**
- * スカウト job へ払い出す固定の job 予算 (§3.3)。
+ * スカウト job へ払い出す固定の job 予算。
  *
  * **小さくてよい**: 巡回して起票するだけで、実装のように往復しない。
  * それでも 0 ではなく予算を配るのは、無人スレッドを門番なしにしないため —
@@ -399,7 +399,7 @@ export function resolveScout(action, { autonomy = {}, availableBotKeys = [] } = 
 }
 
 /**
- * 発議の巡回へ払い出す固定の job 予算 (§3.9)。
+ * 発議の巡回へ払い出す固定の job 予算。
  *
  * スカウトと同じ理由で小さい: 観測して発議するか「今回はなし」と言うだけで、
  * 実装のように往復しない。0 にしないのは無人スレッドを門番なしにしないため。
@@ -436,11 +436,11 @@ export function resolveInitiative(action, { autonomy = {}, availableBotKeys = []
 }
 
 /**
- * イベント (§3.9 の発議 3 経路のうち (2)) を受け取るべき duty を選ぶ (純粋)。
+ * イベント (発議 3 経路のうち (2)) を受け取るべき duty を選ぶ (純粋)。
  *
  * **起こす相手は「そのイベントを拾うと宣言した duty」だけ。** 全 bot へ配ると、
  * 差し戻し 1 回で社会中の bot が発議 job を立てる。宣言は
- * `bots.<key>.duties.<duty>.eventKinds` (§3.8)。
+ * `bots.<key>.duties.<duty>.eventKinds`。
  *
  * **当事者は外す。** 差し戻された実装担当や、封鎖したレビュー担当を呼び戻しても、
  * 見えるのは自分の仕事の話であって組織の乖離ではない (当人の直しは board 側の経路が回す)。
@@ -472,7 +472,7 @@ export function dutiesForEvent(eventKind, {
  * そのまま通すと、起票する側が自分の取り分を決められることになる — 提案は
  * 「これより少なくてよい」という申告としてだけ効かせる。
  *
- * **下限は `MIN_TASK_JOB_BUDGET`** (§9.2(b))。ただし cap を超えない — 上限を
+ * **下限は `MIN_TASK_JOB_BUDGET`**。ただし cap を超えない — 上限を
  * 小さく設定したチャンネルで、下限が黙って上限を押し上げることはない。
  *
  * **`touch` はそのまま渡す。** 正規形の検査と拒否はボード側 (`requiredTouch` —
@@ -560,7 +560,7 @@ export function planApproval(contract, { pending = [] } = {}) {
 }
 
 /**
- * worker のターンが「完了申告」かどうか (§3.5)。
+ * worker のターンが「完了申告」かどうか。
  *
  * **完了は「制御フッタの無い report」だけ。** 自己呼び出しで区切った途中報告も、
  * 上位へのエスカレーションもフッタを持つので、そこでレビューへ進めてしまうと
@@ -629,15 +629,15 @@ export const SEND_BACK_JOB_BUDGET = 2;
 /**
  * レビューの判定 (task-review) を、ボードへの操作に翻訳する (純粋)。
  *
- * **差し戻しは 2 回まで** (§6)。2 回目は直させずに要人間へ落とす — 同じところで
+ * **差し戻しは 2 回まで**。2 回目は直させずに要人間へ落とす — 同じところで
  * 往復し続けるのが、無人運転でいちばん静かに job を溶かす壊れ方だから。
  * 何回目かはボードの履歴が持っているので、数えた結果だけを受け取る
  * (ここから board を触らない = 判断の層に IO を持ち込まない)。
  *
- * **`drop` は差し戻し回数と関係なく通す** (§9.4)。「対象が不要」は仕事の質の話ではなく
+ * **`drop` は差し戻し回数と関係なく通す**。「対象が不要」は仕事の質の話ではなく
  * 重複や着地済みの後始末なので、往復の勘定に混ぜない。
  *
- * **`merge` は git の事実で裏を取ってから通す** (§12.3 (2))。ここは判断の層なので
+ * **`merge` は git の事実で裏を取ってから通す**。ここは判断の層なので
  * git は呼ばない — 呼び出し側 (`src/bridge/board.js` の `applyReview`) が集めた事実を
  * 受け取り、4 つ (マージコミットが実在する / base に到達可能 / 枝の先端が読める /
  * 枝の成果がそのコミットに入っている) が揃ったときだけ `complete`。**事実を渡さない
@@ -652,7 +652,7 @@ export const SEND_BACK_JOB_BUDGET = 2;
  *           (null / 不明 = 確かめられなかった)
  * @param {string} [options.mergeCheckedBy] merge の照合を**別経路が持つ**ときだけ、その名前。
  *           適用 task (org-apply) は `src/apply.js` の `planMerge` が OID・verify・枝の先端まで
- *           見てからブリッジ自身が merge を打つので、ここで二重に git を要求しない (§12.3 (2))
+ *           見てからブリッジ自身が merge を打つので、ここで二重に git を要求しない
  * @returns {{action: 'complete'|'hold'|'send-back'|'block'|'drop'|'none', note?: string,
  *           reason?: string, error?: string}}
  */
@@ -715,7 +715,7 @@ function planMergeVerdict(contract, { git = null, mergeCheckedBy = '' } = {}) {
 }
 
 /**
- * job の終了理由 → バックオフの記録 (§3.7)。
+ * job の終了理由 → バックオフの記録。
  *
  * 数えるのは**ランタイムが動かなかったこと**だけ。verify NG は CLI が正しく動いた
  * 結果なので成功側 — テストが落ちるたびに社会が数時間止まると、直す機会まで失う。
@@ -731,7 +731,7 @@ export function backoffOutcome(reason) {
 }
 
 /**
- * その job の終了理由を**チャンネルのバックオフへ反映してよいか** (§3.7)。
+ * その job の終了理由を**チャンネルのバックオフへ反映してよいか**。
  *
  * `backoffOutcome` が「理由の読み方」だけを見るのに対し、こちらは
  * 「その job が証拠として使えるか」まで含めて決める。除くのは 2 つ:
@@ -773,10 +773,10 @@ export function isInitiativeTrigger(content) {
 }
 
 /**
- * 裁定待ちの提案を**いま配ってよいか** (§3.9 の生存性 — sol 指摘 2026-08-30)。
+ * 裁定待ちの提案を**いま配ってよいか** (生存性 — sol 指摘 2026-08-30)。
  *
  * 判断は 3 つ:
- * - 上限まで試したら止める (以後は人間の出番 — §6 の「要人間」)
+ * - 上限まで試したら止める (以後は人間の出番 —「要人間」)
  * - 一度も試していなければ配る
  * - **配れた後も、猶予を過ぎてまだ裁定待ちなら配り直す。** 投稿できたことは
  *   「裁定された」ではない — 起こした job が rate limit・中断・様式不履行で
@@ -820,7 +820,7 @@ export function pickWorker(autonomy, availableBotKeys = []) {
 /**
  * 起動メッセージの投げ手。**担当自身は選ばない** — 自分の多行発言は
  * shouldIgnoreOwnMessage が捨てる (src/trigger.js) ので、投げても job が立たない。
- * 既定は reviewer (§3.6 で必ず居る)、居なければ担当以外の誰か。
+ * 既定は reviewer (で必ず居る)、居なければ担当以外の誰か。
  */
 export function pickAnnouncer(targetKey, autonomy, availableBotKeys) {
   return [autonomy.reviewer, ...availableBotKeys]
@@ -828,14 +828,14 @@ export function pickAnnouncer(targetKey, autonomy, availableBotKeys) {
 }
 
 /**
- * タスクのスレッドで走る job が、どの作業ディレクトリを使うか (§8-2)。
+ * タスクのスレッドで走る job が、どの作業ディレクトリを使うか。
  *
  * 既定は**タスクごとの作業ツリー**。#9 が blocked になった「未マージのブランチの上に
  * 積まれる」は並行実行ではなく 1 つの作業ツリーを使い回す構造から出ていたので、
  * 直列のままでもここで断つ。
  *
  * **レビュー担当だけは本体で走る** (裁定 2026-08-28)。昇格先の main は本体の
- * チェックアウトにあり、worktree から見れば cwd の外 — §6 の禁則「書込みは対象
+ * チェックアウトにあり、worktree から見れば cwd の外 — 禁則「書込みは対象
  * リポジトリ内のみ・cwd 固定」と揉めずに merge できるのは本体側だけ。
  *
  * @returns {{useWorktree: boolean, reason?: string, taskId?: any, branch?: string, base?: string}}
@@ -856,7 +856,7 @@ export function planTaskCwd({ task = null, autonomy = {}, botKey = null } = {}) 
 }
 
 /**
- * 今日の自律 job の残り (§11.4 — 自動復旧の門)。**日付を繰り越してから**数える。
+ * 今日の自律 job の残り (自動復旧の門)。**日付を繰り越してから**数える。
  * @returns {{left: number, state: object}} state は繰越後の勘定 (呼び出し側が保存してよい)
  */
 export function jobsLeftToday(state, { maxJobsPerDay = DEFAULT_MAX_JOBS_PER_DAY, now } = {}) {

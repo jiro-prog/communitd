@@ -1523,7 +1523,7 @@ test('society 配送: 取り消した相談の申し出は同じ update で decl
 
 test('society 受諾: 実効権限の再検証に落ちたら declined + 理由', async () => {
   // **相談を出したときは通っていて、受諾の時点で落ちる**形にする —
-  // 「申し出たときに通ったこと」は受諾の根拠にならない、が要点 (§3・C05)
+  // 「申し出たときに通ったこと」は受諾の根拠にならない、が要点
   const breaks = {
     codex: (h) => { h.state.botFacts.opus = { runtime: 'codex', online: true }; },
     '未起動': (h) => { h.state.botFacts.opus = { runtime: 'claude', online: false }; },
@@ -1623,7 +1623,7 @@ test('society 配送: 宛先スレッドが決まっていない相談は送ら�
   });
 });
 
-// ---- Mandate の写しの同期 (§2) ----
+// ---- Mandate の写しの同期 ----
 
 const MANDATES = {
   quality: { key: 'quality', version: 1, goal: 'verify を緑に保つ', channels: ['society-trial'], state: 'active', authority: 'fable' },
@@ -1689,7 +1689,7 @@ test('society 写し: ready 後の最初の tick で 1 回だけ走る', async (
   });
 });
 
-// ---- 相談の期限 (§4) ----
+// ---- 相談の期限 ----
 
 test('society 期限: 相談が終わって 5 分たった申し出は expired になる', async () => {
   await withHarness({ seed: false }, async (h) => {
@@ -1943,7 +1943,7 @@ test('society: 既に settled の Action への noteSettled はエラーにし�
   });
 });
 
-// ---- 停止と再開 (S2-4b・§12.2 (g)) ----
+// ---- 停止と再開 ----
 
 test('society 停止: 止めた job の案件は、スレッドの外でも 1 回の update で止まる', async () => {
   await withHarness({ seed: { allocated: 4 } }, async (h) => {

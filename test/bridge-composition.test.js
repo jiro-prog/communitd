@@ -76,7 +76,7 @@ function assemble() {
     config, board, bots, hops, proposals: null, dutyBots: [], pauseStore, lifecycle, recovery,
     autonomyChannels: [], tickStates: ledger.tickStates, saveTickState: ledger.saveTickState,
     findGuildChannel: discord.findGuildChannel,
-    // 自律起動の門 (§12.3 (1)) が見る台帳。偽物は broken を持たない = 健全扱い
+    // 自律起動の門が見る台帳。偽物は broken を持たない = 健全扱い
     jobRuns, tickStateStore: { get: () => null, set: noop }, recoveryStore: null,
   });
   const proposalWiring = createProposalWiring({

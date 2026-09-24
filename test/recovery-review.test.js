@@ -8,7 +8,7 @@ import { createRecoveryService } from '../src/recovery-wiring.js';
 import { RecoveryStore, classifySendError, planRetry, requestMarker, retryMessage } from '../src/recovery.js';
 import { JobRunStore } from '../src/jobruns.js';
 
-// docs/reviews/2026-09-05-recovery-review.md の Critical 3 件の回帰テスト。
+// 復旧まわりの見直しで見つかった Critical 3 件の回帰テスト。
 // 実ストア (mkdtemp) + 偽の Discord / OS / 日次予算。
 
 const T0 = Date.parse('2026-09-05T09:00:00.000Z');

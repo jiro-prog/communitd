@@ -186,7 +186,7 @@ test('開始の記録に失敗しても job は走る (記録の失敗で job �
   assert.deepEqual(h.outcomes, [['ghost', 'ok']]);
 });
 
-// ---- 社会の Action に結ぶ job (docs/society-ledger.md §5・S2-2) ----
+// ---- 社会の Action に結ぶ job ----
 
 /** noteRunning / noteSettled の呼ばれ方を記録する偽の society 配線 */
 function fakeSociety({ throws = false } = {}) {

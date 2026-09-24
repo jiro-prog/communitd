@@ -1,4 +1,4 @@
-// 裁定の受信箱 (docs/social-engineering.md §10)。
+// 裁定の受信箱。
 //
 // 社会が作者に求めるのは裁定だけのはずなのに、その入口が 3 系統に散っている
 // (停止通知の実メンション・稟議カード・blocked タスクの ⛔ 1 行)。ここは
@@ -17,11 +17,11 @@ import { remainingJobs } from './board.js';
 import { msOfTime } from './time.js';
 import { nextOperationFor, statusLabel } from './taskstatus.js';
 
-/** 台帳へ保存する要旨の上限 (§10.3) */
+/** 台帳へ保存する要旨の上限 */
 export const MAX_SUMMARY_CHARS = 140;
 
 /**
- * **一覧の 1 行に出す要旨の上限** (§10.4)。台帳の 140 字とは別物。
+ * **一覧の 1 行に出す要旨の上限**。台帳の 140 字とは別物。
  *
  * 140 字のまま出すと 10 行で 1900 字に達し、後ろの節が丸ごと消える
  * (notify 10 件 + 稟議 2 件で「要人間」が落ちるのを実測 — レビュー指摘 2026-09-02)。
@@ -35,7 +35,7 @@ export const MAX_INBOX_CHARS = 1900;
 /** 1 節に並べる上限 (溢れた分は件数だけ出す) */
 export const MAX_SECTION_ROWS = 10;
 
-/** この 1 行が出る状態が社会の正常 (§10.4) */
+/** この 1 行が出る状態が社会の正常 */
 export const EMPTY_INBOX = '作者を待っているものはありません';
 
 /** 節ごとに取り置く `… ほか N 件` の 1 行ぶん */
@@ -55,7 +55,7 @@ const FENCE_LINE = /^[ \t]*`{3,}/;
  *
  * bot は停止契約に当たると末尾に状況と質問を書く (共通規定) ので、末尾の段落が
  * 「何を聞かれているか」である確率がいちばん高い。契約スキーマに「質問」欄を足す
- * のは protocol を上げる変更なので、まずここで足りるかを見る (§10.2 / §10.5)。
+ * のは protocol を上げる変更なので、まずここで足りるかを見る。
  *
  * 制御フッター行は落とす — 呼び出し側 (resolveOutgoingText) が除いた本文が来る
  * 想定だが、生の応答を渡されても要旨が `[[notify:owner]]` にならないようにする。
@@ -147,7 +147,7 @@ export class InboxStore extends JsonStore {
   }
 
   /**
-   * 通知を記録する。**呼ぶのは実メンションを送れたときだけ** (§10.3) —
+   * 通知を記録する。**呼ぶのは実メンションを送れたときだけ** —
    * 届いていない通知を「待ち」に数えると、作者は誰も呼んでいない行を追うことになる。
    *
    * **1 スレッド 1 open。** 同じスレッドに開いている記録があれば追加せず、
@@ -192,7 +192,7 @@ export class InboxStore extends JsonStore {
   }
 
   /**
-   * スレッドに人間が発言したので閉じる (§10.3)。
+   * スレッドに人間が発言したので閉じる。
    *
    * 判定は `hops.reset` と**同じ条件**に乗せる — 会話の主導権が人間へ戻った瞬間 =
    * 質問に何か返した瞬間、とみなす。既読ボタンを押させると、押し忘れで受信箱が腐る。
@@ -238,7 +238,7 @@ function asText(value) {
 }
 
 /**
- * `/inbox` の本文 (§10.4)。**作者が「これを返すと何本動くか」を 1 行で分かる**のが目的。
+ * `/inbox` の本文。**作者が「これを返すと何本動くか」を 1 行で分かる**のが目的。
  *
  * 3 節とも**待たせている時間が長い順**。手本は `formatProposalQueue`
  * (src/adjudication.js) で、1900 字で切るのも同じ。
@@ -268,7 +268,7 @@ export function formatInbox({
   const blocked = [...asArray(tasks)]
     .filter((task) => task?.state === 'blocked')
     .sort(byWaitedLongest((task) => task.updatedAt ?? task.createdAt));
-  // 復旧待ち (§11.2): in-progress / review のまま止まっている仕事。**同じ問題を二重に見せない** —
+  // 復旧待ち: in-progress / review のまま止まっている仕事。**同じ問題を二重に見せない** —
   // 停止・質問に載っているスレッドと、要人間 (blocked) の task はここには出さない
   const stoppedThreads = new Set(stopped.map((entry) => String(entry.threadId)));
   const recovering = [...asArray(recoveries)]
@@ -304,7 +304,7 @@ export function formatInbox({
         + `${nextOperationFor(status) ? ` → ${nextOperationFor(status)}` : ''}`)}${link(task.threadId)}`
     )),
   ];
-  // 閉じるのは機械 (§10.2) — ただし別スレッドで答えた分だけは機械に分からない。
+  // 閉じるのは機械 — ただし別スレッドで答えた分だけは機械に分からない。
   // 復旧待ちも機械が閉じる (状態が解消したら消える) — 雑談を一言返しただけでは閉じない
   const footers = [];
   if (stopped.length > 0) footers.push('— 停止・質問はそのスレッドに返信すれば閉じます (別で答えたときは `/inbox close:<id>`)');
@@ -369,7 +369,7 @@ function layout(blocks, footer, max) {
 }
 
 /**
- * その提案が**いまの**裁定待ちへ入った時刻 (§10.4)。
+ * その提案が**いまの**裁定待ちへ入った時刻。
  *
  * `updatedAt` で測ると、bot が意見 (`position`) を足すたびに経過が 0 へ戻り、
  * 議論が活発な提案ほど「待たせていない」ように見える。差し戻しで審議へ戻ることが
@@ -431,7 +431,7 @@ function holding(what) {
   return `(${what})`;
 }
 
-/** 一覧の 1 行に置く要旨。**台帳の 140 字ではなく表示の 60 字で切る** (§10.4) */
+/** 一覧の 1 行に置く要旨。**台帳の 140 字ではなく表示の 60 字で切る** */
 function quote(value, escape) {
   const flat = String(value ?? '').replace(/\s+/g, ' ').trim();
   if (flat === '') return '(要旨なし)';

@@ -46,7 +46,7 @@ function harness(over = {}) {
       exists: (p) => Object.hasOwn(files, String(p).replaceAll('\\', '/')),
       realpath: (p) => { if ((over.missingDirs ?? []).includes(p)) throw new Error('ENOENT'); return p; },
       // 実物 (scripts/doctor.mjs の readFileSync) と同じく errno の code を載せる —
-      // doctor は「無い (ENOENT)」と「読めない (EACCES 等)」を code で分ける (§12.3 (1))
+      // doctor は「無い (ENOENT)」と「読めない (EACCES 等)」を code で分ける
       readFile: (raw) => {
         const p = String(raw).replaceAll('\\', '/'); // exists と同じく / に揃える
         if (Object.hasOwn(over.unreadable ?? {}, p)) {
@@ -216,7 +216,7 @@ test('data/ の壊れた JSON は fail (自律起動が止まる、と書く)。
   const fails = out.findings.filter((f) => f.scope === 'data' && f.level === 'fail');
   assert.equal(fails.length, 1);
   assert.match(fails[0].message, /data\/job-runs\.json が JSON として読めない/);
-  // 2026-09-07 (§12.3 (1)) から退避しない = 直さないかぎり自律起動は止まったまま
+  // 2026-09-07 から退避しない = 直さないかぎり自律起動は止まったまま
   assert.match(fails[0].message, /自律起動が止まる \(fail-closed\)。直すか手で退避する/);
   assert.equal(/退避されて空から始まる/.test(fails[0].message), false);
   assert.equal(out.ok, false, '壊れた data のまま起動できることにしている');
@@ -355,7 +355,7 @@ test('codex を起動できないときは codexCmd の設定を案内する', (
   assert.match(cli.message, /codexCmd/, '直し方 (codexCmd) を書かないと原因に辿り着けない');
 });
 
-// ---- 社会台帳 (docs/society-ledger.md §1・S2-1) ----
+// ---- 社会台帳 ----
 // **他の台帳と唯一違うのは「不在」の意味**。既存は不在 = 初回だが、society は
 // observe / active で不在なら起動停止 (初回と推測しない)。
 

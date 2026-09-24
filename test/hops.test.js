@@ -134,7 +134,7 @@ test('自己連鎖はスレッドごとに独立 / 上限 0 は自己呼び出�
   assert.equal(off.takeSelf('T1', 'opus').warn, false);
 });
 
-// ---- タスクスレッドの job 予算 (無人運転の門番 — docs/social-engineering.md §3.5) ----
+// ---- タスクスレッドの job 予算 (無人運転の門番) ----
 
 test('予算を払い出していないスレッドは従来どおり (門番が居ない)', () => {
   const t = new HopTracker(3);

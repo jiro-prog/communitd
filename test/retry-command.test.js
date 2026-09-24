@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { createInteractionHandler } from '../src/interactions.js';
 import { SLASH_COMMANDS } from '../src/commands.js';
 
-// ---- /retry (§11.3) — interaction 側は門番と表示だけ ----
+// ---- /retry — interaction 側は門番と表示だけ ----
 
 const CONFIG = { guildId: 'G1', allowedUserIds: ['U1'] };
 const BOT = { key: 'fable' };

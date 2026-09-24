@@ -1,4 +1,4 @@
-// 同じ仕事を起こし直す判断 (docs/implementation-plan.md P3・P4 / docs/social-engineering.md §11.3)。
+// 同じ仕事を起こし直す判断。
 // **純粋関数と、再開世代の台帳だけ。** Discord・Git・子プロセス・キューは src/recovery-wiring.js が
 // 引数で渡してくる。
 //
@@ -70,7 +70,7 @@ export function planRetry({
   if (inFlight) return ng(`#${taskId} の再開は進行中です (連打しても 1 回だけ起こします)`);
   // **送信済み・受付前の再開要求が残っていたら起こさない** (送信完了と受け手の受付の間には
   // Gateway の遅延がある。実行記録もキューもまだ前の失敗を示しているので、状態だけ見ると
-  // 二重に起こせてしまう — レビュー指摘 2026-09-05)。要求は受付で照合して閉じる (§11.3)
+  // 二重に起こせてしまう — レビュー指摘 2026-09-05)。要求は受付で照合して閉じる
   if (openRequest) {
     const label = requestMarker(taskId, openRequest.generation);
     if (openRequest.result === 'send-unknown') {
@@ -168,7 +168,7 @@ export function requestMarker(taskId, generation) {
   return `再開要求 ${String(taskId)}-${Number(generation) || 0}`;
 }
 
-/** 印を読む (受付側の照合 — §11.3)。無ければ null */
+/** 印を読む (受付側の照合)。無ければ null */
 export function parseRequestMarker(content) {
   const m = /再開要求 ([^\s-]+)-(\d+)/.exec(String(content ?? ''));
   if (!m) return null;
@@ -254,7 +254,7 @@ export function retryMessage({
   return (text.length <= room ? text : `${text.slice(0, room - 1)}…`) + marker;
 }
 
-// ---- 自動復旧の判断 (§11.4) ----
+// ---- 自動復旧の判断 ----
 
 /** planRecovery が返す行動 */
 export const RECOVERY_ACTIONS = Object.freeze(['none', 'observe', 'schedule', 'retry', 'halt']);
@@ -298,7 +298,7 @@ export function classifySideEffects(run) {
  * @param {boolean} [p.jobRunsHealthy] 実行記録の台帳が信用できるか (書き込みの失敗も含む)
  * @param {Array<{file: string, reason: string}>} [p.brokenLedgers] 読めない制御台帳
  *   (pause / tasks / recovery / job-runs …)。**1 件でもあれば halt** — 停止しているか・
- *   何が走ったか・何が仕事かの、どれか 1 つでも読めないなら起こす判断ができない (§12.3 (1))
+ *   何が走ったか・何が仕事かの、どれか 1 つでも読めないなら起こす判断ができない
  * @param {'board'|'apply'|'scout'|'initiative'} [p.taskKind]
  * @param {number} p.now
  * @returns {{action: string, reason: string, safety: string, nextAt: number|null}}
@@ -357,7 +357,7 @@ export function planRecovery({
  * entry: `{ taskId, generation, attempts: [{generation, at, by, kind, target, previousRunId, result}],
  *           auto: {count, nextAt, lastReason, lastAt} }`
  *
- * **await の前に世代を確保する**ための店。手動 (`/retry`) も自動 (§11.4) も同じ入口を使い、
+ * **await の前に世代を確保する**ための店。手動 (`/retry`) も自動も同じ入口を使い、
  * 同じ task で同時に 2 本起こさない。自動の回数と次回時刻はここに永続する — 再起動や手動再開で
  * 自動枠をリセットしない。
  */
@@ -491,7 +491,7 @@ export class RecoveryStore extends JsonStore {
     return this.get(taskId);
   }
 
-  /** 自動再試行の予定 (§11.4)。count は増やさない — 増えるのは begin(kind:'auto') のとき */
+  /** 自動再試行の予定。count は増やさない — 増えるのは begin(kind:'auto') のとき */
   scheduleAuto(taskId, { nextAt, reason = '', now = Date.now() } = {}) {
     const key = String(taskId ?? '');
     if (key === '') throw new Error('復旧の記録には taskId が必要です');

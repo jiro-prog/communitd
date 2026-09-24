@@ -525,7 +525,7 @@ export function sendControlMention(channel, mention, { suffix = '' } = {}) {
   return sendSafe(channel, `<@${mention.userId}>${tail}`, { mentionUserIds: [mention.userId] });
 }
 
-// ---- 自律運転のタスクスレッド (docs/social-engineering.md §3.1) ----
+// ---- 自律運転のタスクスレッド ----
 
 /** Discord のスレッド名の上限 */
 export const MAX_THREAD_NAME_CHARS = 100;
@@ -546,7 +546,7 @@ const oneLine = (text) => String(text ?? '').replace(/\s+/g, ' ').trim();
  * タスク用スレッドの名前。`task/<id> <タイトル>` を Discord の上限へ丸める。
  *
  * id を先頭に置くのは、スレッド名からボードのタスクを引けるようにするため
- * (§3.2 スレッドとタスクは 1:1)。タイトルが長いときに削るのはタイトル側。
+ * (スレッドとタスクは 1:1)。タイトルが長いときに削るのはタイトル側。
  */
 export function taskThreadName(task, { max = MAX_THREAD_NAME_CHARS } = {}) {
   const prefix = `task/${oneLine(task?.id)}`;
@@ -567,7 +567,7 @@ export function taskThreadName(task, { max = MAX_THREAD_NAME_CHARS } = {}) {
  * @param {object} p
  * @param {object} p.task ボードのタスク (id / title / rationale / branch / jobBudget)
  * @param {string} p.botUserId 起こす担当の Discord ユーザー ID
- * @param {string} [p.directionFile] 方向性ドキュメントのパス (§3.4)
+ * @param {string} [p.directionFile] 方向性ドキュメントのパス
  */
 export function taskStartMessage({
   task = {}, botUserId, directionFile = '', max = MAX_TASK_START_CHARS,
@@ -609,7 +609,7 @@ export function taskStartMessage({
 }
 
 /**
- * 差し戻しの再開メッセージ (§3.2 の review → in-progress)。
+ * 差し戻しの再開メッセージ (review → in-progress)。
  *
  * **理由をそのまま載せる。** レビューの本文はスレッドに出ているが、直す側の job は
  * この 1 通で起こされるので、何を直すのかがここに無いと読み落とす経路ができる。
@@ -662,7 +662,7 @@ export function scoutThreadName(now, { max = MAX_THREAD_NAME_CHARS } = {}) {
 }
 
 /**
- * `work` / `process` 提案の裁定を経営裁量の bot へ頼む文面 (§3.9)。
+ * `work` / `process` 提案の裁定を経営裁量の bot へ頼む文面。
  *
  * **この経路が無いと提案は永久に滞留する** (sol 指摘 2026-08-30) — org には作者の
  * 裁定カードがあるが、work / process は「bot はボタンを押せないので report の
@@ -722,7 +722,7 @@ export function adjudicationRequestMessage({
 }
 
 /**
- * 裁定依頼を落とすスレッドの名前 (§3.9)。`proposal/<id> <要旨>`。
+ * 裁定依頼を落とすスレッドの名前。`proposal/<id> <要旨>`。
  *
  * 発議元のスレッドが archive されているときに**親チャンネルへ直接投げない**ため
  * (sol 指摘 2026-08-30)。bot 起点の投稿はスレッドの中だけが job になるので、
@@ -737,7 +737,7 @@ export function adjudicationThreadName(proposal = {}, { max = MAX_THREAD_NAME_CH
 }
 
 /**
- * 発議の巡回スレッドの名前 (§3.9)。`initiative/<duty>/<JST>`。
+ * 発議の巡回スレッドの名前。`initiative/<duty>/<JST>`。
  * duty を名前に入れるのは、同じ日に別の duty が回ったとき一覧で区別するため。
  */
 export function initiativeThreadName(duty, now, { max = MAX_THREAD_NAME_CHARS } = {}) {
@@ -748,9 +748,9 @@ export function initiativeThreadName(duty, now, { max = MAX_THREAD_NAME_CHARS } 
 }
 
 /**
- * 発議 job の起動メッセージ (§3.9 の発議 3 経路のうち (2) と (3) が共用する)。
+ * 発議 job の起動メッセージ (発議 3 経路のうち (2) と (3) が共用する)。
  *
- * **「提案なし」を正常と書いておく**のが要点 (§3.8「budget はノルマではなく上限であり、
+ * **「提案なし」を正常と書いておく**のが要点 (「budget はノルマではなく上限であり、
  * 『提案なし』が正常な巡回も認める」)。書かないと、観測して何も無かった巡回が
  * 無理やり提案をひねり出す — 発議の質は裁定の負荷にそのまま乗る。
  *
@@ -761,7 +761,7 @@ export function initiativeThreadName(duty, now, { max = MAX_THREAD_NAME_CHARS } 
  * @param {string} p.botUserId 担当 bot の Discord ユーザー ID
  * @param {string} p.duty 起こす duty のキー
  * @param {string} [p.trigger] 起こした理由 (定期巡回なら空、イベントならその説明)
- * @param {string} [p.directionFile] 方向性ドキュメントのパス (§3.4)
+ * @param {string} [p.directionFile] 方向性ドキュメントのパス
  * @param {Array<{id: string, class: string, state: string, summary: string}>} [p.openProposals]
  *   その duty で今 open な提案 (重ねて発議させないための材料)
  * @param {string} [p.schemaTag] 起こす job の様式を決める目印 (src/contract.js の formatSchemaTag)
@@ -821,7 +821,7 @@ export function initiativeStartMessage({
 }
 
 /**
- * スカウト job の起動メッセージ (§3.3)。
+ * スカウト job の起動メッセージ。
  *
  * **ボードの現状を渡すのが要点。** 何が既に起票されているか分からないまま巡回させると、
  * 同じ改善を何度も起票して承認側の負担になる。長くなったら一覧の方を削る
@@ -832,9 +832,9 @@ export function initiativeStartMessage({
  *
  * @param {object} p
  * @param {string} p.botUserId スカウト担当の Discord ユーザー ID
- * @param {string} [p.directionFile] 方向性ドキュメントのパス (§3.4)
+ * @param {string} [p.directionFile] 方向性ドキュメントのパス
  * @param {Array<{id: string, state: string, title: string}>} [p.openTasks]
- *   いまボードにあるもの (§9.1 — 非終端すべてと、直近に merged になったもの。
+ *   いまボードにあるもの (非終端すべてと、直近に merged になったもの。
  *   選ぶのは `scoutBoardView` — src/board.js)
  */
 export function scoutStartMessage({

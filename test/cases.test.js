@@ -653,7 +653,7 @@ test('停止マーカー: 止めた Case の取り消しは state を動かさ�
   assert.equal(target.budget.reserved, 0);
 });
 
-// ---- 停止の解除 (§12.2 (g)) ----
+// ---- 停止の解除 ----
 
 /** 止めた Case を作る (走っていた一手が停止中に終わり、契機は waiting(paused)) */
 function stoppedMidFlight(over = {}) {

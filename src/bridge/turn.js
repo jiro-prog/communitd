@@ -1,5 +1,5 @@
 // 1 ターンの成果物を Discord へ届ける配線 (src/index.js から切り出し)。
-// 投稿順と完了境界 (postTurn)、添付 (sendAttachments)、停止通知の受信箱への記録 (§10)。
+// 投稿順と完了境界 (postTurn)、添付 (sendAttachments)、停止通知の受信箱への記録。
 // 順序の判断は src/delivery.js (deliverTurn) が持つ。
 import { AttachmentBuilder } from 'discord.js';
 import { randomUUID } from 'node:crypto';
@@ -193,18 +193,18 @@ export function createTurnWiring({
     // verify NG は結果まで配送したうえで**元の handoff を落とす**。配送失敗に偽装しないため、
     // 成功した verify step を throw させず、完了境界へ渡す mention を差し替える。
     //
-    // **落としたままにはしない** (§12.3 (3))。壊れたまま次へ回さないのが門の目的だが、
+    // **落としたままにはしない**。壊れたまま次へ回さないのが門の目的だが、
     // 「誰が受けるか」が無いと人間が次の担当を呼ぶまで仕事が止まる (作者指摘 2026-09-07、2 回)。
     // 代わりに**この job を頼んだ投げ手**へ戻す — 投げ手は touch 集合を広げるか、
     // 直させるか、受け入れるかを決められる唯一の相手 (居なければ owner を呼ぶ)。
     const verifyFailed = Boolean(verifyResult && !verifyResult.ok);
     // **元の宛先が人間への質問 (`[[notify:owner]]`) なら差し替えない** — verify NG は「人間に聞く」を
-    // 無効にしない。戻しに化けると質問が投げ手への handoff になり、受信箱 (§10.3) にも残らない
+    // 無効にしない。戻しに化けると質問が投げ手への handoff になり、受信箱にも残らない
     // (Opus2 レビュー 2026-09-07 Major1)。owner 宛は bot キーが無いので契約も元から保存されない
     const keepNotify = verifyFailed && outgoing.mention?.kind === 'notify';
     // **案件付きの job に「投げ手」は居ない。** 起動を投げたのは配送係 (`pickAnnouncer` が
     // 機械的に選んだ bot) で、その bot はこの案件を知らないし、戻しても案件付きでない
-    // 普通の job になるので台帳は動かない。§12.3 (3) の「投げ手が居なければ owner」を
+    // 普通の job になるので台帳は動かない。「投げ手が居なければ owner」を
     // そのまま当てるのが正しい (Opus2 S2-3a 再レビュー)
     const sendBack = verifyFailed && !keepNotify
       ? sendBackTarget({
@@ -217,7 +217,7 @@ export function createTurnWiring({
       : null;
     let handoffMention = !verifyFailed || keepNotify ? outgoing.mention : sendBack?.mention ?? null;
 
-    // **案件に結ばれた job の起動は台帳が決める** (docs/society-ledger.md §5・S2-3a)。
+    // **案件に結ばれた job の起動は台帳が決める**。
     // 自由文の `[[handoff:...]]` を通すと、台帳を経ない Action が生まれ、予算も世代も
     // 照合も効かないまま次の job が走る (「bot の自由文を権限の根拠にしない」)。
     //
@@ -304,7 +304,7 @@ export function createTurnWiring({
         const sent = await sendControlMention(thread, handoffMention, {
           suffix: sendBack?.note ?? (savedFor ? formatContractTag(savedFor.nonce) : ''),
         });
-        // **送れたときだけ**受信箱へ記録する (§10.3)。handoff は作者を待たせないので
+        // **送れたときだけ**受信箱へ記録する。handoff は作者を待たせないので
         // 載せない — 依頼でないものを混ぜた瞬間に「全部読まないと分からない」に戻る
         if (handoffMention?.kind === 'notify') {
           noteOwnerCall({ thread, bot, cc, body: outgoing.body, sent });
@@ -354,7 +354,7 @@ export function createTurnWiring({
   }
 
   /**
-   * verify が最終 NG だった job の戻し先 (§12.3 (3))。
+   * verify が最終 NG だった job の戻し先。
    *
    * **戻すのは「頼んだ相手」** — 元の handoff 先ではない。壊れた成果を次の担当へ流さない
    * という門はそのままに、止まったことを**必ず誰かの受信箱へ落とす**ための経路。

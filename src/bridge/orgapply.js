@@ -1,4 +1,4 @@
-// ---- org-apply の配線 (docs/social-engineering.md §3.9) ----
+// ---- org-apply の配線 ----
 //
 // 判断は src/apply.js、実行は src/orgapply.js、順序は src/orgapply-wiring.js が持つ。
 // ここが持つのは**実体の解決だけ** — git・fs・verify・Discord・起動中の bot。

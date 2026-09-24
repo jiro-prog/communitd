@@ -108,7 +108,7 @@ export function checkCwdSafety(cwd, bridgeRoot, { realpath }) {
 
 /**
  * 設定ファイルを安全に置き換える。書き換え先は `config.policy.json` だけで、
- * secrets と合成後の config は**保存しない** (docs/social-engineering.md §3.9)。
+ * secrets と合成後の config は**保存しない**。
  * - 排他 lock を取ってから書く (CLI の二重起動を直列化する)
  * - 一時ファイル名はプロセスごとに固有 (他プロセスの書きかけを rename しない)
  * - 読み込み時から中身が変わっていたら上書きしない。lock を取らない手編集とも

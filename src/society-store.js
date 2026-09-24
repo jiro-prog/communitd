@@ -1,5 +1,5 @@
 /**
- * 社会台帳 `data/society.json` の入出力 — 仕様は docs/society-ledger.md §1。
+ * 社会台帳 `data/society.json` の入出力。
  *
  * 相互依存する記録 (Mandate / Finding / Case / Claim / Action / Evidence) を
  * **1 つの版付きスナップショット**として持つ。ドメイン判断は `src/cases.js` の純粋関数にあり、
@@ -7,7 +7,7 @@
  *
  * 既存 `JsonStore` (`src/store.js`) との違いは 3 つ。**継承していない**のは、
  * 「不在なら空で開く」というコンストラクタの前提がここでは逆 (不在は停止) だから:
- * - **不在を初回と推測しない** — `observe` / `active` でファイルが無ければ起動を止める (§12.2 (h))。
+ * - **不在を初回と推測しない** — `observe` / `active` でファイルが無ければ起動を止める。
  *   初期化は `node scripts/society-init.mjs` の明示操作だけ。
  * - **schema と revision を見る** — 未知の版・整数でない revision は broken。
  * - **`update(expectedRevision, mutate)`** — 版が食い違えば何も書かずに conflict を返す。
@@ -136,7 +136,7 @@ function readSocietyFile(filePath) {
 }
 
 /**
- * 隣に残った `<file>.tmp.*` を数える。**台帳として読まないし消さない** (§1) —
+ * 隣に残った `<file>.tmp.*` を数える。**台帳として読まないし消さない** —
  * 部分更新の痕跡は「途中で落ちた」証拠なので、人が見るまで在処に残す。
  */
 function findLeftovers(filePath) {

@@ -98,7 +98,7 @@ test('スキーマを渡した job だけ --json-schema が付き、structured_o
   const i = args.indexOf('--json-schema');
   assert.ok(i > 0, '--json-schema が付いていない');
   assert.deepEqual(JSON.parse(args[i + 1]), SCHEMAS.report);
-  // 結果 JSON の structured_output はパース済みのオブジェクトで返る (T0 §4.1)
+  // 結果 JSON の structured_output はパース済みのオブジェクトで返る
   assert.deepEqual(res.structuredOutput, { 本文: 'ok' });
 });
 

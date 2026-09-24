@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import { chargeJobs, initialState, jobsLeftToday, persistedState, planTick, refundJobs, restoreState } from '../src/scheduler.js';
 
-// 自動復旧の日次予算は通常の着手と同じ勘定 `jobsToday` (§11.4 — レビュー指摘 2026-09-05)
+// 自動復旧の日次予算は通常の着手と同じ勘定 `jobsToday` (レビュー指摘 2026-09-05)
 
 const T0 = Date.parse('2026-09-05T03:00:00.000Z'); // 12:00 JST
 const NEXT_DAY = Date.parse('2026-09-05T15:30:00.000Z'); // 翌 0:30 JST

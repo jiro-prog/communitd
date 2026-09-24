@@ -213,10 +213,10 @@ function peerTraits(peer = {}) {
  * @returns {string}
  */
 /**
- * 案件に結ばれた job の実行文脈 (docs/society-ledger.md §2〜§5)。
+ * 案件に結ばれた job の実行文脈。
  *
  * **決定権者と自分の Claim の世代をここに書く。** 世代は「いま自分が確定操作をしてよいか」の
- * 根拠で (§4)、交代が済んだ後の遅い応答は台帳が弾く — その理由をモデル側にも見せておく。
+ * 根拠で、交代が済んだ後の遅い応答は台帳が弾く — その理由をモデル側にも見せておく。
  * 次の起動を `next.plan` に限るのもここで言う (自由文の `[[handoff:]]` は Action にならない)。
  *
  * @param {object|null} societyCase `{caseId, desiredOutcome, authority, claimId, claimGeneration,
@@ -318,7 +318,7 @@ export function buildRuntimeContext({
     );
   }
 
-  // 案件に結ばれた job (docs/society-ledger.md §2〜§5・S2-3a)。**この job が誰の何のために
+  // 案件に結ばれた job。**この job が誰の何のために
   // 走っているか**と、次の一手をどこへ書くかを実行文脈で示す。案件が無い job では 1 行も出さない
   lines.push(...describeCase(societyCase));
 

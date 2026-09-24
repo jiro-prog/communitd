@@ -1,4 +1,4 @@
-// タスクごとの git worktree 払い出し (docs/social-engineering.md §4 M1)。
+// タスクごとの git worktree 払い出し。
 //
 // M0 の運用で出た実害から逆算した層。ボード #9 が「マージ順序の裁定が要る」で
 // blocked になったのは、task/9 が**未マージの** task/8 の上に積まれていたため。
@@ -22,7 +22,7 @@ import { execFile } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-/** 作業ツリーの置き場所 (リポジトリ内)。リポジトリ外へ出すと cwd 固定の禁則 (§6) と揉める */
+/** 作業ツリーの置き場所 (リポジトリ内)。リポジトリ外へ出すと cwd 固定の禁則と揉める */
 export const WORKTREE_DIR = '.worktrees';
 
 /** git の呼び出し上限。add / remove はローカル操作なので数秒で終わる */
@@ -201,7 +201,7 @@ export function planPrepare({ path, branch, base, worktrees = [], branches = [] 
  * 「捨ててよい」と判断したときだけ立てる (dropped タスクの後始末など)。
  *
  * **ただしパスだけで撤去先を決めない。** `expectedBranch` と食い違うツリーが同じ場所に
- * 居るのは、前のタスクの残骸が残っている状況そのもの (§8-1 の #9)。そこへ `force` を
+ * 居るのは、前のタスクの残骸が残っている状況そのもの。そこへ `force` を
  * 掛けると**別タスクの未コミット作業を消す**ので、一致しなければ 1 手も打たずに落ちる
  * (Sol 指摘 2026-08-28)。
  *
@@ -232,7 +232,7 @@ export function planRelease({ path, expectedBranch, worktrees = [], force = fals
 }
 
 /**
- * 判定がついたタスクの後始末の計画 (§9.5)。**副作用なし**。
+ * 判定がついたタスクの後始末の計画。**副作用なし**。
  *
  * - `complete` (merged) — 作業ツリーもブランチも要らない。成果は base へ入っている
  * - `drop` (dropped) — **ブランチは残す。** 「対象が不要」と決めたのは判定であって、
@@ -322,7 +322,7 @@ export async function prepareWorktree({ repoRoot, taskId, branch, base, git = ru
 }
 
 /**
- * 同じ作業ツリーの用意を 1 本にまとめる (§8-2)。
+ * 同じ作業ツリーの用意を 1 本にまとめる。
  *
  * ブリッジ側では作成が job のレーン直列化より**前**に走るので、同じ新規タスクへ 2 つの
  * トリガーが重なると両方が「まだ無い」と判断し、片方の `worktree add -b` が git のエラーで

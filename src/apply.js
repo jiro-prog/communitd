@@ -1,4 +1,4 @@
-// 採択された提案を実際に当てる回路 (docs/social-engineering.md §3.9「org-apply」)。
+// 採択された提案を実際に当てる回路。
 //
 // 適用エンジンは **1 本**で、中に **2 本の lane** を持つ。共通なのは touch 制限・
 // digest 照合・二重適用防止・検収を適用主体と別の bot に限る点で、lane ごとに違うのは
@@ -39,7 +39,7 @@ export const APPLY_LANES = Object.freeze(['org', 'process']);
  * 同じ提案を当て直してよい回数。**board の差し戻し回数とは別に数える** —
  * board 側は `review → in-progress` の遷移を数えるが、適用の差し戻しは
  * task を終端化して新しい task を作るので、その勘定には乗らない。
- * 超えたら自動で当て直さず人間の判断へ倒す (§6「要人間」)。
+ * 超えたら自動で当て直さず人間の判断へ倒す (「要人間」)。
  */
 export const APPLY_ATTEMPT_LIMIT = 3;
 
@@ -78,7 +78,7 @@ export function checkLaneScope({ lane, kind, touch = [], processEditAllowlist = 
   if (!APPLY_LANES.includes(lane)) return fail(`未知の lane: ${lane}`);
   if (!Array.isArray(touch) || touch.length === 0) return fail('touch が空です');
   for (const path of touch) {
-    // 秘密側は lane を問わず対象外 (§6 機械層)。保存前にも落ちるが、当てる側でも閉じる
+    // 秘密側は lane を問わず対象外 (機械層)。保存前にも落ちるが、当てる側でも閉じる
     if (isSecretPath(path)) return fail(`${path} はどの lane からも書けません`);
     const reason = lane === 'org'
       ? orgLaneReason(kind, path, processEditAllowlist)
@@ -110,7 +110,7 @@ function processLaneReason(kind, path, allowlist) {
 }
 
 /**
- * いまこの提案を当ててよいか。**適用直前の関門** (§3.9)。
+ * いまこの提案を当ててよいか。**適用直前の関門**。
  *
  * 状態・採否・lane の起動条件・二重適用・裁定 digest・保存前ゲート・lane の範囲を
  * **すべて**見る。どれか 1 つでも省くと、`deliberating` へ戻した提案や、
@@ -160,7 +160,7 @@ export function checkApplicable(proposal, ctx) {
   }
 
   // **裁定した内容と同じものを当てるのか。** 対象ファイルが裁定後に動いていれば
-  // ここで落ちる (§3.9「diff の差し替えも対象ファイルの drift も再裁定へ戻す」)
+  // ここで落ちる (「diff の差し替えも対象ファイルの drift も再裁定へ戻す」)
   if (digestOf(proposal, ctx, { baseCommit }) !== adjudication.digest) {
     return fail('裁定時の内容と食い違っています (再裁定が要ります)');
   }
@@ -387,7 +387,7 @@ export function parseRawDiff(text) {
 /**
  * コミットしてよいか。**承認された変更しか入っていないことを「結果」で確かめる。**
  *
- * §3.9 は「コミット直前に `git diff <baseCommit>` が承認済み diff と完全一致すること」と
+ * 「コミット直前に `git diff <baseCommit>` が承認済み diff と完全一致すること」と
  * 書くが、diff の**テキスト**を突き合わせると文脈行の幅や hunk の切り方が違うだけで
  * 落ちる (承認 diff の `-U` と `git diff` の既定が同じである保証は無い)。ここでは
  * 同じことを 2 つの面で見る:
@@ -537,7 +537,7 @@ export function applyAttemptCount(proposal) {
   return Array.isArray(proposal?.applyAttempts) ? proposal.applyAttempts.length : 0;
 }
 
-/** 自動で当て直すのをやめる境目。**超えたら人間の判断へ倒す** (§6) */
+/** 自動で当て直すのをやめる境目。**超えたら人間の判断へ倒す** */
 export function shouldEscalateApply(proposal) {
   return applyAttemptCount(proposal) >= APPLY_ATTEMPT_LIMIT;
 }

@@ -79,7 +79,7 @@ npm test          # Node 組み込みのランナー。全部で 1800 件強・1
 ## lint
 
 ```sh
-npm run lint      # eslint (flat config)
+npm run lint      # eslint (flat config) + 文書への参照チェック
 ```
 
 - 規則は `@eslint/js` の recommended だけで、**整形規則は入れていません** (formatter も
@@ -88,6 +88,9 @@ npm run lint      # eslint (flat config)
 - 規則を外すときは**インラインの `eslint-disable-next-line` に理由を書いてください**。
   設定ファイル側で丸ごと切るのは、その規則がこのリポジトリの書き方と根本的に合わないとき
   だけにしています (`eslint.config.js` の冒頭にその判断を書いています)。
+- lint は続けて `scripts/check-doc-refs.mjs` (単独なら `npm run check:docs`) を回し、Markdown の
+  相対リンクと、`src/`・`scripts/` に書いた `docs/*.md` が**追跡しているファイルを指しているか**を
+  見ます。公開されていない文書を出典に書くと、読む人には行き止まりになるためです。
 
 型検査 (`tsc --checkJs`) は**まだ導入していません**。`jsconfig.json` は置いてあるので
 エディタの補完は効きますが、CI には入れていません (現状 3000 件超の指摘が出ます。

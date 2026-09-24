@@ -118,7 +118,7 @@ const store = new SessionStore(resolve(ROOT, 'data', 'sessions.json'));
 // 片方だけだと「文脈に出ないのに呼べる」「呼べないのに文脈には出る」になる
 const roster = new RosterStore(resolve(ROOT, 'data', 'roster.json'));
 
-// 裁定の受信箱 (docs/social-engineering.md §10)。台帳を持つのは記録の無かった
+// 裁定の受信箱。台帳を持つのは記録の無かった
 // 停止通知だけで、稟議 (proposals) と要人間 (board) は /inbox の描画時に読む。
 // **ファイルは最初の [[notify:owner]] が届いたときに初めて書かれる** (JsonStore は
 // 構築では書かない) ので、通知を使わない配備に data/inbox.json は生えない
@@ -130,7 +130,7 @@ const inbox = new InboxStore(resolve(ROOT, 'data', 'inbox.json'));
 // 宣言の無い bot・チャンネルは完全に従来どおり動く (構造化を有効にしない限り不変)。
 const contracts = new ContractStore(resolve(ROOT, 'data', 'contracts.json'));
 
-// ---- 実行記録 (docs/implementation-plan.md P1) ----
+// ---- 実行記録 ----
 // job 1 本がどこまで進んだか (受付 → 起動 → モデル → 承認待ち → 検証 → 配送 → 終端) と、
 // どう終わったかの台帳。task の状態 (board) とは別の正本で、同じ値を両方で編集しない。
 // **受付の記録に失敗した job は起動しない** (記録の無い job は復旧の判断から漏れる)。
@@ -152,7 +152,7 @@ const runRecorder = createRunRecorder({ jobRuns });
 //
 // 2 は 2026-07-31 に「実行中の job を止めて待つ MCP ブローカは Phase 2 送り」と裁定された
 // ものの実装 (T5)。**MCP ブローカではなく PreToolUse hook で成立した** —
-// hook は 60 秒以上ブロックでき、allow が実際に権限を付与する (T0 §1.4 実測 2026-08-02)。
+// hook は 60 秒以上ブロックでき、allow が実際に権限を付与する (実測 2026-08-02)。
 // これに伴い「承認済みルールは job 開始時点のスナップショット」という不変条件は、
 // hook 経路にかぎり意図的に更新される (下の runJob の allowedTools と src/broker.js)。
 const toolExtra = new ToolExtraStore(resolve(ROOT, 'data', 'tools-extra.json'));
@@ -206,7 +206,7 @@ const limits = Object.freeze({
   maxStdoutBytes: MAX_STDOUT_BYTES,
 });
 
-// ---- 組織提案 (docs/social-engineering.md §3.9) ----
+// ---- 組織提案 ----
 // initiative が有効なチャンネル設定でだけ台帳を持つ (使わない配備で data/proposals.json を作らない)。
 const INITIATIVE_ENABLED = isInitiativeEnabled(config);
 const EXEC_BOT_KEYS = resolveExecBotKeys(config);
@@ -220,7 +220,7 @@ console.log(
 );
 
 /**
- * duty を持つ bot (§3.8)。**起動時に 1 回だけ解決する** — 巡回の宛先は
+ * duty を持つ bot。**起動時に 1 回だけ解決する** — 巡回の宛先は
  * policy の静的な記述で、job の途中で動くものではない (動かすには `duty-edit`
  * 提案が採択され、適用されて、プロセスが上がり直す)。
  */
@@ -245,10 +245,10 @@ console.log(
 
 // ---- 自律運転の kill switch (/pause・/resume) ----
 // **再起動をまたいで残す。** プロセスを立て直したら勝手に動き出す作りだと、
-// 止めた理由が残っているのに社会が動き出す (docs/social-engineering.md §3.7)
+// 止めた理由が残っているのに社会が動き出す
 const pauseStore = new PauseStore(resolve(ROOT, 'data', 'pause.json'));
 if (pauseStore.broken) {
-  // 読めない = 「止めていない」ではない (§12.3 (1))。退避もしないので、次の起動でも同じ判断になる
+  // 読めない = 「止めていない」ではない。退避もしないので、次の起動でも同じ判断になる
   console.error(
     `[pause] pause.json が読めません (${pauseStore.broken.reason}) — **停止扱いで起動します**。`
     + '/resume では解けません (台帳を直すか手で退避してください)',
@@ -294,7 +294,7 @@ if (bots.size === 0) {
 // ready が揃わない bot がいても完了通知が出ないままにならないための保険
 setTimeout(() => void shutdownWiring.announceRestartComplete(), 60000).unref?.();
 
-// ---- 自律運転のスケジューラ (docs/social-engineering.md §3.1) ----
+// ---- 自律運転のスケジューラ ----
 //
 // **新しい実行経路を作らない。** ここがするのは「スレッドを作って起動メッセージを
 // 投稿する」ところまでで、以降は人間がメンションしたときと同じ MessageCreate →
@@ -310,7 +310,7 @@ const autonomyChannels = Object.keys(config.channels ?? {}).filter(
 /**
  * チャンネル名 → スケジューラの勘定。
  *
- * **台帳の部分だけディスクへ落とす** (§3.9)。巡回の最終実行時刻と日次の消費を
+ * **台帳の部分だけディスクへ落とす**。巡回の最終実行時刻と日次の消費を
  * in-memory のままにすると、再起動のたびに「間隔が明けた」と見なして巡回が連発する。
  * 何を持ち越すかは scheduler.js の `persistedState` / `restoreState` が決める
  * (バックオフは持ち越さない — 走っているプロセスの観測であって台帳ではない)。
@@ -328,7 +328,7 @@ if (board) {
   console.log(
     `[scheduler] 自律運転: ${autonomyChannels.join(' / ')} (ボード ${board.list().length} 件)`,
   );
-  // touch 不明のタスクは「何とでも競合する」ので (§3.9)、1 件でも open だと
+  // touch 不明のタスクは「何とでも競合する」ので、1 件でも open だと
   // そのボードでは組織提案が全件拒否される。黙って発議が通らない状態にしない
   const missingTouch = tasksMissingTouch(board.list());
   if (missingTouch.length > 0) {
@@ -343,13 +343,13 @@ if (board) {
   console.log('[scheduler] 自律運転が有効なチャンネルはありません (ボードは持ちません)');
 }
 
-// ---- 止まった仕事の検知と再開 (docs/social-engineering.md §11.2〜11.4) ----
+// ---- 止まった仕事の検知と再開 ----
 // 判定は純粋関数 (src/taskstatus.js / src/recovery.js)、順序は src/recovery-wiring.js。
 // ここは実体を結ぶだけ。通知はタスクのスレッドへ 1 通 (同じ問題につき 1 回)。
 // 再開世代と自動復旧の勘定は data/recovery.json (再起動・手動再開で自動枠をリセットしない)
 const recoveryStore = board ? new RecoveryStore(resolve(ROOT, 'data', 'recovery.json')) : null;
 
-// ---- 自律社会の台帳 (docs/society-ledger.md §1) ----
+// ---- 自律社会の台帳 ----
 // **`society` を書いていない配備では mode: off で、ここは fs に一切触れない** (受入 C15)。
 // observe / active で不在・破損なら「起動停止」の理由を持つが、**プロセスは止めない** —
 // 止まるのは社会由来の処理だけで、既存の受付・自律起動はそのまま動く。
@@ -413,7 +413,7 @@ const societyWiring = createSocietyWiring({
   availableBotKeys: () => [...bots.values()].filter((b) => b.userId).map((b) => b.key),
   // 走査も投稿も Discord が要る。**モジュール読込時には走らせない** (ready 後の最初の tick から)
   ready: () => [...bots.values()].some((b) => b.userId),
-  // 実効権限の材料 (§3 の `既存能力 ∩ Mandate ∩ Claim.scope`)。**判断は society-policy.js**
+  // 実効権限の材料 (`既存能力 ∩ Mandate ∩ Claim.scope`)。**判断は society-policy.js**
   // の純粋関数が持ち、ここは設定と実行状態という事実を渡すだけ
   botFacts: () => Object.fromEntries(
     Object.entries(config.bots ?? {}).map(([key, cfg]) => [key, {
@@ -432,7 +432,7 @@ const societyWiring = createSocietyWiring({
   },
 });
 
-// ---- 読めない台帳の一覧 (docs/social-engineering.md §12.3 (1)) ----
+// ---- 読めない台帳の一覧 ----
 // **退避せず在処に残す**ので、起動のたびに同じ列挙が出る。
 //
 // **門になる台帳とそれ以外を分ける** (Opus2 レビュー 2026-09-07 Major1)。自律起動と自動復旧を
@@ -525,7 +525,7 @@ const scheduler = createSchedulerWiring({
   tickStates,
   saveTickState,
   findGuildChannel: discord.findGuildChannel,
-  // 自律起動の門 (§12.3 (1)): これらの台帳がどれか 1 つでも読めなければ tick は何も選ばない
+  // 自律起動の門: これらの台帳がどれか 1 つでも読めなければ tick は何も選ばない
   jobRuns,
   tickStateStore,
   recoveryStore,
@@ -647,7 +647,7 @@ const shutdownWiring = createShutdownWiring({
   abortOrgApply: () => orgApply.abortVerify(),
 });
 
-// 上限で起動を見送ったことを受信箱へ (§10.3)。**bridge 同士は import しない**ので、
+// 上限で起動を見送ったことを受信箱へ。**bridge 同士は import しない**ので、
 // 実体はここで組んで messages へ渡す (turn.js の noteOwnerCall と同じ形)。
 // 閉じるのは人間の発言 = closeInboxForThread なので、通知の条件と閉じる条件がそろう
 const noteHopLimit = ({ threadId, channelName, botKey, reason, messageId }) => {
@@ -673,7 +673,7 @@ const messages = createMessageWiring({
   board,
   jobRuns,
   recovery,
-  // 印付きの起動を保存済みの Action と照合し、受付を台帳へ書く (§5)
+  // 印付きの起動を保存済みの Action と照合し、受付を台帳へ書く
   society: societyWiring,
   lifecycle,
   limits,
@@ -736,15 +736,15 @@ const onInteraction = createInteractionHandler({
   // 復旧待ち (`/inbox` の 4 節目)。判定は実行記録・契約・pause を読むので復旧の service が持つ
   // (ボードの無い配備では null なので関数で渡す)
   recoveryRows: () => (recovery ? recovery.rows() : []),
-  // `/retry` (§11.3) — 手動再開の実体。自動復旧 (§11.4) も同じ入口を使う
+  // `/retry` — 手動再開の実体。自動復旧も同じ入口を使う
   retryTask: (args) => (recovery
     ? recovery.retry(args)
     : { ok: false, reason: '自律運転の機能が無効です (ボードを持つチャンネルがありません)', warnings: [] }),
-  // `/status` (§11.5) — 集計と描画は純粋関数 (src/status.js)。材料をここで集める
+  // `/status` — 集計と描画は純粋関数 (src/status.js)。材料をここで集める
   statusReport: ({ channelName }) => statusReport(channelName),
   // `/case` — 台帳の読み書きと描画は society の配線が持つ。表示のエスケープだけここで挿す
   caseCommand: (request) => societyWiring.caseCommand({ ...request, escape: sanitizeForDisplay }),
-  // `/stop` の案件停止 (§12.2 (g))。job を止める前に呼ばれる — off / halted の判断は配線側
+  // `/stop` の案件停止。job を止める前に呼ばれる — off / halted の判断は配線側
   societyStop: (request) => societyWiring.stopCases(request),
 });
 

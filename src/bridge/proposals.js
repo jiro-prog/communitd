@@ -1,4 +1,4 @@
-// 組織提案 (docs/social-engineering.md §3.9) の配線 (src/index.js から切り出し):
+// 組織提案の配線 (src/index.js から切り出し):
 // 発議の保存、裁定カード / 裁定依頼の配送と配り直し、bot の裁定の適用、適用の基点の解決。
 // 判断は src/proposals.js / src/adjudication.js が持ち、ここは ProposalStore と Discord を結ぶ。
 import { readFileSync } from 'node:fs';
@@ -33,7 +33,7 @@ export const PROPOSAL_REDELIVER_MS = 10 * 60 * 1000;
  * 裁定待ちが続いているなら、この時間を過ぎたらもう一度起こす。
  */
 export const PROPOSAL_ADJUDICATION_TIMEOUT_MS = 30 * 60 * 1000;
-/** 配り直しの上限。これを超えたら人間の出番 (§6 の「要人間」) */
+/** 配り直しの上限。これを超えたら人間の出番 (「要人間」) */
 export const MAX_PROPOSAL_DELIVERY_ATTEMPTS = 6;
 
 /**
@@ -76,7 +76,7 @@ export function createProposalWiring({
   }
 
   /**
-   * 適用の基点。**裁定の瞬間に固める** (§3.9) — 承認された diff は、この commit から
+   * 適用の基点。**裁定の瞬間に固める** — 承認された diff は、この commit から
    * 生やしたきれいな枝にだけ当たる。
    *
    * ブランチ名ではなく **commit OID を記録する**。ref は裁定と適用の間に動くので、
@@ -114,7 +114,7 @@ export function createProposalWiring({
    * **スレッドは作らない** — これは裁定の依頼ではなく結果の通知なので、job を
    * 起こす必要が無い。archive されたスレッドは次の候補へ落とす。
    *
-   * 「要人間」で出したものは受信箱にも残す (§10) — 人間がスレッドで返せば閉じる。
+   * 「要人間」で出したものは受信箱にも残す — 人間がスレッドで返せば閉じる。
    */
   async function postToProposal(proposal, text, { mentionOwner = false, cc = null } = {}) {
     const bot = [...bots.values()].find((b) => b.userId);
@@ -149,7 +149,7 @@ export function createProposalWiring({
   }
 
   /**
-   * org 提案の稟議カードを発議元へ出す (§3.9 — 通知の主体はブリッジで、bot ではない)。
+   * org 提案の稟議カードを発議元へ出す (通知の主体はブリッジで、bot ではない)。
    *
    * **archive されたスレッドには出さず親チャンネルへ落とす** — 投稿できずに
    * 「裁定待ちのまま誰も気付かない」提案を作らないため。
@@ -191,7 +191,7 @@ export function createProposalWiring({
   }
 
   /**
-   * bot の構造化裁定を提案へ適用する (§3.9)。
+   * bot の構造化裁定を提案へ適用する。
    *
    * **通せるのは work / process だけ** — org を書いてきても `canAdjudicate` が bot を
    * 弾くので、ここに class の分岐は置かない (ゲートを 2 か所に持たない)。
@@ -225,7 +225,7 @@ export function createProposalWiring({
   }
 
   /**
-   * report の任意 `initiative` を提案として保存する (§3.9 の発議 3 経路のうち (1))。
+   * report の任意 `initiative` を提案として保存する (発議 3 経路のうち (1))。
    *
    * **保存できるかを決めるのは checkProposal** (src/proposals.js) で、ここは配線だけ。
    * `raisedBy` / `class` / `subjectKeys` / `origin` はブリッジが付ける — bot に
@@ -410,7 +410,7 @@ export function createProposalWiring({
   }
 
   /**
-   * 配れていない提案を配り直す (§3.9 の生存性 — sol 指摘 2026-08-30)。
+   * 配れていない提案を配り直す (生存性 — sol 指摘 2026-08-30)。
    *
    * 配れない状況は通常運用で起きる: pause 中に完了した in-flight job の発議、
    * 裁定 bot が落ちている、投稿に失敗した、`deliberate()` が書けなかった。
@@ -493,7 +493,7 @@ export function createProposalWiring({
       if (!live.has(key)) proposalDelivery.delete(key);
     }
 
-    // (3) 採択された org / process を当てる (§3.9 org-apply)。**適用回路の起動点はここだけ**
+    // (3) 採択された org / process を当てる (org-apply)。**適用回路の起動点はここだけ**
     await sweepOrgApply(now);
   }
 

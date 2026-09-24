@@ -8,7 +8,7 @@ import { createRecoveryService } from '../src/recovery-wiring.js';
 import { RecoveryStore } from '../src/recovery.js';
 import { JobRunStore } from '../src/jobruns.js';
 
-// ---- /retry の実体 (§11.3) — 実ストア (mkdtemp) + 偽の Discord / キュー / OS ----
+// ---- /retry の実体 — 実ストア (mkdtemp) + 偽の Discord / キュー / OS ----
 
 const T0 = Date.parse('2026-09-05T09:00:00.000Z');
 const minutes = (n) => n * 60000;
@@ -97,7 +97,7 @@ test('retry: 復旧待ちの in-progress は担当以外の client から再開�
   // 世代の台帳
   const entry = h.recoveryStore.get('77');
   assert.equal(entry.generation, 1);
-  // 送信までが分かっているので `sent` (受付は受け手の job が閉じる — §11.3)
+  // 送信までが分かっているので `sent` (受付は受け手の job が閉じる)
   assert.equal(entry.attempts[0].result, 'sent');
   assert.equal(entry.attempts[0].kind, 'manual');
   assert.equal(entry.attempts[0].by, 'U1');

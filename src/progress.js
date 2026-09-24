@@ -1,5 +1,4 @@
-// 「⚙️ 作業中…」の placeholder に、いまの段階・経過・最後に観測できた活動を出す
-// (docs/implementation-plan.md P2 / docs/social-engineering.md §11.2)。
+// 「⚙️ 作業中…」の placeholder に、いまの段階・経過・最後に観測できた活動を出す。
 //
 // 情報源は増やさない: 段階は実行記録の側が知っていて、ツールは `hooks: true` のチャンネルで
 // 実行後 hook が積む軌跡 (src/trace.js) にある。**軌跡は実行「後」のイベント**なので、

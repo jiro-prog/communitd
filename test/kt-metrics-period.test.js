@@ -15,7 +15,7 @@ import {
   summarizeRuns,
 } from '../scripts/kt-metrics.mjs';
 
-// ---- 期間指定 (§11.5): 期間内のイベントと期間末の状態を分ける ----
+// ---- 期間指定: 期間内のイベントと期間末の状態を分ける ----
 
 const D = (day, hour = 0) => Date.parse(`2026-09-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:00:00+09:00`);
 const iso = (ms) => new Date(ms).toISOString();
