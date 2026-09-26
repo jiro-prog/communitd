@@ -32,3 +32,55 @@
 - Discord トークン等の秘密は子プロセスの env から除去して渡す (`src/proc.js` の `scrubEnv`)。ただし `.env` ファイル自体は `cwd` 配下にあれば読める — ブリッジのリポジトリを作業対象チャンネルの `cwd` にしない (`npm run add-project` は、ブリッジのルート自身とその祖先を `cwd` に指定できないようにしている。`realpath` 解決後に判定するので junction 経由でも同じ)
 - codex ランタイムの bot (`runtime: "codex"`) の書込み可否はチャンネル設定 `codexSandbox` で決まる。既定は `read-only` で、`workspace-write` を明示したチャンネルでのみ書ける (→ [codex ランタイム](codex-runtime.md))。ユーザー設定の MCP サーバー (UnityMCP / node_repl 等) はどちらのモードでも読み込ませない — codex の sandbox は MCP ツールを縛らないため、MCP が入ると read-only 指定は意味を失う
 
+
+## 発議と組織提案 (実験的・非対応)
+
+> **実験的な機能で、公開版ではサポートしない。** 既定は無効 (`initiative` を書かなければ何も起きない)。
+> 仕様は予告なく変わる。使うなら以下を読んだうえで、自分だけが居るサーバーに限ること。
+
+`initiative.enabled: true` にすると、bot が**自分たちの役割文・設定・手順書の変更**を提案し、裁定を経て
+**ブリッジ自身がその差分を当ててコミットし、既定ブランチへ merge する**経路が開く。ブリッジが自分の
+権限設定を書き換えられる唯一の経路なので、ここだけ信頼境界の形が他と違う。
+
+### 誰が何を決めるか
+
+| 提案の class | 例 (`kind`) | 裁定する者 | 当たる先 |
+| --- | --- | --- | --- |
+| `org` | `role-edit` / `policy-edit` / `tool-grant` / `governance-edit` / bot の新設・廃止 | **作者だけ** (`ownerUserId`)。Discord のボタンで裁定 | `roles/**`・`config.policy.json`・承認された文書 (ブリッジが直接当てる) |
+| `process` | `process-edit` | `initiative.execBotKeys` に書いた **bot** | `processEditAllowlist` に載せた文書だけ |
+| `work` | `work-item` / `check-add` / `tooling-add` | 同上 (**bot**) | 通常の自律運転タスクとして起票され、worker が実装する |
+
+- `execBotKeys` の既定は空 (= `work` / `process` は誰も裁定できない)。**書けば、その bot が人を介さずに
+  手順書の変更と作業の起票を決められる**
+- `initiative.enabled: true` には `ownerUserId` (かつ `allowedUserIds` に含まれること) が要る。無ければ起動しない
+- `config.secrets.json` はどの提案からも対象にできない (裁定権者 `ownerUserId` / `ownerNames` を提案で書き換えさせないため)
+
+### 機構で閉じていること
+
+- **裁定は内容に束縛される。** カードのボタンは提案 ID と digest (提案の入力・意見・対象ファイルの版・
+  allowlist を丸ごと正規化した指紋) を持ち、押下時に現在の digest と照合する。カードを出した後に差分が
+  差し替わっていれば裁定せず、出し直す。task 化と適用の直前にも照合する
+- **申告と実際の変更を突き合わせる。** 提案が申告した対象・`touch`・差分が触るパスの三者が一致しなければ
+  保存しない。差分の文法は通常ファイルの text の create / edit / delete だけで、絶対パス・`..`・symlink・
+  rename・binary・mode 変更は拒否する。`kind` ごとに許す操作 (edit のみ等) も閉じてある
+- **当てるのはブリッジ。** 裁定時の `baseCommit` から毎回きれいな枝を作り、当てた後の `git diff` が承認済み
+  差分と完全一致することを確かめてからコミットする。`config.policy.json` や役割文を変える差分は、
+  **書く前に起動時と同じ設定検証**へ通し、通らなければ当てない (壊れた設定を merge して次の起動が落ちる
+  のを防ぐ)。その後 `verify` を回し、別の bot の検収を経て、**適用コミットの OID だけ**を merge する
+
+### 残っているリスク (承知のうえで使うこと)
+
+- **裁定カードに差分そのものは出ない。** 出るのは bot が書いた要旨 (300 字まで)・対象・変更するファイル名
+  で、採択はボタンを押した時点で確定する。digest の束縛は「見た後に差し替えられる」ことは防ぐが、
+  「要旨と差分が食い違っている」ことは防がない。**`org` 提案は、採択する前に差分を自分で読むこと**
+  (要旨だけで押さない)
+- **`config.policy.json` への提案を採択することは、その中身を自分で書くのと同じ。** `verify` (任意 shell
+  コマンド)・`tools` / `toolsExtra`・`permissionMode`・`autonomy` はすべて policy にあるので、`policy-edit`
+  の採択は権限の付与そのものになりうる。変更は merge 後、次の起動 (`/restart`) から効く
+- **適用回路のチャンネルは、ブリッジ自身のリポジトリを `cwd` にすることが必須**になっている
+  (`initiative.applyChannel`)。これは上の「ブリッジのリポジトリを作業対象チャンネルの `cwd` にしない」と
+  矛盾する配置で、そのチャンネルで動く bot (適用 task の検収役など) は `readonly` でも `.env` の Discord
+  トークンと `config.secrets.json` を読める。**現状これを塞ぐ機構は無い**
+- **prompt injection は提案にも届く。** 提案を起草する bot が読んだスレッド・添付・Web ページの文言は、
+  そのまま提案の中身になりうる。`execBotKeys` の bot が裁定する `process` / `work` はとくに、人の目を
+  通らずに進む
