@@ -51,7 +51,8 @@ export function createToolApprovalWiring({ toolExtra, approvals, limits }) {
    * 拒否されたツール要求を「人間が押せる申請カード」に変えてスレッドへ出す。
    *
    * エージェント側は何も承認できない — ここが作るのは申請だけで、許可が増えるのは
-   * allowedUserIds の人間がボタンを押したときだけ。恒久承認に向かない要求
+   * 呼ぶ権限のある人間 (allowedUserIds / allowedRoleIds) がボタンを押したときだけ。
+   * 恒久承認に向かない要求
    * (シェル全許可・wildcard・cwd 外・秘密混じり) はカードにせず、理由を並べて返す。
    */
   async function postApprovalRequests(thread, bot, cc, denials, askLedger = null) {

@@ -1,4 +1,4 @@
-// 同じ仕事を起こし直す判断。
+// 同じ仕事を起こし直す判断 (docs/implementation-plan.md P3・P4 / docs/social-engineering.md §11.3)。
 // **純粋関数と、再開世代の台帳だけ。** Discord・Git・子プロセス・キューは src/recovery-wiring.js が
 // 引数で渡してくる。
 //
@@ -16,7 +16,8 @@ import { statusLabel } from './taskstatus.js';
 export const RETRY_TARGETS = Object.freeze(['worker', 'reviewer']);
 
 /** これらの状態では `/retry` は何も起こさない (走っている・起動待ちの最中) */
-const BUSY_STATUSES = Object.freeze(['running', 'queued', 'approval-wait', 'handoff-wait', 'review-wait']);
+// replay-wait = 改訂の解き直し待ち (src/replay.js)。待つのをやめてレビューを呼ぶなら `/review` (解き直しを閉じてから呼ぶ)
+const BUSY_STATUSES = Object.freeze(['running', 'queued', 'approval-wait', 'handoff-wait', 'review-wait', 'replay-wait']);
 
 const TERMINAL = Object.freeze(['merged', 'dropped']);
 
@@ -70,7 +71,7 @@ export function planRetry({
   if (inFlight) return ng(`#${taskId} の再開は進行中です (連打しても 1 回だけ起こします)`);
   // **送信済み・受付前の再開要求が残っていたら起こさない** (送信完了と受け手の受付の間には
   // Gateway の遅延がある。実行記録もキューもまだ前の失敗を示しているので、状態だけ見ると
-  // 二重に起こせてしまう — レビュー指摘 2026-09-05)。要求は受付で照合して閉じる
+  // 二重に起こせてしまう — レビュー指摘 2026-09-05)。要求は受付で照合して閉じる (§11.3)
   if (openRequest) {
     const label = requestMarker(taskId, openRequest.generation);
     if (openRequest.result === 'send-unknown') {
@@ -91,7 +92,8 @@ export function planRetry({
   if (liveJob || BUSY_STATUSES.includes(st.status)) {
     return ng(
       `#${taskId} は${statusLabel(st.status)}です (${st.reason || '進行中'}) — 起こし直しません。`
-      + `${st.status === 'handoff-wait' || st.status === 'review-wait' ? ' 猶予 (5 分) を過ぎても動かなければもう一度打ってください' : ''}`,
+      + `${st.status === 'handoff-wait' || st.status === 'review-wait' ? ' 猶予 (5 分) を過ぎても動かなければもう一度打ってください' : ''}`
+      + `${st.status === 'replay-wait' ? ' 待たずにレビューを呼ぶなら `/review`' : ''}`,
     );
   }
   const pending = (Array.isArray(pendingContracts) ? pendingContracts : []).filter(Boolean);
@@ -118,7 +120,7 @@ export function planRetry({
   if (st.status === 'reconcile' && liveness === null) {
     warnings.push(
       '前の job の子プロセスを特定できないため、残っていないことは確認できていません'
-      + ' (実行記録に pid が無い — 導入前の job)。OS で claude / codex のプロセスが残っていないか確かめてください',
+      + ' (実行記録に pid が無い — 導入前の job)。OS で claude / codex / pi のプロセスが残っていないか確かめてください',
     );
   }
   const previous = st.run
@@ -168,7 +170,7 @@ export function requestMarker(taskId, generation) {
   return `再開要求 ${String(taskId)}-${Number(generation) || 0}`;
 }
 
-/** 印を読む (受付側の照合)。無ければ null */
+/** 印を読む (受付側の照合 — §11.3)。無ければ null */
 export function parseRequestMarker(content) {
   const m = /再開要求 ([^\s-]+)-(\d+)/.exec(String(content ?? ''));
   if (!m) return null;
@@ -254,14 +256,38 @@ export function retryMessage({
   return (text.length <= room ? text : `${text.slice(0, room - 1)}…`) + marker;
 }
 
-// ---- 自動復旧の判断 ----
+// ---- 自動復旧の判断 (§11.4) ----
 
 /** planRecovery が返す行動 */
 export const RECOVERY_ACTIONS = Object.freeze(['none', 'observe', 'schedule', 'retry', 'halt']);
 
 /**
- * 止まった job の**副作用の見立て** (純粋)。自動で起こし直せるのは副作用が始まっていないと
- * 実行記録で確認できるものだけ。
+ * 自動復旧が拾う状態 (deriveTaskStatus の語)。
+ *
+ * - `recovery-wait`: 次に動く主体が居ないまま猶予を過ぎた
+ * - `stopped`: 中断された — **人間の `/stop` 以外** (再起動・タイムアウト・ランタイム) だけ拾う
+ * - `reconcile`: 要照合 — 前プロセスの子が残っていないかは `/retry` と同じ入口 (livenessOf) が
+ *   確かめてから起こす。実行記録が 1 件も無いタスク (起動メッセージが受け付けられなかった・
+ *   導入前に着手した) もここに来る
+ */
+export const AUTO_RECOVERY_STATUSES = Object.freeze(['recovery-wait', 'stopped', 'reconcile']);
+
+/** 副作用の見立て → 再開メッセージの言い方 (判断の理由に載せる) */
+const SAFETY_LABELS = Object.freeze({
+  none: '起動前に止まった',
+  'none-observed': '副作用なし',
+  'delivered-model': '作業ツリーの続きから',
+  unknown: '作業ツリーの続きから',
+});
+
+/**
+ * 止まった job の**副作用の見立て** (純粋)。
+ *
+ * 2026-10-07 まではここで `none` / `none-observed` と言えたものだけを自動で起こしていた。
+ * いまは `config` 以外はすべて起こす — 起こし直しは「同じブランチ・同じ作業ツリーの続き」
+ * (`retryMessage` が前回の終わり方と残っている変更を渡し、reset を禁じる) で、タスクの
+ * ブランチは隔離されているので、副作用が始まっていても繰り返しにはならない。
+ * 見立ては再開の理由に載せる (どこから続けるかの手がかり)。
  *
  * - `none`: モデルの子プロセスが起動していない (spawn 記録なし) — 起動前の失敗
  * - `none-observed`: 起動はしたが、hooks で軌跡が取れ・ツール 0 件・git 差分なし
@@ -285,20 +311,26 @@ export function classifySideEffects(run) {
 }
 
 /**
- * 自動復旧の判断 (純粋)。**観測 mode が既定** — 起こさず、自動化していたら何をしたかを返す。
+ * 自動復旧の判断 (純粋)。**既定は auto** (2026-10-07 — 止まったタスクが同時枠を塞いだまま、
+ * 誰も来ない人間を待ち続けていた: あるプロジェクトでは 1 件が 1 か月、後ろの 3 件ごと)。
+ * observe では起こさず、自動化していたら何をしたかを返す。
+ *
+ * 止める理由として残すのは: 人間の `/stop`・設定の不備 (起こしても同じ結果)・回数の上限・
+ * pause・タスクの job 予算・チャンネルの日次予算・制御台帳の不信。走っている子が居るかは
+ * 起こす側 (`/retry` と同じ入口) が確かめる。
  *
  * @param {object} p
  * @param {object} p.task
  * @param {object} p.status deriveTaskStatus の戻り (`run` は直前の終端記録)
  * @param {{mode: string, graceMin: number, maxAutoRetries: number, retryDelaysMin: number[]}} p.config
- * @param {object|null} [p.recovery] RecoveryStore.recoveryOf(task.id)
+ * @param {object|null} [p.recovery] RecoveryStore.recoveryOf(task.id) — `lastAt` も間隔の起点に含める
  * @param {boolean} [p.paused]
  * @param {number} [p.backoffUntil]
  * @param {number|null} [p.dayJobsLeft] チャンネルの日次予算の残 (null = 不明 → 止める)
  * @param {boolean} [p.jobRunsHealthy] 実行記録の台帳が信用できるか (書き込みの失敗も含む)
  * @param {Array<{file: string, reason: string}>} [p.brokenLedgers] 読めない制御台帳
  *   (pause / tasks / recovery / job-runs …)。**1 件でもあれば halt** — 停止しているか・
- *   何が走ったか・何が仕事かの、どれか 1 つでも読めないなら起こす判断ができない
+ *   何が走ったか・何が仕事かの、どれか 1 つでも読めないなら起こす判断ができない (§12.3 (1))
  * @param {'board'|'apply'|'scout'|'initiative'} [p.taskKind]
  * @param {number} p.now
  * @returns {{action: string, reason: string, safety: string, nextAt: number|null}}
@@ -308,7 +340,7 @@ export function planRecovery({
   jobRunsHealthy = true, brokenLedgers = [], taskKind = 'board', now = Date.now(),
 } = {}) {
   const out = (action, reason, safety = 'unknown', nextAt = null) => ({ action, reason, safety, nextAt });
-  const mode = config?.mode ?? 'observe';
+  const mode = config?.mode ?? 'auto';
   if (mode === 'off') return out('none', '自動復旧は off');
   const unreadable = (Array.isArray(brokenLedgers) ? brokenLedgers : [])
     .map((l) => (typeof l === 'string' ? l : l?.file))
@@ -319,14 +351,15 @@ export function planRecovery({
   }
   if (taskKind !== 'board') return out('none', `${taskKind} は自動復旧の対象外`);
   if (!task || !status) return out('none', '判定の材料が無い');
-  if (status.status !== 'recovery-wait') return out('none', `${status.status} は自動復旧の対象外`);
+  if (!AUTO_RECOVERY_STATUSES.includes(status.status)) return out('none', `${status.status} は自動復旧の対象外`);
   const run = status.run ?? null;
-  if (!run) return out('none', '実行記録の無い停止は自動では起こさない (要照合と同じ扱い)');
-  if (run.stopKind) return out('none', `意図的な停止 (${run.stopKind}) は自動では起こさない`);
-  const safety = classifySideEffects(run);
+  // 実行記録が無いのは要照合 (起動メッセージが受け付けられなかった・導入前に着手した) だけ。
+  // 復旧待ち・停止は必ず直前の記録から判定されるので、無ければ材料不足
+  if (!run && status.status !== 'reconcile') return out('none', '直前の実行記録が無い — 判定できない');
+  const stopKind = run?.stopKind ?? status.stopKind ?? null;
+  if (stopKind === 'human') return out('none', '人間の停止 (/stop) は自動では起こさない');
+  const safety = run ? classifySideEffects(run) : 'unknown';
   if (safety === 'config') return out('observe', `設定・契約の不備 (${run.stageDetail || run.outcome}) — 起こし直しても同じ結果なので人間が直す`, safety);
-  if (safety === 'delivered-model') return out('observe', 'モデルは成功して配送で落ちた — 成功したモデル実行を繰り返さない (本文を保存していないので自動再送もしない)', safety);
-  if (safety === 'unknown') return out('observe', `副作用が始まっている可能性がある (${run.outcome}${run.stageDetail ? `: ${String(run.stageDetail).slice(0, 80)}` : ''}) — 既存成果を照合できる経路ができるまで手動復旧`, safety);
 
   const count = Number(recovery?.autoCount) || 0;
   const max = Number.isSafeInteger(config?.maxAutoRetries) ? config.maxAutoRetries : 0;
@@ -336,19 +369,33 @@ export function planRecovery({
   if (!(left > 0)) return out('observe', 'task の job 予算が残っていない — 起こさない (予算は増やさない)', safety);
   if (dayJobsLeft === null || dayJobsLeft <= 0) return out('observe', 'チャンネルの日次予算が残っていない (か不明) — 起こさない', safety);
 
-  const endedAt = msOfTime(run.endedAt ?? run.observedAt);
+  // 時計の起点は直前の job の終わり。記録が無い要照合は状態に入った時刻 (最後の遷移)
+  const endedAt = run ? msOfTime(run.endedAt ?? run.observedAt) : msOfTime(status.since);
   if (!Number.isFinite(endedAt)) return out('observe', '前の job の終了時刻が読めない — 起こさない', safety);
-  const delays = Array.isArray(config?.retryDelaysMin) && config.retryDelaysMin.length > 0 ? config.retryDelaysMin : [5, 15];
+  // 直前の再開要求がそれより後なら、そこから数える。送信前に失敗した要求 (failed / expired) は
+  // 新しい job を残さないので、job の終わりだけを見ると間隔が実質ゼロになり、上限の回数が
+  // 毎分の見回りで撃ち切られた (2026-10-06)。読めない lastAt は無視する (従来の起点のまま)
+  const lastAt = msOfTime(recovery?.lastAt);
+  const from = Number.isFinite(lastAt) ? Math.max(endedAt, lastAt) : endedAt;
+  const delays = Array.isArray(config?.retryDelaysMin) && config.retryDelaysMin.length > 0 ? config.retryDelaysMin : [5, 15, 30];
   const delayMin = delays[Math.min(count, delays.length - 1)];
   const graceMin = Number.isSafeInteger(config?.graceMin) && config.graceMin > 0 ? config.graceMin : 5;
   // **最も遅い開始可能時刻を採る**: 猶予・再試行間隔・チャンネルのバックオフ
-  const earliest = Math.max(endedAt + delayMin * 60000, endedAt + graceMin * 60000, Number(backoffUntil) || 0);
+  const earliest = Math.max(from + delayMin * 60000, from + graceMin * 60000, Number(backoffUntil) || 0);
   if (now < earliest) {
     return out('schedule', `自動再試行 ${count + 1} 回目を ${new Date(earliest).toISOString()} に予定 (間隔 ${delayMin} 分)`, safety, earliest);
   }
+  const why = `${statusWord(status.status, stopKind)} / ${SAFETY_LABELS[safety] ?? safety}`;
   return mode === 'auto'
-    ? out('retry', `自動再試行 ${count + 1} 回目 (副作用なし: ${safety})`, safety)
-    : out('observe', `[観測] 自動なら今起こす: 再試行 ${count + 1} 回目 (副作用なし: ${safety})`, safety);
+    ? out('retry', `自動再試行 ${count + 1} 回目 (${why})`, safety)
+    : out('observe', `[観測] 自動なら今起こす: 再試行 ${count + 1} 回目 (${why})`, safety);
+}
+
+/** 判断の理由に載せる「何で止まっていたか」 */
+function statusWord(status, stopKind) {
+  if (status === 'stopped') return `中断 (${stopKind ?? '?'})`;
+  if (status === 'reconcile') return '要照合';
+  return '復旧待ち';
 }
 
 /**
@@ -357,7 +404,7 @@ export function planRecovery({
  * entry: `{ taskId, generation, attempts: [{generation, at, by, kind, target, previousRunId, result}],
  *           auto: {count, nextAt, lastReason, lastAt} }`
  *
- * **await の前に世代を確保する**ための店。手動 (`/retry`) も自動も同じ入口を使い、
+ * **await の前に世代を確保する**ための店。手動 (`/retry`) も自動 (§11.4) も同じ入口を使い、
  * 同じ task で同時に 2 本起こさない。自動の回数と次回時刻はここに永続する — 再起動や手動再開で
  * 自動枠をリセットしない。
  */
@@ -491,7 +538,7 @@ export class RecoveryStore extends JsonStore {
     return this.get(taskId);
   }
 
-  /** 自動再試行の予定。count は増やさない — 増えるのは begin(kind:'auto') のとき */
+  /** 自動再試行の予定 (§11.4)。count は増やさない — 増えるのは begin(kind:'auto') のとき */
   scheduleAuto(taskId, { nextAt, reason = '', now = Date.now() } = {}) {
     const key = String(taskId ?? '');
     if (key === '') throw new Error('復旧の記録には taskId が必要です');

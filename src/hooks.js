@@ -1,4 +1,3 @@
-// @ts-check
 import { fileURLToPath } from 'node:url';
 import { HOOK_GRACE_MS } from './broker.js';
 
@@ -34,7 +33,6 @@ export function buildHookSettings(options = {}) {
   return JSON.parse(JSON.stringify({ hooks }));
 }
 
-/** @param {unknown} value @returns {value is Record<string, any>} */
 function isPlainObject(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
@@ -99,7 +97,7 @@ export function buildTraceToolHooks({ traceFile, timeoutMs }) {
  * 承認ブローカへ問い合わせる PreToolUse hook を組み立てる (T5)。
  *
  * **matcher で対象ツールを絞るのが要点。** `--allowedTools` は許可リストではなく
- * 追加許可で、指定外でも無害なものは通るため、hook 側で「このツールは
+ * 追加許可で、指定外でも無害なものは通る (T0 §6.3c) ため、hook 側で「このツールは
  * 拒否されるか」を正確には再現できない。全ツールに載せると、通るはずの呼び出しにまで
  * ブリッジとの往復が挟まる。承認カードにできるのはドメイン限定 (`WebFetch`) だけなので、
  * 対象もそれに限る。

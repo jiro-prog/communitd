@@ -8,7 +8,7 @@ import { createRecoveryService } from '../src/recovery-wiring.js';
 import { RecoveryStore } from '../src/recovery.js';
 import { JobRunStore } from '../src/jobruns.js';
 
-// ---- /retry の実体 — 実ストア (mkdtemp) + 偽の Discord / キュー / OS ----
+// ---- /retry の実体 (§11.3) — 実ストア (mkdtemp) + 偽の Discord / キュー / OS ----
 
 const T0 = Date.parse('2026-09-05T09:00:00.000Z');
 const minutes = (n) => n * 60000;
@@ -31,7 +31,7 @@ const stalledRun = (over = {}) => ({
 function harness({
   tasks, runs = [], contracts = {}, paused = false, jobsItems = { active: [], waiting: [] },
   inspect = null, available = ['opus', 'opus2', 'fable'], reissue = null, hopBudget = undefined,
-  gitDirty = () => true, postAs = null,
+  gitDirty = () => true, postAs, threadAs = null,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'communitd-retry-'));
   const jobRuns = new JobRunStore(join(dir, 'job-runs.json'));
@@ -68,8 +68,10 @@ function harness({
     inspectProcess: inspect,
     availableBotKeys: () => available,
     botUserId: (key) => ({ opus: 'O1', opus2: 'O2', fable: 'F1' })[key] ?? null,
-    postAs: postAs ?? (async (p) => { posts.push(p); }),
+    // 省略は投稿を貯める偽物。null を渡すと未配線 (投げ手の client から投稿できない)
+    postAs: postAs === undefined ? async (p) => { posts.push(p); } : postAs,
     reissueReview: reissue,
+    threadAs,
     gitDirty,
   });
   return { service, posts, logs, jobRuns, recoveryStore, budgets };
@@ -97,7 +99,7 @@ test('retry: 復旧待ちの in-progress は担当以外の client から再開�
   // 世代の台帳
   const entry = h.recoveryStore.get('77');
   assert.equal(entry.generation, 1);
-  // 送信までが分かっているので `sent` (受付は受け手の job が閉じる)
+  // 送信までが分かっているので `sent` (受付は受け手の job が閉じる — §11.3)
   assert.equal(entry.attempts[0].result, 'sent');
   assert.equal(entry.attempts[0].kind, 'manual');
   assert.equal(entry.attempts[0].by, 'U1');
@@ -246,4 +248,93 @@ test('retry: 予算が無ければ増やさずに断り、投稿に失敗した�
     jobRuns: new JobRunStore(join(mkdtempSync(join(tmpdir(), 'communitd-retry-')), 'job-runs.json')),
   });
   assert.match((await noStore.retry({ thread: { id: 'T77' } })).reason, /配線されていません/);
+});
+
+// ---- 送信前に断る分岐 (投げ手が居ない・スレッドを取れない) ----
+// 自動の経路は bot を持たないので、reviewer の呼び直しは threadAs で投げ手のスレッドを取る。
+// どれも世代を確保した**後**に断るので、台帳には failed(理由) が残る (送信していないので sent: false)
+
+/** 呼ばれた引数を貯める偽物 */
+const recorder = (impl = async () => {}) => {
+  const calls = [];
+  const fn = async (p) => { calls.push(p); return impl(p); };
+  return { calls, fn };
+};
+
+test('retry: reviewer の呼び直しで担当以外に投げ手の bot が居なければ、スレッドも取らず何も送らずに failed(投げ手なし) を残して断る', async () => {
+  const reissue = recorder(async () => ({ ok: true, reason: '出し直しました' }));
+  const threadAs = recorder(async () => ({ bot: FABLE, thread: { id: 'T77' } }));
+  // 起動しているのはレビュー担当 (opus2) だけ — 担当自身からは呼べない
+  const h = harness({
+    tasks: [task({ state: 'review' })], runs: [stalledRun({ reason: 'ok' })],
+    available: ['opus2'], reissue: reissue.fn, threadAs: threadAs.fn,
+  });
+  const out = await h.service.retry({ thread: { id: 'T77' }, kind: 'auto', userId: 'auto' });
+  assert.equal(out.ok, false);
+  assert.equal(out.sent, false);
+  assert.equal(out.reason, 'レビュー担当 opus2 を呼べる bot が居ません (担当自身からは起こせません)');
+  assert.equal(threadAs.calls.length, 0);
+  assert.equal(reissue.calls.length, 0, '投げ手が居ないのにレビューを出し直している');
+  assert.equal(h.posts.length, 0);
+  const [attempt] = h.recoveryStore.get('77').attempts;
+  assert.equal(attempt.result, 'failed(投げ手なし)');
+  assert.equal(attempt.target, 'reviewer');
+  assert.equal(attempt.targetBotKey, 'opus2');
+  assert.equal(attempt.sentAt, null);
+  assert.deepEqual(h.service.inFlightIds(), []);
+});
+
+test('retry: reviewer の呼び直しで投げ手のスレッドを取れなければ (threadAs が throw)、出し直さずに理由を台帳へ 120 字・返答へ全文で残して断る', async () => {
+  const reissue = recorder(async () => ({ ok: true, reason: '出し直しました' }));
+  const message = `Unknown Channel ${'x'.repeat(200)}`;
+  const threadAs = recorder(async () => { throw new Error(message); });
+  const h = harness({
+    tasks: [task({ state: 'review' })], runs: [stalledRun({ reason: 'ok' })],
+    reissue: reissue.fn, threadAs: threadAs.fn,
+  });
+  const out = await h.service.retry({ thread: { id: 'T77' }, kind: 'auto', userId: 'auto' });
+  assert.equal(out.ok, false);
+  assert.equal(out.sent, false);
+  // 投げ手は reviewer (opus2) 以外の起動中の bot から選ぶ
+  assert.deepEqual(threadAs.calls, [{ botKey: 'opus', threadId: 'T77' }]);
+  assert.equal(out.reason, `opus からスレッドを取得できません: ${message}`);
+  assert.equal(reissue.calls.length, 0, 'スレッドを取れないのにレビューを出し直している');
+  const [attempt] = h.recoveryStore.get('77').attempts;
+  assert.equal(attempt.result, `failed(${message.slice(0, 120)})`);
+  assert.equal(attempt.target, 'reviewer');
+  assert.deepEqual(h.service.inFlightIds(), []);
+});
+
+test('retry: worker の起こし直しで投げ手の bot が居ない・投稿の口が無いときは、門番も組み直さず何も送らずに failed(投げ手なし) を残して断る', async () => {
+  // 起動しているのが担当 (opus) だけ / 投げ手は居るが postAs が未配線
+  for (const over of [{ available: ['opus'] }, { postAs: null }]) {
+    const h = harness({ tasks: [task()], runs: [stalledRun()], ...over });
+    const out = await h.service.retry({ thread: { id: 'T77' }, kind: 'auto', userId: 'auto' });
+    const label = JSON.stringify(over);
+    assert.equal(out.ok, false, label);
+    assert.equal(out.sent, false, label);
+    assert.equal(out.reason, '担当 opus を呼べる bot が居ません (担当自身からは起こせません)', label);
+    assert.equal(h.posts.length, 0, label);
+    assert.equal(h.budgets.has('T77'), false, `送らないのに門番を組み直している ${label}`);
+    const [attempt] = h.recoveryStore.get('77').attempts;
+    assert.equal(attempt.result, 'failed(投げ手なし)', label);
+    assert.equal(attempt.target, 'worker', label);
+    assert.equal(attempt.targetBotKey, 'opus', label);
+    assert.deepEqual(h.service.inFlightIds(), [], label);
+  }
+});
+
+test('retry: 要照合の記録を閉じられなくても (resolveReconcile が throw)、ログを出して起こし直しを続ける', async () => {
+  const reconciled = stalledRun({ reason: null, endedAt: null, spawn: { pid: 4242, at: T0 - minutes(59) }, reconcile: true });
+  const h = harness({
+    tasks: [task()], runs: [reconciled],
+    inspect: async () => ({ alive: false, createdAt: null, name: null, command: null, error: null }),
+  });
+  h.jobRuns.resolveReconcile = () => { throw new Error('EBUSY: job-runs.json'); };
+  const out = await h.service.retry({ thread: { id: 'T77' }, bot: FABLE, userId: 'U1' });
+  assert.equal(out.ok, true, out.reason);
+  assert.ok(h.logs.includes('[recovery] 要照合 j1 を閉じられませんでした: EBUSY: job-runs.json'), h.logs.join(' | '));
+  assert.equal(h.posts.length, 1, '要照合を閉じられなかったので起こすのをやめている');
+  assert.equal(h.jobRuns.get('j1').stage, 'reconcile', '閉じられなかった記録が閉じたことになっている');
+  assert.equal(h.recoveryStore.get('77').attempts[0].result, 'sent');
 });

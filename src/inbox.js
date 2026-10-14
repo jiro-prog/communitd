@@ -1,4 +1,4 @@
-// 裁定の受信箱。
+// 裁定の受信箱 (docs/social-engineering.md §10)。
 //
 // 社会が作者に求めるのは裁定だけのはずなのに、その入口が 3 系統に散っている
 // (停止通知の実メンション・稟議カード・blocked タスクの ⛔ 1 行)。ここは
@@ -14,14 +14,16 @@
 
 import { JsonStore } from './store.js';
 import { remainingJobs } from './board.js';
+import { RUN_RETENTION_MS } from './jobruns.js';
 import { msOfTime } from './time.js';
 import { nextOperationFor, statusLabel } from './taskstatus.js';
+import { codePointBoundary } from './text.js';
 
-/** 台帳へ保存する要旨の上限 */
+/** 台帳へ保存する要旨の上限 (§10.3) */
 export const MAX_SUMMARY_CHARS = 140;
 
 /**
- * **一覧の 1 行に出す要旨の上限**。台帳の 140 字とは別物。
+ * **一覧の 1 行に出す要旨の上限** (§10.4)。台帳の 140 字とは別物。
  *
  * 140 字のまま出すと 10 行で 1900 字に達し、後ろの節が丸ごと消える
  * (notify 10 件 + 稟議 2 件で「要人間」が落ちるのを実測 — レビュー指摘 2026-09-02)。
@@ -35,7 +37,7 @@ export const MAX_INBOX_CHARS = 1900;
 /** 1 節に並べる上限 (溢れた分は件数だけ出す) */
 export const MAX_SECTION_ROWS = 10;
 
-/** この 1 行が出る状態が社会の正常 */
+/** この 1 行が出る状態が社会の正常 (§10.4) */
 export const EMPTY_INBOX = '作者を待っているものはありません';
 
 /** 節ごとに取り置く `… ほか N 件` の 1 行ぶん */
@@ -55,7 +57,7 @@ const FENCE_LINE = /^[ \t]*`{3,}/;
  *
  * bot は停止契約に当たると末尾に状況と質問を書く (共通規定) ので、末尾の段落が
  * 「何を聞かれているか」である確率がいちばん高い。契約スキーマに「質問」欄を足す
- * のは protocol を上げる変更なので、まずここで足りるかを見る。
+ * のは protocol を上げる変更なので、まずここで足りるかを見る (§10.2 / §10.5)。
  *
  * 制御フッター行は落とす — 呼び出し側 (resolveOutgoingText) が除いた本文が来る
  * 想定だが、生の応答を渡されても要旨が `[[notify:owner]]` にならないようにする。
@@ -87,7 +89,15 @@ export function summarizeForInbox(text, { max = MAX_SUMMARY_CHARS } = {}) {
   }
   const paragraphs = kept.join('\n').split(/\n[ \t]*\n/).filter((p) => p.trim() !== '');
   const picked = (paragraphs.at(-1) ?? '').replace(/\s+/g, ' ').trim();
-  return picked.length > max ? `${picked.slice(0, max)}…` : picked;
+  return clip(picked, max);
+}
+
+/**
+ * max 字を超えたら切って「…」を付ける。上限は UTF-16 の長さのまま、切る位置だけを
+ * コードポイントの境界へ寄せる — 境界の絵文字を割ると要旨の末尾が � になる
+ */
+function clip(text, max) {
+  return text.length > max ? `${text.slice(0, codePointBoundary(text, max))}…` : text;
 }
 
 /**
@@ -105,12 +115,18 @@ export class InboxStore extends JsonStore {
    * **自分が持っているキーだけを見る。** 素の添字だと `/inbox close:__proto__` が
    * `Object.prototype` を掴んで「閉じました」と答え、`entry.id` が undefined のまま
    * 保存されて台帳に `"undefined"` キーのゴミが残る (レビューで再現 2026-09-02)。
+   *
+   * **返す `id` は台帳のキーに揃える。** 書き戻しは `id` の位置へ行くので、手で編集して
+   * キー "5" に `id: "7"` が入っていると、閉じた結果が "7" へ書かれて "5" は open のまま
+   * 残り (/inbox に同じ行が出続ける)、`id` の無い entry は `"undefined"` キーを足していた。
+   * 一意なのはキーだけ (`nextId` もキーから採る) なので、一覧の `#id` も `close:<id>` も
+   * キーで通す。台帳の `id` は次に書き戻したときキーへ直る。
    */
   get(id) {
     const key = String(id);
     if (!Object.hasOwn(this.data, key)) return null;
     const entry = this.data[key];
-    return entry && typeof entry === 'object' && !Array.isArray(entry) ? entry : null;
+    return entry && typeof entry === 'object' && !Array.isArray(entry) ? { ...entry, id: key } : null;
   }
 
   /** id 昇順 (ボードと同じ並び) */
@@ -138,16 +154,54 @@ export class InboxStore extends JsonStore {
   }
 
   nextId() {
+    return String(this.maxKeyNumber() + 1);
+  }
+
+  /** 採番の基点 = キーの最大値 (正の整数として読めるキーが無ければ 0) */
+  maxKeyNumber() {
     let max = 0;
     for (const key of Object.keys(this.data)) {
       const n = Number.parseInt(key, 10);
       if (Number.isInteger(n) && n > max) max = n;
     }
-    return String(max + 1);
+    return max;
   }
 
   /**
-   * 通知を記録する。**呼ぶのは実メンションを送れたときだけ** —
+   * 閉じてから保持期間を過ぎた entry を消す (起動時に 1 回)。閉じた記録は一覧に出ないまま
+   * 溜まり続けるので、実行記録の終端 (`pruneEnded`) と同じ保持期間で捨てる。
+   *
+   * 残すもの:
+   * - **開いている entry** — まだ作者を待っている
+   * - **キーが最大の entry (閉じていても)** — `nextId` はキーの最大値 + 1 で採るので、消すと
+   *   番号が使い回され、古い一覧を写した `close:<id>` が新しい通知を閉じてしまう
+   * - **`closedAt` を日時として読めない entry** — いつ閉じたか分からないものを古いと決めない
+   *
+   * 消すものが無ければ書かない (通知を使わない配備に data/inbox.json を生やさない)。
+   * 読めない台帳は書かずに 0 を返す — 掃除のために起動を止めない。
+   *
+   * @returns {number} 消した件数
+   */
+  pruneClosed({ now = Date.now(), retentionMs = RUN_RETENTION_MS } = {}) {
+    if (this.broken) return 0;
+    const max = this.maxKeyNumber();
+    const next = { ...this.data };
+    let removed = 0;
+    for (const key of Object.keys(this.data)) {
+      if (Number.parseInt(key, 10) === max) continue;
+      const entry = this.get(key);
+      if (!entry || isOpen(entry)) continue;
+      const closedAt = msOfTime(entry.closedAt);
+      if (!Number.isFinite(closedAt) || now - closedAt <= retentionMs) continue;
+      delete next[key];
+      removed += 1;
+    }
+    if (removed > 0) this.commit(next);
+    return removed;
+  }
+
+  /**
+   * 通知を記録する。**呼ぶのは実メンションを送れたときだけ** (§10.3) —
    * 届いていない通知を「待ち」に数えると、作者は誰も呼んでいない行を追うことになる。
    *
    * **1 スレッド 1 open。** 同じスレッドに開いている記録があれば追加せず、
@@ -192,7 +246,7 @@ export class InboxStore extends JsonStore {
   }
 
   /**
-   * スレッドに人間が発言したので閉じる。
+   * スレッドに人間が発言したので閉じる (§10.3)。
    *
    * 判定は `hops.reset` と**同じ条件**に乗せる — 会話の主導権が人間へ戻った瞬間 =
    * 質問に何か返した瞬間、とみなす。既読ボタンを押させると、押し忘れで受信箱が腐る。
@@ -238,7 +292,7 @@ function asText(value) {
 }
 
 /**
- * `/inbox` の本文。**作者が「これを返すと何本動くか」を 1 行で分かる**のが目的。
+ * `/inbox` の本文 (§10.4)。**作者が「これを返すと何本動くか」を 1 行で分かる**のが目的。
  *
  * 3 節とも**待たせている時間が長い順**。手本は `formatProposalQueue`
  * (src/adjudication.js) で、1900 字で切るのも同じ。
@@ -268,7 +322,7 @@ export function formatInbox({
   const blocked = [...asArray(tasks)]
     .filter((task) => task?.state === 'blocked')
     .sort(byWaitedLongest((task) => task.updatedAt ?? task.createdAt));
-  // 復旧待ち: in-progress / review のまま止まっている仕事。**同じ問題を二重に見せない** —
+  // 復旧待ち (§11.2): in-progress / review のまま止まっている仕事。**同じ問題を二重に見せない** —
   // 停止・質問に載っているスレッドと、要人間 (blocked) の task はここには出さない
   const stoppedThreads = new Set(stopped.map((entry) => String(entry.threadId)));
   const recovering = [...asArray(recoveries)]
@@ -304,7 +358,7 @@ export function formatInbox({
         + `${nextOperationFor(status) ? ` → ${nextOperationFor(status)}` : ''}`)}${link(task.threadId)}`
     )),
   ];
-  // 閉じるのは機械 — ただし別スレッドで答えた分だけは機械に分からない。
+  // 閉じるのは機械 (§10.2) — ただし別スレッドで答えた分だけは機械に分からない。
   // 復旧待ちも機械が閉じる (状態が解消したら消える) — 雑談を一言返しただけでは閉じない
   const footers = [];
   if (stopped.length > 0) footers.push('— 停止・質問はそのスレッドに返信すれば閉じます (別で答えたときは `/inbox close:<id>`)');
@@ -314,8 +368,7 @@ export function formatInbox({
 
 /** 改行と連続空白を潰して n 字で切る */
 function oneLine(value, max) {
-  const flat = String(value ?? '').replace(/\s+/g, ' ').trim();
-  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+  return clip(String(value ?? '').replace(/\s+/g, ' ').trim(), max);
 }
 
 /** `/status` (src/status.js) も同じ組版を使う — 節の見出しと先頭 1 行を必ず残す流儀を揃える */
@@ -365,11 +418,12 @@ function layout(blocks, footer, max) {
     if (rest > 0) out.push(`  … ほか ${rest} 件`);
   }
   if (footer !== '') out.push(footer);
-  return out.join('\n').slice(0, max);
+  const text = out.join('\n');
+  return text.slice(0, codePointBoundary(text, max));
 }
 
 /**
- * その提案が**いまの**裁定待ちへ入った時刻。
+ * その提案が**いまの**裁定待ちへ入った時刻 (§10.4)。
  *
  * `updatedAt` で測ると、bot が意見 (`position`) を足すたびに経過が 0 へ戻り、
  * 議論が活発な提案ほど「待たせていない」ように見える。差し戻しで審議へ戻ることが
@@ -431,12 +485,11 @@ function holding(what) {
   return `(${what})`;
 }
 
-/** 一覧の 1 行に置く要旨。**台帳の 140 字ではなく表示の 60 字で切る** */
+/** 一覧の 1 行に置く要旨。**台帳の 140 字ではなく表示の 60 字で切る** (§10.4) */
 function quote(value, escape) {
   const flat = String(value ?? '').replace(/\s+/g, ' ').trim();
   if (flat === '') return '(要旨なし)';
-  const cut = flat.length > MAX_ROW_SUMMARY_CHARS ? `${flat.slice(0, MAX_ROW_SUMMARY_CHARS)}…` : flat;
-  return `「${escape(cut)}」`;
+  return `「${escape(clip(flat, MAX_ROW_SUMMARY_CHARS))}」`;
 }
 
 /** 描画のために board を引くだけなので、引けなくても一覧は出す */

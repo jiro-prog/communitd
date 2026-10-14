@@ -135,3 +135,69 @@ codex 側の既定モデル (`~/.codex/config.toml`) で走る。指定するな
 - `claude` ランタイムの bot に書くと起動時に落とす (配線が無く、書いても効かないため)。
 - 相談役には `codexSandbox` を上げない (既定の `read-only` のまま) のが素直。
 
+
+## 構造化出力 (`--output-schema`)
+
+役割文に `<!-- communitd-schema: ... -->` を書いた codex の bot は、claude と同じ様式で
+契約 (委譲 / 報告 / 案件の 1 ターン / 起票 / 承認 / 判定) を返せる。**様式の正本は
+`src/contract.js` の `SCHEMAS` 1 つ**で、渡し方だけがランタイムで違う:
+
+| | claude | codex |
+| --- | --- | --- |
+| 渡す口 | `--json-schema` (JSON をそのまま) | `--output-schema <ファイル>` |
+| 渡す形 | 原スキーマ | **strict 変換後** (`src/strict-schema.js`) |
+| 受け取り | 結果 JSON の `structured_output` | `-o` の最終メッセージ (fence 無しの生 JSON) |
+
+### strict 変換 (`toStrictSchema`)
+
+codex は OpenAI structured outputs の strict 制約をそのまま通すので、**原スキーマのままでは
+400 になる** (実測 codex-cli 0.154.0、2026-09-18)。変換は 3 つ:
+
+- **全キーを `required` に並べる** — 外すと
+  `'required' is required to be supplied and to be an array including every key in properties.
+  Missing 'touch_restricted'`。
+- **任意キーは nullable にする** (`type: [t, 'null']`、`enum` があれば `null` を足す) —
+  「書かなくてよい」を表す口が `required` から外すことではなくこちらになるため。
+- **`minProperties` / `maxProperties` は落とす** — `'minProperties' is not permitted`
+  (`case-turn` の `next` が「ちょうど 1 つ」を要求していた)。個数の検査自体は
+  `validateContract` 側に残るので、落としても様式は緩まない。
+  ただし**縛る段は 1 つ減る**: claude は CLI 側でも「ちょうど 1 つ」を要求されるのに対し、
+  codex は両方入り・両方 null を返せてしまい、落ちるのは後段の検査になる
+  (= 様式は緩まないが、`case-turn` の不履行は codex のほうが出やすい)。
+
+`maxLength` / `maxItems` / `minItems` / `minimum` / `enum` / `description` は受理される
+(実測)。説明文はモデルが読む面なので落とさない。**受理を実測していないキーワードを
+`SCHEMAS` へ足すと、落ちるのは実行時の 400 だけ**になるので、strict 出力に出てよい語は
+テスト (`test/strict-schema.test.js`) で閉じてある。同じ理由で、**`type` の無い任意キー**は
+変換時に例外にする — nullable にできず、codex でだけ必須キーになってしまうため。
+
+### 戻り値の後始末 (`stripNullOptionals`)
+
+strict では任意キーも必ず生えてきて、値が無いときは `null` で返る (nested も配列要素も:
+`report` の `adjudication`、`case-turn` の `next.waiting`、`task-proposal` の
+`tasks[].job_budget`)。`validateContract` は `null` を通さないので、**原スキーマで任意の
+キーが `null` なら再帰的に削って**から検査へ渡す。
+
+- **必須キーの `null` は残す** — そこはモデルが埋めそこねた本物の不履行なので、消すと
+  「様式に合わない応答」が「合っている」に化ける。
+- 最終メッセージが JSON として読めなければ `structuredOutput` は `null` へ縮退し、
+  job は成功のまま素の応答が投稿される (claude 側の `structured_output ?? null` と同じ扱い)。
+  様式不履行の警告はブリッジが出す。
+
+### 配備するときの注意
+
+- スキーマを渡すのは**役割文が種別を宣言している bot だけ**。宣言を書いていない役割文
+  (同梱の `roles/reviewer.md` など) の codex bot は、従来のまま振る舞いが変わらない。
+- チャンネルの `structuredOutput: false` はランタイムと独立に効く (成果物へ向かわない場)。
+- 契約の **touch 制限つき委譲は codex へ渡せない** — パス単位に権限を絞る口が無いのは
+  構造化出力とは別の話 (`pathScopedPermissions`) で、P-3 でも変わっていない。
+
+**検証 (`verify`) はランタイムを問わず走る。** ブリッジ側の最終検証は job の終わりに
+必ず 1 回動くので、codex の job も verify NG なら handoff が止まり、`verify-failed` として
+記録される (claude と同じ門)。
+
+**違うのは差し戻しの回数だけ。** claude は Stop hook で同じセッションのまま
+「NG → 直して完了し直す」を `verifyMaxRetries` まで繰り返せるのに対し、hook を持たない
+codex ランタイムでは**1 回目の NG がそのまま最終 NG**になる (同じセッションへ戻す口が
+無いため)。コードを変える役を codex に置くなら、直す番が最終 NG の行き先 —
+板タスクならレビュー担当、それ以外なら投げ手 — へ回ることを前提に運用する。

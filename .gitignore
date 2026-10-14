@@ -29,3 +29,6 @@ sandbox/
 /tmp/
 # lint ツールが手元に残す履歴 (機械が書く作業ファイル)
 /.brooks-lint-history.json
+# `npm start -- --log logs/bridge.log` の控え (ローテーション無しで膨らむ・実行環境の
+# パスやチャンネル名がそのまま落ちる)
+logs/

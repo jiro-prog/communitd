@@ -1,4 +1,5 @@
-// タスクの「いまどうなっているか」を 1 つの語へ導く。**純粋関数だけ** — board・実行記録・キュー・契約・pause・
+// タスクの「いまどうなっているか」を 1 つの語へ導く (docs/implementation-plan.md P2 /
+// docs/social-engineering.md §11.2)。**純粋関数だけ** — board・実行記録・キュー・契約・pause・
 // バックオフ・復旧の勘定を引数で受け、Discord にもファイルにも触らない。
 //
 // 判定の向き: **待つ理由が説明できるものを停滞と誤判定しない。** 走っている・レーン待ち・
@@ -8,6 +9,7 @@
 
 import { msOfTime } from './time.js';
 import { isLive } from './jobruns.js';
+import { awaitingReplays } from './scheduler.js';
 
 /** 状態の語彙。増やすときは `describeStatus` / `nextOperationFor` も直す */
 export const TASK_STATUS = Object.freeze([
@@ -16,6 +18,7 @@ export const TASK_STATUS = Object.freeze([
   'approval-wait',  // ツール承認のボタンを人間が押すのを待っている
   'handoff-wait',   // 次の担当を呼んだ直後 (受付待ち・猶予内)
   'review-wait',    // レビュー担当の起動待ち (猶予内)
+  'replay-wait',    // 改訂の下書きの検証 (解き直し) の終わり待ち — 終われば tick がレビューを呼ぶ (src/replay.js)
   'reply-wait',     // 人間の返信待ち (質問・報告)
   'retry-scheduled',// 自動再試行の予定がある
   'recovery-wait',  // 止まっている — 人間の /retry か自動復旧の対象
@@ -105,6 +108,13 @@ export function deriveTaskStatus({
       return out('queued', `${run.botKey} の job がレーン待ち`, run.acceptedAt, 'bot', run);
     }
     return out('running', `${run.botKey} の job が走っている (${stageLabel(run.stage)})`, run.startedAt ?? run.acceptedAt, 'bot', run);
+  }
+
+  // 改訂の解き直しを待っている review (src/replay.js)。レビュー担当を呼ばないのは意図どおりなので
+  // 「レビュー契約が無い」と固着扱いにしない — 自動復旧が `/review` を出し直すと解き直しを飛ばす。
+  // 終わらない解き直しは tick が期限で打ち切る
+  if (awaitingReplays(task)) {
+    return out('replay-wait', '改訂の下書きの検証 (解き直し) の終わり待ち — 終われば tick がレビューを呼ぶ', task.replay.startedAt ?? lastTransition, 'scheduler');
   }
 
   const reconciling = list.filter((r) => r.stage === 'reconcile');
@@ -247,6 +257,7 @@ export function statusLabel(status) {
     case 'approval-wait': return '承認待ち';
     case 'handoff-wait': return '起動待ち';
     case 'review-wait': return 'レビュー待ち';
+    case 'replay-wait': return '解き直し待ち';
     case 'reply-wait': return '返信待ち';
     case 'retry-scheduled': return '再開予定';
     case 'recovery-wait': return '復旧待ち';

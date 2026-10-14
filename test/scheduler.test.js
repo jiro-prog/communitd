@@ -15,8 +15,10 @@ import {
   dayKeyFor,
   dutiesForEvent,
   formatInitiativeTag,
+  awaitingReplays,
   initialState,
   isInitiativeTrigger,
+  isReplayTask,
   persistedState,
   restoreState,
   SCOUT_JOB_BUDGET,
@@ -25,6 +27,7 @@ import {
   backoffOutcomeFor,
   isTaskDone,
   MIN_TASK_JOB_BUDGET,
+  parseLimitReset,
   pickAnnouncer,
   pickWorker,
   planApproval,
@@ -33,12 +36,20 @@ import {
   planTaskCwd,
   planTick,
   proposedTasks,
+  addCarry,
+  dropCarry,
   recordFailure,
+  recordScoutReport,
   recordSuccess,
+  resolveHarness,
   resolveInitiative,
+  resolvePlan,
   resolveScout,
   resolveStartTask,
+  scoutPace,
   shouldDeliverProposal,
+  touchesHarness,
+  touchesThemes,
 } from '../src/scheduler.js';
 
 const T0 = Date.parse('2026-08-27T00:00:00.000Z');
@@ -87,7 +98,7 @@ test('enabled でなければ何もしない (日付の繰越だけは進む)', 
 });
 
 test('担当が居なければ何もしない (着手もスカウトも)', () => {
-  // reviewer が居ないと着手しても main まで運べないので、始めない。
+  // reviewer が居ないと着手しても main まで運べない (§3.6) ので、始めない。
   // state は初期値 = スカウトが due の状態にして、スカウトまで止まることを見る
   for (const over of [{ worker: { bots: [] } }, { reviewer: null }, { worker: { bots: [] }, reviewer: null }]) {
     const out = planTick({
@@ -278,6 +289,89 @@ test('失敗でバックオフが指数的に伸び、上限で頭打ちにな�
 
   for (let i = 0; i < 20; i += 1) state = recordFailure(state, { now: T0 });
   assert.equal(state.backoffUntil, T0 + BACKOFF_MAX_MS);
+});
+
+test('parseLimitReset: resets <時刻> (<tz>) を now から前後 12h で最も近いその時刻と読み、過ぎていれば null', () => {
+  // T0 = 2026-08-27 09:00 (Asia/Tokyo)
+  const iso = (text, now = T0) => {
+    const ms = parseLimitReset(text, now);
+    return ms === null ? null : new Date(ms).toISOString();
+  };
+  assert.equal(iso("You've hit your session limit · resets 1:30pm (Asia/Tokyo)"), '2026-08-27T04:30:00.000Z');
+  assert.equal(iso('resets 2pm (Asia/Tokyo)'), '2026-08-27T05:00:00.000Z', '分の無い形');
+  assert.equal(iso('Resets 2:05 PM (asia/tokyo)'), '2026-08-27T05:05:00.000Z', '大文字・空白入り');
+  assert.equal(iso('resets 12pm (Asia/Tokyo)'), '2026-08-27T03:00:00.000Z', '12pm は正午');
+  // 22:00 JST から読む (T0 の 09:00 からだと 9h 前の方が近い)
+  assert.equal(iso('resets 12am (Asia/Tokyo)', Date.parse('2026-08-27T13:00:00Z')), '2026-08-27T15:00:00.000Z', '12am は深夜 0 時');
+  assert.equal(iso('failed(limit · resets 1:30pm (Asia/Tokyo))'), '2026-08-27T04:30:00.000Z', '後ろに括弧が続いても tz だけを読む');
+
+  // 日またぎ: 23:00 JST に resets 1am は翌日の 1:00
+  assert.equal(iso('resets 1am (Asia/Tokyo)', Date.parse('2026-08-27T14:00:00Z')), '2026-08-27T16:00:00.000Z');
+  assert.equal(iso('resets 1:30pm (Asia/Tokyo)', Date.parse('2026-08-27T04:29:59Z')), '2026-08-27T04:30:00.000Z');
+  // 明けた直後にもう一度落ちた (ちょうど・数秒過ぎ・分の途中) は null — 翌日と読むと約 24h 止まる
+  for (const now of ['2026-08-27T04:30:00Z', '2026-08-27T04:30:15Z', '2026-08-27T04:30:59Z']) {
+    assert.equal(iso('resets 1:30pm (Asia/Tokyo)', Date.parse(now)), null, now);
+  }
+  // 前後 12h の境: 11h59m 先は読み、12h01m 先は (12h 前の方が近いので) null。ちょうど 12h なら後の方
+  assert.equal(iso('resets 1:30pm (Asia/Tokyo)', Date.parse('2026-08-27T16:31:00Z')), '2026-08-28T04:30:00.000Z');
+  assert.equal(iso('resets 1:30pm (Asia/Tokyo)', Date.parse('2026-08-27T16:29:00Z')), null);
+  assert.equal(iso('resets 1:30pm (Asia/Tokyo)', Date.parse('2026-08-27T16:30:00Z')), '2026-08-28T04:30:00.000Z');
+
+  // tz 違い: 06:00Z は東京では 15:00 で 1:30pm を過ぎているが、New York (02:00)・London (07:00)・UTC ではこれから
+  const morning = Date.parse('2026-08-27T06:00:00Z');
+  assert.equal(iso('resets 1:30pm (Asia/Tokyo)', morning), null);
+  assert.equal(iso('resets 1:30pm (America/New_York)', morning), '2026-08-27T17:30:00.000Z');
+  assert.equal(iso('resets 1:30pm (Europe/London)', morning), '2026-08-27T12:30:00.000Z');
+  assert.equal(iso('resets 1:30pm (UTC)', morning), '2026-08-27T13:30:00.000Z');
+  // 翌日は暦日で組む — 夏時間が明ける夜 (2026-10-31 23:00 EDT) に、翌朝の 3am を +24h で組むと 1 時間早い 2am になる
+  assert.equal(
+    iso('resets 3am (America/New_York)', Date.parse('2026-11-01T03:00:00Z')),
+    '2026-11-01T08:00:00.000Z',
+  );
+
+  // 読めない形は null (従来の倍々に任せる)
+  for (const text of [
+    'resets Oct 8, 1:30pm (Asia/Tokyo)', // 日付付き
+    'resets 1:30pm', // tz 無し
+    'resets 1:30pm (Mars/Olympus_Mons)', // 解決できない tz
+    'resets 1:30pm (Asia/Tok', // 切り詰めで閉じ括弧が落ちた
+    'resets 13pm (Asia/Tokyo)',
+    'resets 0am (Asia/Tokyo)',
+    'resets 1:75pm (Asia/Tokyo)',
+    'resets 13:30 (Asia/Tokyo)', // 24 時間表記
+    'rate limit',
+    '',
+    null,
+    undefined,
+  ]) {
+    assert.equal(parseLimitReset(text, T0), null, String(text));
+  }
+  assert.throws(() => parseLimitReset('resets 1pm (Asia/Tokyo)', undefined), /now/);
+});
+
+test('recordFailure: 上限の明け時刻 (until) があれば倍々との遅い方まで待ち、上限で切らない', () => {
+  const HOUR = 60 * 60 * 1000;
+  let state = recordFailure(initialState(), { now: T0, until: T0 + HOUR });
+  assert.equal(state.backoffUntil, T0 + HOUR);
+  assert.equal(state.backoffLevel, 1, '肩の進め方が変わっている');
+
+  // 倍々の方が遅ければそちら
+  state = recordFailure(state, { now: T0, until: T0 + 60_000 });
+  assert.equal(state.backoffUntil, T0 + BACKOFF_BASE_MS * 2);
+  assert.equal(state.backoffLevel, 2);
+
+  // BACKOFF_MAX_MS より先でも切らない (切ると明ける前に起こして、もう 1 回落ちる)
+  const far = T0 + BACKOFF_MAX_MS + 3 * HOUR;
+  assert.equal(recordFailure(initialState(), { now: T0, until: far }).backoffUntil, far);
+
+  // 数でない until は無いのと同じ
+  for (const until of [null, undefined, Number.NaN, Infinity, '1800000', new Date(T0 + HOUR)]) {
+    assert.equal(
+      recordFailure(initialState(), { now: T0, until }).backoffUntil,
+      T0 + BACKOFF_BASE_MS,
+      String(until),
+    );
+  }
 });
 
 test('バックオフ中は何もせず、明ける時刻ちょうどで再開する', () => {
@@ -501,7 +595,7 @@ test('proposedTasks: 起票をボードへ渡す形にし、job 予算を頭打�
   );
 });
 
-test('proposedTasks: job 予算に下限を敷く (worker 1 + review 1 + 予備 2)', () => {
+test('proposedTasks: job 予算に下限を敷く (worker 1 + review 1 + 予備 2 — §9.2b)', () => {
   const one = (over) => ({
     body: 'x', tasks: [{ title: 'A', rationale: 'ra', touch: ['src/a.ts'], ...over }],
   });
@@ -518,7 +612,7 @@ test('proposedTasks: job 予算に下限を敷く (worker 1 + review 1 + 予備 
   assert.equal(budget(one({ job_budget: 2 }), 3), 3);
 });
 
-test('planFiling の枠は planTick がスカウトを起こす条件と同じ定義', () => {
+test('planFiling の枠は planTick がスカウトを起こす条件と同じ定義 (§9.2a)', () => {
   // 枠の定義が 2 か所でずれると「起こしたのに 1 件も載らない」巡回ができる。
   // 実体は src/board.js 側にあるので、ここで planTick と突き合わせて固定する
   const maxOpenTasks = 3;
@@ -543,7 +637,7 @@ test('planFiling の枠は planTick がスカウトを起こす条件と同じ�
   }
 });
 
-// ---- 発議の巡回 (第 3 action) ----
+// ---- 発議の巡回 (§3.9 の第 3 action) ----
 
 /** duty を持つ bot (resolveDutyBots の戻りと同じ形) */
 const dutyBot = (botKey, over = {}) => ({
@@ -644,6 +738,134 @@ test('planTick: 日が変わると spentToday だけ消え、lastRunAt は残る
   assert.deepEqual(out.actions, [{ kind: 'initiative', botKey: 'sol', duty: 'audit' }]);
   assert.equal(out.state.initiative.spentToday.sol, 1); // 今日の 1 本目
   assert.equal(out.state.initiative.lastRunAt['sol/audit'], T0 + DAY_MS);
+});
+
+// ---- ハーネスの改訂の巡回 (src/harness.js) ----
+
+const withHarness = autonomy({ harness: { bot: 'fable', intervalMin: 24 * 60, minRuns: 20 } });
+const OPEN_GATE = Object.freeze({ due: true });
+
+test('planTick: ハーネスの改訂は門が開き、間隔が明け、役割文の改訂が残っていないときだけ選ぶ', () => {
+  const first = plan({ autonomy: withHarness, harness: OPEN_GATE });
+  assert.deepEqual(first.actions, [{ kind: 'harness' }]);
+  assert.equal(first.state.lastHarnessAt, T0);
+  assert.equal(first.state.jobsToday, 1);
+
+  // 門が閉じている (測り終えていない) / 門の材料が無い
+  assert.deepEqual(plan({ autonomy: withHarness, harness: { due: false } }).actions, []);
+  assert.deepEqual(plan({ autonomy: withHarness, harness: null }).actions, []);
+  // 提案役が居ない
+  assert.deepEqual(plan({ harness: OPEN_GATE }).actions, []);
+  // 間隔が明けていない → 明けたら選ぶ
+  const recent = scouted({ lastHarnessAt: T0 - 60 * 60_000 });
+  assert.deepEqual(plan({ autonomy: withHarness, harness: OPEN_GATE, state: recent }).actions, []);
+  assert.deepEqual(
+    plan({ autonomy: withHarness, harness: OPEN_GATE, state: recent, now: T0 + DAY_MS }).actions.map((a) => a.kind),
+    ['scout', 'harness'],
+  );
+  // 役割文を触るタスクが終わっていない (blocked も) → 重ねない。終端なら起こす
+  for (const state of ['proposed', 'approved', 'in-progress', 'review', 'blocked']) {
+    const tasks = [{ id: '9', state, touch: ['roles/worker.md'] }];
+    const out = plan({ autonomy: { ...withHarness, maxConcurrentTasks: 0 }, harness: OPEN_GATE, tasks });
+    assert.equal(out.actions.some((a) => a.kind === 'harness'), false, `${state} の改訂に重ねている`);
+  }
+  for (const state of ['merged', 'dropped']) {
+    const tasks = [{ id: '9', state, touch: ['roles/worker.md'] }];
+    assert.deepEqual(plan({ autonomy: withHarness, harness: OPEN_GATE, tasks }).actions, [{ kind: 'harness' }], state);
+  }
+});
+
+test('planTick: 優先順位は start-task > scout > harness > initiative', () => {
+  const out = plan({
+    autonomy: withHarness, harness: OPEN_GATE, tasks: [task(1, 'approved')], dutyBots: [dutyBot('sol')],
+    state: { ...initialState(), dayKey: dayKeyFor(T0) },
+  });
+  assert.deepEqual(out.actions.map((a) => a.kind), ['start-task', 'scout', 'harness', 'initiative']);
+  // 残り 1 job なら着手が先
+  const tight = plan({
+    autonomy: withHarness, harness: OPEN_GATE, tasks: [task(1, 'approved')],
+    state: { ...initialState(), dayKey: dayKeyFor(T0), jobsToday: 39 },
+  });
+  assert.deepEqual(tight.actions, [{ kind: 'start-task', taskId: '1' }]);
+  assert.equal(tight.state.lastHarnessAt, 0, '起こしていない改訂で時計が進んでいる');
+});
+
+test('touchesHarness / resolveHarness', () => {
+  assert.equal(touchesHarness({ touch: ['roles/_common.md'] }), true);
+  assert.equal(touchesHarness({ touch: ['src/roles.js'] }), false);
+  assert.deepEqual(resolveHarness({ kind: 'harness' }, { autonomy: withHarness, availableBotKeys: ['fable', 'opus'] }), {
+    ok: true, botKey: 'fable', announcerKey: 'opus',
+  });
+  assert.match(resolveHarness({ kind: 'harness' }, { autonomy: withHarness, availableBotKeys: ['opus'] }).reason, /提案役が起動していません/);
+  assert.match(resolveHarness({ kind: 'harness' }, { autonomy: withHarness, availableBotKeys: ['fable'] }).reason, /別の bot が居ません/);
+  assert.equal(resolveHarness({ kind: 'scout' }, { autonomy: withHarness, availableBotKeys: ['fable', 'opus'] }).ok, false);
+});
+
+// ---- 企画の巡回 (src/themes.js) ----
+
+const withPlanner = autonomy({ planner: { bot: 'fable', intervalMin: 24 * 60, maxThemes: 2, themesFile: 'docs/themes.md' } });
+
+test('planTick: 企画の巡回は門が開き、間隔が明け、主題ファイルを触るタスクが終わっているときだけ選ぶ', () => {
+  const first = plan({ autonomy: withPlanner, plan: OPEN_GATE });
+  assert.deepEqual(first.actions, [{ kind: 'plan' }]);
+  assert.equal(first.state.lastPlanAt, T0);
+  assert.equal(first.state.jobsToday, 1);
+
+  // 門が閉じている (主題ファイルを読めない) / 門の材料が無い / 企画役が居ない
+  assert.deepEqual(plan({ autonomy: withPlanner, plan: { due: false } }).actions, []);
+  assert.deepEqual(plan({ autonomy: withPlanner, plan: null }).actions, []);
+  assert.deepEqual(plan({ plan: OPEN_GATE }).actions, []);
+  // 間隔が明けていない → 明けたら選ぶ
+  const recent = scouted({ lastPlanAt: T0 - 60 * 60_000 });
+  assert.deepEqual(plan({ autonomy: withPlanner, plan: OPEN_GATE, state: recent }).actions, []);
+  assert.deepEqual(
+    plan({ autonomy: withPlanner, plan: OPEN_GATE, state: recent, now: T0 + DAY_MS }).actions.map((a) => a.kind),
+    ['scout', 'plan'],
+  );
+  // 主題ファイルを触るタスクが終わっていない → 重ねない (区切りが \ でも同じファイル)。終端なら起こす
+  for (const state of ['proposed', 'approved', 'in-progress', 'review', 'blocked']) {
+    for (const path of ['docs/themes.md', 'docs\\themes.md', './docs/themes.md']) {
+      const tasks = [{ id: '9', state, touch: [path] }];
+      const out = plan({ autonomy: { ...withPlanner, maxConcurrentTasks: 0 }, plan: OPEN_GATE, tasks });
+      assert.equal(out.actions.some((a) => a.kind === 'plan'), false, `${state} / ${path} の主題に重ねている`);
+    }
+  }
+  for (const state of ['merged', 'dropped']) {
+    const tasks = [{ id: '9', state, touch: ['docs/themes.md'] }];
+    assert.deepEqual(plan({ autonomy: withPlanner, plan: OPEN_GATE, tasks }).actions, [{ kind: 'plan' }], state);
+  }
+  // 別のファイルを触るタスクは関係ない (主題を進めるタスクが走っていても次を考えてよい)
+  const working = [{ id: '9', state: 'in-progress', touch: ['src/a.js', 'docs/themes-old.md'] }];
+  assert.deepEqual(plan({ autonomy: withPlanner, plan: OPEN_GATE, tasks: working }).actions, [{ kind: 'plan' }]);
+});
+
+test('planTick: 優先順位は start-task > scout > harness > plan > initiative', () => {
+  const both = autonomy({ harness: withHarness.harness, planner: withPlanner.planner });
+  const out = plan({
+    autonomy: both, harness: OPEN_GATE, plan: OPEN_GATE, tasks: [task(1, 'approved')], dutyBots: [dutyBot('sol')],
+    state: { ...initialState(), dayKey: dayKeyFor(T0) },
+  });
+  assert.deepEqual(out.actions.map((a) => a.kind), ['start-task', 'scout', 'harness', 'plan', 'initiative']);
+  // 残り 2 job なら着手とスカウトが先で、企画の時計は進めない
+  const tight = plan({
+    autonomy: both, harness: OPEN_GATE, plan: OPEN_GATE, tasks: [task(1, 'approved')],
+    state: { ...initialState(), dayKey: dayKeyFor(T0), jobsToday: 38 },
+  });
+  assert.deepEqual(tight.actions.map((a) => a.kind), ['start-task', 'scout']);
+  assert.equal(tight.state.lastPlanAt, 0, '起こしていない巡回で時計が進んでいる');
+});
+
+test('touchesThemes / resolvePlan', () => {
+  assert.equal(touchesThemes({ touch: ['docs/themes.md'] }, 'docs/themes.md'), true);
+  assert.equal(touchesThemes({ touch: ['docs/direction.md'] }, 'docs/themes.md'), false);
+  assert.equal(touchesThemes({ touch: ['docs/themes.md'] }, ''), false, '主題ファイルが無ければ何も触らない');
+  assert.equal(touchesThemes({}, 'docs/themes.md'), false);
+  assert.deepEqual(resolvePlan({ kind: 'plan' }, { autonomy: withPlanner, availableBotKeys: ['fable', 'opus'] }), {
+    ok: true, botKey: 'fable', announcerKey: 'opus',
+  });
+  assert.match(resolvePlan({ kind: 'plan' }, { autonomy: withPlanner, availableBotKeys: ['opus'] }).reason, /企画役が起動していません/);
+  assert.match(resolvePlan({ kind: 'plan' }, { autonomy: withPlanner, availableBotKeys: ['fable'] }).reason, /別の bot が居ません/);
+  assert.equal(resolvePlan({ kind: 'harness' }, { autonomy: withPlanner, availableBotKeys: ['fable', 'opus'] }).ok, false);
 });
 
 test('chargeInitiative: イベント経由も同じ財布から出す', () => {
@@ -791,7 +1013,24 @@ test('persistedState / restoreState: 台帳は持ち越し、バックオフは�
     initiative: { lastRunAt: { 'sol/audit': T0 }, spentToday: { sol: 1 } },
   };
   const saved = persistedState(state);
-  assert.deepEqual(Object.keys(saved).sort(), ['dayKey', 'initiative', 'jobsToday', 'lastScoutAt']);
+  assert.deepEqual(
+    Object.keys(saved).sort(),
+    ['carry', 'dayKey', 'initiative', 'jobsToday', 'lastHarnessAt', 'lastPlanAt', 'lastScoutAt', 'scoutIdle', 'scoutIdleSincePlan'],
+  );
+  // 申し送りは持ち越す (次の企画の巡回は翌日のことが多い)。形の崩れたものは落とす
+  const carried = restoreState(persistedState({ ...state, carry: [{ at: T0, from: 'opus', text: '上限で止まった' }] }));
+  assert.deepEqual(carried.carry, [{ at: T0, from: 'opus', text: '上限で止まった' }]);
+  assert.deepEqual(
+    restoreState({ carry: [{ at: 'いつか', from: 'a', text: 'x' }, { at: T0, text: '  ' }, null, { at: T0, from: 3, text: 'y' }] }).carry,
+    [{ at: T0, from: '', text: 'y' }],
+  );
+  assert.deepEqual(restoreState({ carry: 'x' }).carry, []);
+  // 提案 0 件の続きは持ち越す (再起動で 60 分に戻って空回りを繰り返さない)。壊れた値は 0 へ倒す
+  const idle = restoreState(persistedState({ ...state, scoutIdle: 2, scoutIdleSincePlan: 1 }));
+  assert.equal(idle.scoutIdle, 2);
+  assert.equal(idle.scoutIdleSincePlan, 1);
+  assert.equal(restoreState({ scoutIdle: -1, scoutIdleSincePlan: 1.5 }).scoutIdle, 0);
+  assert.equal(restoreState({ scoutIdle: 'x', scoutIdleSincePlan: 1.5 }).scoutIdleSincePlan, 0);
 
   const back = restoreState(saved);
   assert.equal(back.jobsToday, 7);
@@ -962,7 +1201,7 @@ const MERGE_FACTS = {
   branch: 'task/1',
 };
 
-test('planReview: merge は git の事実が 4 つ揃ったときだけ完了へ', () => {
+test('planReview: merge は git の事実が 4 つ揃ったときだけ完了へ (§12.3 (2))', () => {
   const out = planReview({ body: 'x', verdict: 'merge', merge_commit: 'abc1234' }, { git: MERGE_FACTS });
   assert.deepEqual(out, {
     action: 'complete',
@@ -976,7 +1215,7 @@ test('planReview: merge は git の事実が 4 つ揃ったときだけ完了へ
   );
 });
 
-test('planReview: 照合できない merge は hold — 遷移させない', () => {
+test('planReview: 照合できない merge は hold — 遷移させない (§12.3 (2))', () => {
   // **事実を渡さない呼び出しは hold。** 「照合していない」を「照合できた」へ倒さない
   const bare = planReview({ body: 'x', verdict: 'merge', merge_commit: 'abc1234' });
   assert.equal(bare.action, 'hold');
@@ -1007,7 +1246,7 @@ test('planReview: 照合できない merge は hold — 遷移させない', () 
 });
 
 test('planReview: 適用 task の merge は planMerge が照合するので git の事実を要求しない', () => {
-  // org-apply は receipt の OID と verify を planMerge が見てから
+  // §12.3 (2) — org-apply は receipt の OID と verify を planMerge が見てから
   // ブリッジ自身が merge を打つ。ここで二重に git を要求すると、その経路が止まる
   const out = planReview({ verdict: 'merge', merge_commit: 'abc1234' }, { mergeCheckedBy: 'planMerge' });
   assert.deepEqual(out, { action: 'complete', note: 'merge abc1234 (planMerge が照合)' });
@@ -1039,7 +1278,7 @@ test('planReview: block はそのまま要人間 / 知らない判定は何も�
   assert.equal(planReview().action, 'none');
 });
 
-test('planReview: drop は対象を破棄へ (差し戻し回数に影響されない)', () => {
+test('planReview: drop は対象を破棄へ (差し戻し回数に影響されない — §9.4)', () => {
   assert.deepEqual(
     planReview({ verdict: 'drop', reason: '#45 の重複' }),
     { action: 'drop', reason: '#45 の重複' },
@@ -1071,7 +1310,7 @@ test('applyReview の drop はボードを閉じてから掃除する (duty イ�
   const drop = body.slice(dropAt, body.indexOf("plan.action === 'block'"));
   assert.ok(dropAt > 0 && drop.length > 0, 'drop の枝が無い');
   assert.match(drop, /board\.drop\(task\.id, \{ by: bot\.key, reason: plan\.reason \}\)/);
-  // **遷移が先・掃除は後**。撤去に失敗しても dropped は取り消さない
+  // **遷移が先・掃除は後** (§9.5)。撤去に失敗しても dropped は取り消さない
   assert.match(drop, /cleanupTaskWorktree\(\{ cc, task, action: 'drop' \}\)/, '掃除を呼んでいない');
   assert.ok(
     drop.indexOf('board.drop(') < drop.indexOf('cleanupTaskWorktree('),
@@ -1246,7 +1485,7 @@ test('担当以外のフッタ無し報告は完了に数えず、そのこと�
   assert.ok(body.includes('.catch(() => {})'), '投稿の失敗を握っていない');
 });
 
-test('承認には重複を見つける材料を渡す (今回の起票は参考欄から除く)', () => {
+test('承認には重複を見つける材料を渡す (§9.3 — 今回の起票は参考欄から除く)', () => {
   const source = bridgeSource('board');
   const cut = (start, end) => {
     const from = source.indexOf(start);
@@ -1396,4 +1635,156 @@ test('planTaskCwd: botKey が分からないときは作業ツリー側へ倒す
     autonomy: { enabled: true, reviewer: 'opus2', baseBranch: 'main' },
   });
   assert.equal(decided.useWorktree, true);
+});
+
+// ---- ハーネスの改訂の下書きの検証 (解き直し — src/replay.js) ----
+
+test('planTick: 解き直しを待つ改訂は同時枠に数えず、解き直しを先に起こす (同時上限 1・worker 1 体の配備)', () => {
+  const live = autonomy({ maxConcurrentTasks: 1, scout: { ...AUTONOMY.scout, maxOpenTasks: 99 } });
+  const waiting = { id: '3', state: 'review', replay: { status: 'running', startedAt: new Date(T0).toISOString() } };
+  const replay = { id: '5', state: 'approved', replay: { of: '3', caseId: '1', kind: 'sent-back', base: 'abc1234' } };
+  const older = task(4, 'approved');
+  const starts = (tasks) => plan({ tasks, autonomy: live }).actions.filter((a) => a.kind === 'start-task');
+  // 改訂が枠を塞ぐと、自分の解き直しを起こせないまま待ち続ける
+  assert.deepEqual(starts([waiting, older, replay]), [{ kind: 'start-task', taskId: '5' }]);
+  // 解き直しを待っていない review は今までどおり枠に数える
+  assert.deepEqual(starts([{ ...waiting, replay: { status: 'done' } }, older, replay]), []);
+  assert.deepEqual(starts([task(3, 'review'), older]), []);
+  // 解き直しが走っている間は、それが枠を使う
+  assert.deepEqual(starts([waiting, older, { ...replay, state: 'in-progress' }]), []);
+});
+
+test('planTaskCwd: 解き直しは元のタスクが始まった版から生やす (base が無ければ今までどおり)', () => {
+  const cwdOf = (task) => planTaskCwd({ task, autonomy: { enabled: true, reviewer: 'opus2', baseBranch: 'dev' }, botKey: 'opus' });
+  assert.equal(cwdOf({ id: 5, replay: { of: '3', caseId: '1', kind: 'canary', base: 'abc1234' } }).base, 'abc1234');
+  assert.equal(cwdOf({ id: 5, replay: { of: '3', caseId: '1', kind: 'canary', base: '' } }).base, 'dev');
+  assert.equal(cwdOf({ id: 5 }).base, 'dev');
+});
+
+test('isReplayTask / awaitingReplays: 解き直しの物差し', () => {
+  assert.equal(isReplayTask({ replay: { of: '3' } }), true);
+  assert.equal(isReplayTask({ replay: { of: '' } }), false);
+  assert.equal(isReplayTask({ replay: { status: 'running' } }), false);
+  assert.equal(awaitingReplays({ state: 'review', replay: { status: 'running' } }), true);
+  assert.equal(awaitingReplays({ state: 'review', replay: { status: 'none' } }), false);
+  assert.equal(awaitingReplays({ state: 'in-progress', replay: { status: 'running' } }), false);
+  assert.equal(awaitingReplays(null), false);
+});
+
+// ---- スカウトの空回り (提案 0 件が続いたら間隔を伸ばし、企画の巡回を前倒しする — 2026-10-14) ----
+
+test('recordScoutReport: 提案 0 件で続けての勘定を進め、1 件でもあれば両方 0 へ戻す', () => {
+  const once = recordScoutReport(initialState(), { proposed: 0 });
+  assert.equal(once.scoutIdle, 1);
+  assert.equal(once.scoutIdleSincePlan, 1);
+  const twice = recordScoutReport(once, { proposed: 0 });
+  assert.deepEqual([twice.scoutIdle, twice.scoutIdleSincePlan], [2, 2]);
+  // 提案があれば戻す (ボードが断ったかは見ない — 呼び出し側は提案した数を渡す)
+  const back = recordScoutReport(twice, { proposed: 2 });
+  assert.deepEqual([back.scoutIdle, back.scoutIdleSincePlan], [0, 0]);
+  // 数でない・負の数は 0 件として数える。引数の state は変えない
+  assert.equal(recordScoutReport(initialState(), {}).scoutIdle, 1);
+  assert.equal(recordScoutReport(initialState(), { proposed: -1 }).scoutIdle, 1);
+  assert.equal(once.scoutIdle, 1, '引数の state を変えている');
+});
+
+test('scoutPace: 0 件が続いた回数で間隔を 2 倍ずつ伸ばし、4 倍で頭打ち', () => {
+  assert.deepEqual(scoutPace({ autonomy: AUTONOMY, idle: 0 }), { baseMin: 60, intervalMin: 60 });
+  assert.deepEqual(scoutPace({ autonomy: AUTONOMY, idle: 1 }), { baseMin: 60, intervalMin: 120 });
+  assert.deepEqual(scoutPace({ autonomy: AUTONOMY, idle: 2 }), { baseMin: 60, intervalMin: 240 });
+  assert.deepEqual(scoutPace({ autonomy: AUTONOMY, idle: 9 }), { baseMin: 60, intervalMin: 240 });
+  assert.deepEqual(scoutPace({ autonomy: autonomy({ scout: { bot: 'opus', intervalMin: 30 } }), idle: 1 }), { baseMin: 30, intervalMin: 60 });
+  // 設定が無い・壊れた回数は既定の間隔のまま
+  assert.deepEqual(scoutPace({ idle: 'x' }), { baseMin: 60, intervalMin: 60 });
+});
+
+test('planTick: 提案 0 件が続いたらスカウトの間隔を伸ばし、前の巡回の後の merge で元に戻す', () => {
+  const idle = (n, over = {}) => scouted({ scoutIdle: n, ...over });
+  // 1 回 → 120 分、2 回以上 → 240 分 (ちょうど経過で起こす)
+  assert.deepEqual(plan({ state: idle(1), now: at(60) }).actions, [], '0 件の後も 60 分で起こしている');
+  assert.deepEqual(plan({ state: idle(1), now: at(120) }).actions, [{ kind: 'scout' }]);
+  assert.deepEqual(plan({ state: idle(3), now: at(239) }).actions, []);
+  assert.deepEqual(plan({ state: idle(3), now: at(240) }).actions, [{ kind: 'scout' }]);
+  // 起こしても続けての回数は報告が来るまで変えない (数えるのは recordScoutReport)
+  assert.equal(plan({ state: idle(3), now: at(240) }).state.scoutIdle, 3);
+
+  // 前の巡回の後に merge があれば 60 分に戻し、回数も 0 へ
+  const mergedTask = (iso) => ({ id: '7', state: 'merged', history: [{ at: iso, from: 'review', to: 'merged' }] });
+  const after = plan({ state: idle(2), now: at(60), tasks: [mergedTask(new Date(at(30)).toISOString())] });
+  assert.deepEqual(after.actions, [{ kind: 'scout' }]);
+  assert.equal(after.state.scoutIdle, 0);
+  // 巡回より前の merge・merged でないタスク・時刻の読めない履歴では戻さない
+  const before = plan({ state: idle(2), now: at(60), tasks: [mergedTask(new Date(at(-30)).toISOString())] });
+  assert.deepEqual(before.actions, []);
+  assert.equal(before.state.scoutIdle, 2);
+  const review = { id: '8', state: 'review', history: [{ at: new Date(at(30)).toISOString(), to: 'merged' }] };
+  assert.deepEqual(plan({ state: idle(2), now: at(60), tasks: [review] }).actions, []);
+  assert.deepEqual(plan({ state: idle(2), now: at(60), tasks: [mergedTask('いつか')] }).actions, []);
+  // 前の企画の巡回の後の回数は merge でも消さない (種が尽きた合図は残す)
+  assert.equal(plan({ state: idle(2, { scoutIdleSincePlan: 1 }), now: at(60), tasks: [mergedTask(new Date(at(30)).toISOString())] }).state.scoutIdleSincePlan, 1);
+});
+
+test('planTick: 最後の企画の巡回の後に提案 0 件が 2 回続いたら、企画の巡回を間隔を待たずに起こす', () => {
+  // 企画は 1 時間前に回ったばかり (間隔 24 時間)・スカウトは間隔前
+  const recent = (n) => scouted({ lastPlanAt: T0 - 60 * 60_000, scoutIdle: n, scoutIdleSincePlan: n });
+  assert.deepEqual(plan({ autonomy: withPlanner, plan: OPEN_GATE, state: recent(1) }).actions, [], '1 回で前倒ししている');
+  const early = plan({ autonomy: withPlanner, plan: OPEN_GATE, state: recent(2) });
+  assert.deepEqual(early.actions, [{ kind: 'plan', early: true, idleScouts: 2 }]);
+  assert.equal(early.state.lastPlanAt, T0);
+  // 前倒しの後は数え直す (0 件の巡回のたびに企画を起こさない)。続けての回数 (間隔の肩) は残す
+  assert.equal(early.state.scoutIdleSincePlan, 0);
+  assert.equal(early.state.scoutIdle, 2);
+  const next = recordScoutReport(early.state, { proposed: 0 });
+  assert.deepEqual(plan({ autonomy: withPlanner, plan: OPEN_GATE, state: { ...next, lastScoutAt: T0 }, now: at(1) }).actions, []);
+
+  // 門が閉じている・主題ファイルを触るタスクが終わっていない・企画役が居ない → 前倒しもしない
+  assert.deepEqual(plan({ autonomy: withPlanner, plan: { due: false }, state: recent(2) }).actions, []);
+  const planning = [{ id: '9', state: 'approved', touch: ['docs/themes.md'] }];
+  assert.equal(
+    plan({ autonomy: withPlanner, plan: OPEN_GATE, state: recent(2), tasks: planning }).actions.some((a) => a.kind === 'plan'),
+    false,
+    '主題の取り込みに重ねて前倒ししている',
+  );
+  assert.deepEqual(plan({ plan: OPEN_GATE, state: recent(2) }).actions, []);
+  // 間隔が明けていれば通常の巡回 (early は付けない) で、数え直しも同じ
+  const regular = plan({ autonomy: withPlanner, plan: OPEN_GATE, state: recent(2), now: T0 + DAY_MS });
+  assert.deepEqual(regular.actions.filter((a) => a.kind === 'plan'), [{ kind: 'plan' }]);
+  assert.equal(regular.state.scoutIdleSincePlan, 0);
+});
+
+// ---- 申し送り (task-proposal の carry → 次の企画の巡回 — 2026-10-14) ----
+
+test('addCarry: 1 行に畳み、字数で切り、空は落とし、上限を超えたら古いものから落とす', () => {
+  const first = addCarry(initialState(), { items: ['日次上限で\n4 時間止まった', '  ', 'y'.repeat(400)], from: 'opus', at: T0 });
+  assert.equal(first.added, 2);
+  assert.equal(first.dropped, 0);
+  assert.deepEqual(first.state.carry[0], { at: T0, from: 'opus', text: '日次上限で 4 時間止まった' });
+  assert.equal(first.state.carry[1].text.length, 300);
+  assert.ok(first.state.carry[1].text.endsWith('…'));
+  // 引数の state は変えない
+  assert.deepEqual(initialState().carry, []);
+
+  // 上限 12 件。超えたら古いものから落とし、落とした数を返す
+  let state = first.state;
+  for (let i = 0; i < 4; i += 1) {
+    state = addCarry(state, { items: [`a${i}`, `b${i}`, `c${i}`], from: 'opus', at: T0 + i + 1 }).state;
+  }
+  assert.equal(state.carry.length, 12);
+  const over = addCarry(state, { items: ['最新'], from: 'fable', at: T0 + 9 });
+  assert.equal(over.dropped, 1);
+  assert.equal(over.state.carry.length, 12);
+  assert.equal(over.state.carry.at(-1).text, '最新');
+  assert.equal(over.state.carry[0].text, 'b0', '新しいものを落としている');
+  // 時刻が数でなければ溜めない (呼び出し側の誤り)
+  assert.equal(addCarry(initialState(), { items: ['x'], from: 'opus' }).added, 0);
+});
+
+test('dropCarry: 渡し終えたものだけを消し、渡している間に増えたものは残す', () => {
+  const shown = addCarry(initialState(), { items: ['a', 'b'], from: 'opus', at: T0 }).state;
+  const grown = addCarry(shown, { items: ['c'], from: 'opus', at: T0 + 1 }).state;
+  assert.deepEqual(dropCarry(grown, shown.carry).carry, [{ at: T0 + 1, from: 'opus', text: 'c' }]);
+  // 同じ本文でも時刻か書き手が違えば別のもの
+  const twice = addCarry(shown, { items: ['a'], from: 'fable', at: T0 }).state;
+  assert.deepEqual(dropCarry(twice, shown.carry).carry.map((c) => c.from), ['fable']);
+  assert.deepEqual(dropCarry(grown, null).carry.length, 3);
 });

@@ -1,4 +1,3 @@
-// @ts-check
 // bot 間ループガード。「bot の発言が次の bot を呼ぶ」連鎖をスレッド単位で数え、
 // 上限に達したら止める。人間が発言したらリセットする (会話の主導権は人間側)。
 // 状態は in-memory (プロセス再起動で消えてよい — 再起動後は人間の発言から始まる)。
@@ -33,7 +32,7 @@ export class HopTracker {
     // 載っていないスレッド (= 人間が始めた普通のスレッド) は従来どおり動く。
     // スケジューラ (M0-4) が起こす無人のタスクスレッドには人間の発言が来ない =
     // hop リセットが永遠に起きないので、代わりにこの予算が「どこまで走ってよいか」
-    // を決める
+    // を決める (docs/social-engineering.md §3.5)
     this.budgets = new Map();
     this.budgetWarned = new Set(); // 予算切れ通知を出したスレッド (1 回だけ出す)
   }
@@ -120,7 +119,7 @@ export class HopTracker {
   }
 
   /**
-   * スレッドへ job 予算を払い出す。
+   * スレッドへ job 予算を払い出す (docs/social-engineering.md §3.5)。
    *
    * **再付与は積み増し。** 詰まったタスクへ人間が追い予算を出す操作なので、
    * 上書きだと「20 出したつもりが残 3 に戻っていた」が起きる。
@@ -189,7 +188,6 @@ export class HopTracker {
  * 理由を区別せず「止まった」として扱えばよく、区別が要るときは taskBudget() を見る。
  *
  * @param {HopTracker} tracker
- * @param {string} threadId
  * @param {{spend: boolean}} options spend=false なら残量を見るだけ (減らさない)
  * @returns {{ok: boolean, warn: boolean}}
  */

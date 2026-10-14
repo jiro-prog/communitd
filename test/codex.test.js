@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { SCHEMAS, validateContract } from '../src/contract.js';
+import { toStrictSchema } from '../src/strict-schema.js';
 import {
   CODEX_CMD_HINT,
   CODEX_SANDBOXES,
@@ -602,4 +605,95 @@ test('隔離 CODEX_HOME を用意できないときは read-only でも指示の
     else process.env.CODEX_HOME = prev;
     rmSync(empty, { recursive: true, force: true });
   }
+});
+
+// ---- 構造化出力 (--output-schema、P-3) ----
+
+/**
+ * spawn の代わりに、`-o` へ最終メッセージを書いて終わる子プロセスを装う。
+ * `--output-schema` に渡されたファイルの中身も覗く (実際に書けているかを見るため)。
+ */
+function fakeCodexSpawn(seen, { message = null, exitCode = 0 } = {}) {
+  return (bin, args) => {
+    seen.bin = bin;
+    seen.args = args;
+    const outFile = args[args.indexOf('-o') + 1];
+    const at = args.indexOf('--output-schema');
+    seen.schemaFile = at >= 0 ? args[at + 1] : null;
+    seen.schema = seen.schemaFile ? JSON.parse(readFileSync(seen.schemaFile, 'utf8')) : null;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdout.setEncoding = () => {};
+    child.stderr.setEncoding = () => {};
+    child.stdin = { write: () => {}, end: () => {}, on: () => {} };
+    setImmediate(() => {
+      if (message !== null) writeFileSync(outFile, message, 'utf8');
+      child.emit('close', exitCode);
+    });
+    return child;
+  };
+}
+
+const runCodexT = (seen, opts = {}, fake = {}) => runCodex({
+  cwd: process.cwd(),
+  prompt: 'x',
+  resolveCmdImpl: () => ['codex'],
+  spawnImpl: fakeCodexSpawn(seen, fake),
+  ...opts,
+});
+
+test('スキーマを渡すと --output-schema が付き、中身は strict 変換後 (原スキーマは 400 になる)', async () => {
+  // codex は OpenAI の strict 制約をそのまま通すので、`required` に任意キーが無いと
+  // `Missing 'touch_restricted'` で 400 (実測 2026-09-18)
+  const seen = {};
+  const res = await runCodexT(seen, { jsonSchema: SCHEMAS.delegation }, { message: '{"本文":"ok"}' });
+  assert.equal(res.ok, true);
+  assert.ok(seen.schemaFile, '--output-schema が付いていない');
+  assert.deepEqual(seen.schema, toStrictSchema(SCHEMAS.delegation));
+  assert.deepEqual(seen.schema.required, Object.keys(SCHEMAS.delegation.properties));
+  assert.ok(seen.schema.required.includes('touch_restricted'), '任意キーが required に無い');
+  assert.deepEqual(seen.schema.properties.touch_restricted.type, ['boolean', 'null']);
+  assert.equal(seen.schema.additionalProperties, false);
+});
+
+test('スキーマ無しでは --output-schema を付けず structuredOutput は null (縮退の判定に使う)', async () => {
+  const seen = {};
+  const res = await runCodexT(seen, {}, { message: '散文で返した' });
+  assert.equal(res.ok, true);
+  assert.equal(res.result, '散文で返した');
+  assert.equal(res.structuredOutput, null);
+  assert.equal(seen.args.includes('--output-schema'), false);
+});
+
+test('返った JSON は任意キーの null を削ってから structuredOutput に載る', async () => {
+  // strict では任意キーも必ず生えてきて、値が無ければ null で返る (nested も)。
+  // 削らないと validateContract が「様式に合わない」と言い、契約として使われない
+  const seen = {};
+  const message = JSON.stringify({
+    body: 'やりました',
+    changed_files: ['src/a.js'],
+    did: ['直した'],
+    verification: 'npm test 緑',
+    remaining: [],
+    adjudication: null,
+    initiative: null,
+  });
+  const res = await runCodexT(seen, { jsonSchema: SCHEMAS.report }, { message });
+  assert.equal(res.ok, true);
+  assert.equal(res.result, message, '生の JSON も残す (様式に合わなければ本文へ縮退するため)');
+  assert.equal(Object.hasOwn(res.structuredOutput, 'adjudication'), false, 'null の任意キーが残っている');
+  assert.equal(Object.hasOwn(res.structuredOutput, 'initiative'), false);
+  const checked = validateContract('report', res.structuredOutput);
+  assert.equal(checked.ok, true, checked.reason);
+});
+
+test('壊れた JSON は job を落とさず structuredOutput: null へ縮退する', async () => {
+  // 様式不履行の扱いはブリッジ (validateContract) が決める。ここで失敗にすると、
+  // モデルが返した文章ごと捨てることになる (claude の structured_output ?? null と同じ)
+  const seen = {};
+  const res = await runCodexT(seen, { jsonSchema: SCHEMAS.report }, { message: '```json\n{壊れ' });
+  assert.equal(res.ok, true);
+  assert.equal(res.structuredOutput, null);
+  assert.equal(res.result, '```json\n{壊れ');
 });

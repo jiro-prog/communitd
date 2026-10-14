@@ -1,9 +1,9 @@
-// ボードの数字を出す読み取り専用 CLI。
+// ボードの数字を出す読み取り専用 CLI (docs/social-engineering.md §9.6)。
 //
 //   node scripts/kt-metrics.mjs                             # 全チャンネル
 //   node scripts/kt-metrics.mjs --channel my-project        # 1 チャンネルだけ
-//   node scripts/kt-metrics.mjs --file data/tasks.json      # 別のボードを読む
-//   node scripts/kt-metrics.mjs --since 2026-09-01 --until 2026-09-07   # 期間 (JST の暦日)
+//   node scripts/kt-metrics.mjs --file data/tasks.json      # 別のボードを読む (同じ場所の archive/ も読む)
+//   node scripts/kt-metrics.mjs --since 2026-09-01 --until 2026-09-07   # 期間 (JST の暦日。§11.5)
 //   node scripts/kt-metrics.mjs --runs data/job-runs.json --recovery data/recovery.json  # 実行記録と再開も
 //
 // 自律運転の出口は「作者の介入・残った merge 数・drop 率」で判定するのに、
@@ -16,12 +16,15 @@
 // `.corrupt-<時刻>` へ退避リネームし、無いファイルを空ボードとして開く (src/store.js)。
 // 数えるためにボードを書き換える道理は無いし、「無い」を「0 件」と同じ数字にすると、
 // 間違ったパスを渡したことに気付けない。
+//
+// **アーカイブも読む。** 終わってから 30 日を過ぎたタスクはボードから `archive/tasks-YYYY-MM.json`
+// へ移る (src/board.js の archiveEnded) ので、ボードだけを数えると数字が黙って直近 30 日に縮む。
 
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { TERMINAL_STATES } from '../src/board.js';
+import { TERMINAL_STATES, taskArchiveFiles } from '../src/board.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_FILE = resolve(ROOT, 'data', 'tasks.json');
@@ -48,7 +51,7 @@ const OPEN_STATES = ['proposed', 'approved', 'in-progress', 'review', 'blocked']
 export function summarizeBoard(tasks, { botKeys = [], now = Date.now(), since = null, until = null } = {}) {
   const known = new Set(Array.isArray(botKeys) ? botKeys : []);
   const byChannel = new Map();
-  // 期間。**期間内に起きたイベント**と**期間末の状態**を分けて数える。
+  // 期間 (§11.5)。**期間内に起きたイベント**と**期間末の状態**を分けて数える。
   // 期間を切らなければ従来どおり (全期間 = 現在の状態)
   const period = since !== null || until !== null;
   const from = Number.isFinite(since) ? since : Number.NEGATIVE_INFINITY;
@@ -178,7 +181,7 @@ export function summarizeRuns(runs, { since = null, until = null, now = Date.now
 
 /**
  * 再開の台帳 (data/recovery.json) の集計 — 手動 / 自動の件数と結果。
- * 結果の語彙は `RecoveryStore`: accepted (受け付けられた) / sent (送信済み・受付待ち) /
+ * 結果の語彙は `RecoveryStore` (§11.3): accepted (受け付けられた) / sent (送信済み・受付待ち) /
  * send-unknown (送達不明) / expired (猶予内に受付なし) / failed(理由) / pending (送信前)
  */
 export function summarizeRecovery(entries, { since = null, until = null, now = Date.now() } = {}) {
@@ -288,7 +291,7 @@ export function formatSummary(summary, { file = '', runs = null, recovery = null
       `差し戻し ${sum.sendBacks} 回`,
       `遷移主体: ${bots || '(bot なし)'} / scheduler ${sum.by.scheduler}`
       + ` / owner ${sum.by.owner} / 不明 ${sum.by.unknown}`
-      + ' (owner は板を動かした回数で、介入した分ではない)',
+      + ' (owner は板を動かした回数で、介入した分ではない — 分は docs/trial-log.md)',
       `proposed→merged: ${sum.lead.count} 件`
       + (sum.lead.count === 0
         ? ' (まだ着地していない)'
@@ -394,17 +397,40 @@ export function readRecords(file, label) {
 }
 
 /**
- * ボードを**読むだけ**で開く。`TaskBoardStore` を通さない理由は冒頭のコメント。
+ * ボードを**読むだけ**で開く (§9.6)。`TaskBoardStore` を通さない理由は冒頭のコメント。
  *
  * 落ちる条件は 3 つ — 読めない / JSON でない / トップレベルが `id → タスク` の object
  * でない。**どれも黙って空ボードにしない**: 集計は「0 件」と「読めなかった」を
  * 区別できないと、数字を誤読したまま出口判定に使うことになる。
  *
+ * **アーカイブ (`archiveDir` の `tasks-YYYY-MM.json`) も同じ条件で読んで足す。** 同じ id が
+ * 両方にあれば (移す途中で落ちた回) ボードの方を採る。アーカイブのディレクトリが無いのは
+ * 「まだ 1 件も移していない」なので 0 件でよい。
+ *
  * @param {string} file ボードの JSON (data/tasks.json と同じ形)
+ * @param {{archiveDir?: string|null}} [options] 既定はボードと同じ場所の `archive/`。null で読まない
  * @returns {object[]} task らしい値だけ (`TaskBoardStore.get` と同じ緩さで拾う)
- * @throws {Error} 上の 3 条件。**何も書かない・何もリネームしない**
+ * @throws {Error} 上の 3 条件 (ボードとアーカイブのどれか)。**何も書かない・何もリネームしない**
  */
-export function readBoard(file) {
+export function readBoard(file, { archiveDir = boardArchiveDir(file) } = {}) {
+  const live = readBoardData(file);
+  const merged = {};
+  for (const archived of taskArchiveFiles(archiveDir)) Object.assign(merged, readBoardData(archived));
+  Object.assign(merged, live);
+  // 手で編集された値・古い形が混ざっても落とさない (状態の読めないものは task ではない)
+  return Object.values(merged).filter(
+    (task) => task && typeof task === 'object' && !Array.isArray(task)
+      && typeof task.state === 'string',
+  );
+}
+
+/** ボードの JSON の隣にあるアーカイブのディレクトリ (既定の配備では `data/archive`) */
+export function boardArchiveDir(file) {
+  return resolve(dirname(file), 'archive');
+}
+
+/** ボードと同じ形の JSON 1 つを id → 値の object として読む (落ちる条件は readBoard の 3 つ) */
+function readBoardData(file) {
   let raw;
   try {
     raw = readFileSync(file, 'utf8');
@@ -420,11 +446,7 @@ export function readBoard(file) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     throw new Error(`${file} のトップレベルが id → タスクの object ではありません`);
   }
-  // 手で編集された値・古い形が混ざっても落とさない (状態の読めないものは task ではない)
-  return Object.values(data).filter(
-    (task) => task && typeof task === 'object' && !Array.isArray(task)
-      && typeof task.state === 'string',
-  );
+  return data;
 }
 
 /** config の bots キー (誰が bot かはここが正本。無ければ人間の介入と区別できない) */
@@ -444,7 +466,9 @@ function main(argv) {
   const summary = summarizeBoard(tasks, { botKeys: readBotKeys(DEFAULT_POLICY), now, since, until });
   const runs = runsFile ? summarizeRuns(readRecords(runsFile, '実行記録'), { since, until, now, channel }) : null;
   const recovery = recoveryFile ? summarizeRecovery(readRecords(recoveryFile, '再開の台帳'), { since, until, now }) : null;
-  console.log(formatSummary(summary, { file, runs, recovery }));
+  const archives = taskArchiveFiles(boardArchiveDir(file)).length;
+  const shown = archives > 0 ? `${file} + アーカイブ ${archives} か月 (${boardArchiveDir(file)})` : file;
+  console.log(formatSummary(summary, { file: shown, runs, recovery }));
   return 0;
 }
 

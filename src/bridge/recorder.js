@@ -1,15 +1,17 @@
-// @ts-check
 // job の実行記録 (src/jobruns.js) への書き口と、起動時の照合。
 // src/index.js から切り出した配線層 — 判断は持たない。**記録の失敗で job を落とさない**
 // (受付と終端だけは呼び出し側が失敗を見る) という約束をここで守る。
 
+import { pruneRunTraces } from '../trace-store.js';
+
 /**
  * 起動時の照合と掃除。前プロセスが終端まで記録できなかった job は「要照合」にし、
  * 保持期間を過ぎた終端記録を消す。読めない台帳は**在処に残したまま**空のメモリで開く
- * (store 側。退避すると次の起動が「初回」に見える)。
+ * (store 側。退避すると次の起動が「初回」に見える — §12.3 (1))。
  * 結果はログに出すだけ — 起動は止めない (止まるのは自律起動と自動復旧)。
+ * `traceDir` を渡すと、実行記録から消えた job の軌跡 (src/trace-store.js) も消す。
  */
-export function reconcileJobRunsOnStartup(jobRuns) {
+export function reconcileJobRunsOnStartup(jobRuns, { traceDir = null } = {}) {
   if (jobRuns.broken) {
     console.error(
       `[jobruns] data/job-runs.json が読めませんでした (${jobRuns.broken}) — 退避していません。`
@@ -32,6 +34,15 @@ export function reconcileJobRunsOnStartup(jobRuns) {
       if (pruned > 0) console.log(`[jobruns] 保持期間を過ぎた終端記録 ${pruned} 件を消しました`);
     } catch (err) {
       console.error(`[jobruns] 古い記録の掃除に失敗 (起動は続けます): ${err.message}`);
+    }
+    // 読めない台帳の id は空 — そのまま掃除すると軌跡が全部消える
+    if (traceDir && !jobRuns.broken) {
+      try {
+        const removed = pruneRunTraces(traceDir, new Set(jobRuns.list().map((r) => r.id)));
+        if (removed > 0) console.log(`[jobruns] 実行記録から消えた job の軌跡 ${removed} 件を消しました`);
+      } catch (err) {
+        console.error(`[jobruns] 古い軌跡の掃除に失敗 (起動は続けます): ${err.message}`);
+      }
     }
   }
 }
@@ -61,6 +72,7 @@ export function createRunRecorder({ jobRuns }) {
       id,
       stage: (stage, detail = '') => guard(`段階 ${stage}`, () => jobRuns.setStage(id, stage, { detail })),
       spawn: (info) => guard('spawn', () => jobRuns.noteSpawn(id, info)),
+      harness: (info) => guard('ハーネスの版', () => jobRuns.noteHarness(id, info)),
       model: (res) => guard('モデルの結果', () => jobRuns.noteModelResult(id, res)),
       activity: (info) => guard('活動', () => jobRuns.noteActivity(id, info)),
       delivery: (step, status) => guard(`配送 ${step}`, () => jobRuns.noteDelivery(id, step, status)),

@@ -16,6 +16,7 @@ import {
   classForKind,
   expandSubjectKey,
   formatPointer,
+  isSecretPath,
   isTerminal,
   parsePointer,
   proposalDigest,
@@ -455,6 +456,25 @@ test('予約対象は class と無関係にパスで縛る', () => {
   })), /どの提案の対象にもできません/);
 });
 
+test('isSecretPath は大小文字違いと派生ファイルまで秘密側として扱う', () => {
+  // 大小文字は無視する (Windows では同じ実体を指す)
+  for (const path of [SECRETS_FILE, 'CONFIG.SECRETS.JSON', 'Config.Secrets.Json']) {
+    assert.equal(isSecretPath(path), true, path);
+  }
+  // `.` で続く派生ファイルも対象外 (バックアップ・一時ファイル)
+  for (const path of [`${SECRETS_FILE}.bak`, 'CONFIG.SECRETS.JSON.BAK', `${SECRETS_FILE}.tmp.1`, `${SECRETS_FILE}.`]) {
+    assert.equal(isSecretPath(path), true, path);
+  }
+  // 似た名前は別のファイル
+  for (const path of ['config.secrets.jsonx', 'config.secrets.json-bak', 'config.secrets.js', 'config.secrets', 'xconfig.secrets.json', POLICY_FILE, '']) {
+    assert.equal(isSecretPath(path), false, path);
+  }
+  // 文字列以外は false (投げない)
+  for (const value of [undefined, null, 0, {}, [SECRETS_FILE], new String(SECRETS_FILE)]) {
+    assert.equal(isSecretPath(value), false, String(value));
+  }
+});
+
 test('diff の実変更を targets[] と突き合わせる', () => {
   const ctx = ctxWith();
   const policyEdit = (targets, mutate) => checkProposal(roleEdit({
@@ -734,7 +754,7 @@ test('allowlist から対象が外れた process-edit は withdrawn (class が�
 
 test('deliberating へ戻した提案は再裁定できる (旧 adjudication は履歴として扱う)', () => {
   // `#divert` は監査のため裁定記録を残す。戻した後もその digest を照合すると、
-  // 「裁定時と食い違っているから戻した」提案が二度と裁定できない —
+  // 「裁定時と食い違っているから戻した」提案が二度と裁定できない — §3.9 の
   // 「deliberating へ戻して再裁定」が実機で 1 件も通らなかった原因 (So 裁定 2026-09-04)
   const ctx = ctxWith();
   const s = store();
@@ -833,7 +853,7 @@ test('賛同と反論は同時に残り、意見が付いた提案は審議中�
 test('試用の期限切れは scheduler が拾えるように列挙できる', () => {
   const s = store();
   const p = accepted(s, roleEdit(), ctxWith());
-  // **試用は適用の後**。適用回路そのものは test/apply.test.js が見るので、
+  // **試用は適用の後** (§3.9)。適用回路そのものは test/apply.test.js が見るので、
   // ここは「当てて merge した」前提だけを作る
   const applying = ctxWith({ tasks: [{ id: '7', state: 'approved', touch: ['roles/sol.md'] }] });
   s.linkTask(p.id, '7', { ctx: applying, now: T0, apply: true });

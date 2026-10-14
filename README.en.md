@@ -92,6 +92,9 @@ permission model before you widen anything:
   adding a user as handing them a terminal on this machine.
 - `guildId` and `allowedUserIds` are **mandatory**; the bridge refuses to start without them
   rather than treating "unset" as "unrestricted".
+- **`allowedRoleIds` (optional) does the same by server role.** Anyone holding a listed role can
+  call the bots without being in `allowedUserIds`, so granting the role grants the shell.
+  `@everyone` (the role whose ID equals `guildId`) is rejected at startup.
 - **Defaults are least privilege**: a channel with no `tools` key is `readonly`, and
   `permissionMode` defaults to `default`. Writing and shell access only exist where you wrote
   them explicitly.
@@ -104,6 +107,13 @@ permission model before you widen anything:
   you trust.
 - For shared or public servers, keep channels `readonly`; if you need writes, use a separate
   bot and channel scoped to a throwaway working tree.
+- **Initiative / org proposals (`initiative`, `/proposals`) are experimental and unsupported.**
+  Off by default. When enabled, bots propose changes to their own role files, `config.policy.json`
+  and process docs, and the bridge applies approved diffs to its own repository and merges them.
+  The approval card shows the bot-written summary and file list, not the diff, so read the diff
+  before approving; approving a `config.policy.json` change is equivalent to granting whatever it
+  contains (including `verify` shell commands). The apply channel must use the bridge repository as
+  its `cwd`, so bots there can read `.env`.
 
 Details: [docs/reference/security-model.md](docs/reference/security-model.md) (Japanese).
 

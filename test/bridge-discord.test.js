@@ -217,6 +217,22 @@ test('botKeyOf / botEntries は registry の素の形を返す', (t) => {
   ]);
 });
 
+test('botEntries は受付 bot を載せない (呼べる相手・handoff の宛先・/roster) が、botKeyOf は引ける', (t) => {
+  const config = {
+    ...CONFIG,
+    bots: {
+      ...CONFIG.bots,
+      manager: { tokenEnv: 'MANAGER_TOKEN', displayName: 'Manager', intake: true, rolePromptFile: 'roles/intake.md' },
+    },
+  };
+  const h = harness(t, { config, env: { FABLE_TOKEN: 't1', MANAGER_TOKEN: 't3' } });
+  h.bots.get('manager').userId = 'M';
+  assert.deepEqual(h.discord.botEntries().map((e) => e.key), ['fable']);
+  // 受付の中継で起きた job の記録 (trigger.byBotKey) と、他の bot の「よそ宛」判定には要る
+  assert.equal(h.discord.botKeyOf('M'), 'manager');
+  assert.deepEqual(h.discord.otherBotMentionIds(h.bots.get('fable'), null).map((b) => b.userId), ['M']);
+});
+
 test('findGuildChannel はキャッシュだけを見て、同名のスレッドや別 guild を拾わない', (t) => {
   const h = harness(t, { env: { FABLE_TOKEN: 't1' } });
   const { client } = h.bots.get('fable');
@@ -251,20 +267,47 @@ test('otherBotMentionIds は自分以外の起動済み bot の ID と管理ロ�
   assert.equal(botRoleFor(null, 'F'), null);
 });
 
-test('postToThread は起動済みの bot から順に試し、archive されたスレッドは飛ばす', async (t) => {
+test('postToThread は起動済みの bot から順に試し、archive されたスレッドなら親チャンネルへ断り書きを 2 行目に挟んで落とす', async (t) => {
   const h = harness(t, { env: { FABLE_TOKEN: 't1', OPUS_TOKEN: 't2' } });
   const fable = h.bots.get('fable');
   const opus = h.bots.get('opus');
   const sent = [];
+  const toParent = [];
+  const refuse = async () => { throw new Error('archive されたスレッドへ送った (unarchive の副作用)'); };
   fable.userId = null; // ready 前は使わない
   opus.userId = 'O';
-  opus.client.channels.fetch = async (id) => (id === 'T1'
-    ? { id, isThread: () => true, archived: false, send: async (payload) => { sent.push(payload); return { id: 'm' }; } }
-    : { id, isThread: () => true, archived: true, send: async () => { throw new Error('should not send'); } });
+  opus.client.channels.fetch = async (id) => ({
+    T1: { id, isThread: () => true, archived: false, send: async (payload) => { sent.push(payload); return { id: 'm' }; } },
+    'T-archived': { id, isThread: () => true, archived: true, parentId: 'C-kt', send: refuse },
+    'T-orphan': { id, isThread: () => true, archived: true, parentId: 'C-gone', send: refuse },
+    'C-kt': { id, isThread: () => false, send: async (payload) => { toParent.push(payload); return { id: 'p' }; } },
+  })[id] ?? null;
+
   assert.equal(await h.discord.postToThread('T1', 'x'.repeat(2000)), true);
   assert.equal(sent.length, 1);
   assert.equal(sent[0].content.length, 1900, '1900 字で切っていない');
-  assert.equal(await h.discord.postToThread('T-archived', 'hello'), false);
+
+  // archive 済み → 親へ 1 通。本文の 1 行目 (🛟) を先頭に残し、2 行目にタスク番号とスレッドへのリンク。
+  // 先頭が 🛟 でないと運用メッセージと見分けられず、親チャンネルで次の job の文脈に混ざる
+  assert.equal(
+    await h.discord.postToThread('T-archived', '🛟 タスク #12 は止まっています\n経過 5d0h', { taskId: 12 }),
+    true,
+  );
+  assert.equal(toParent.length, 1);
+  assert.equal(
+    toParent[0].content,
+    '🛟 タスク #12 は止まっています\n#12 のスレッド <#T-archived> は archive されているのでこちらへ\n経過 5d0h',
+  );
+  assert.deepEqual(toParent[0].allowedMentions.parse, [], '親へ落とす経路が sendSafe を通っていない');
+  // 断り書きを足しても 1900 字で切る / タスク番号が無ければ「スレッド <#…>」と書く
+  assert.equal(await h.discord.postToThread('T-archived', `🛟 止まっています\n${'y'.repeat(2000)}`), true);
+  assert.equal(toParent[1].content.length, 1900);
+  assert.match(toParent[1].content, /^🛟 止まっています\nスレッド <#T-archived> は archive されているのでこちらへ\ny/);
+
+  // 親も取れなければ従来どおり false (見回りは次の tick でやり直す)
+  assert.equal(await h.discord.postToThread('T-orphan', 'hello', { taskId: 3 }), false);
+  assert.equal(toParent.length, 2);
+  assert.equal(await h.discord.postToThread('T-missing', 'hello'), false);
   assert.equal(await h.discord.postToThread(null, 'hello'), false);
 });
 

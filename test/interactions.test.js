@@ -53,7 +53,9 @@ function harness({
   reissueReview = null, // /review の実体 (省略すると配線なし = 機能無効)
   caseCommand = null, // /case の実体 (省略すると配線なし = 機能無効)
   societyStop = null, // /stop の案件停止 (省略すると配線なし = 案件は止まらない)
+  stopIntake = null, // /stop scope:all で受付も止める口 (省略すると配線なし = 受付は止まらない)
   ownerUserId = 'U1', // 案件を開く / 相談を出せるのは owner だけ (既定の打ち手 U1 を owner にする)
+  config = CONFIG, // 認可の口を変えるとき用 (allowedRoleIds を足すなど)
 } = {}) {
   const log = [];
   const reviewCalls = [];
@@ -84,7 +86,7 @@ function harness({
   const notices = [];
   const exits = [];
   const onInteraction = createInteractionHandler({
-    config: CONFIG,
+    config,
     channelConfigFor: () => (channelKnown ? channelConfig : null),
     jobs,
     // drain を待っている間に新規 job を受け付けていないかを、待ちの時点で記録する
@@ -113,6 +115,7 @@ function harness({
     societyStop: societyStop
       ? (args) => { societyCalls.push(args); return societyStop(args); }
       : null,
+    stopIntake,
     ownerUserId,
   });
 
@@ -125,12 +128,14 @@ function harness({
     channelId = 'T1',
     isCommand = true,
     inGuild = true,
+    member = null, // ロールで許可するときだけ渡す (未キャッシュの interaction は raw 形)
   } = {}) {
     return {
       commandName,
       guildId,
       channelId,
       user: { id: userId },
+      member,
       channel: { id: channelId, isThread: () => inThread },
       options: {
         getString: (n) => options[n] ?? null,
@@ -167,6 +172,22 @@ function harness({
 }
 
 const find = (log, re) => log.findIndex((l) => re.test(l));
+
+test('許可ロールを持つ人はスラッシュコマンドを打てる (roleIds の配線)', async () => {
+  // 純関数のテストだけでは呼び出し元での `roleIds:` 渡し忘れを検出できない。
+  // interaction の member は guild が未キャッシュだと raw 形 (roles が ID の配列)
+  const withRole = { ...CONFIG, allowedRoleIds: ['R1'] };
+  const ok = harness({ active: 1, config: withRole });
+  await ok.onInteraction(BOT, ok.interaction({ userId: 'U9', member: { roles: ['R1'] } }));
+  assert.equal(ok.log.some((l) => l.includes('許可されていません')), false, 'ロールを持つ人を拒否している');
+  assert.ok(ok.log.includes('defer'), 'ACK まで進んでいない');
+
+  // 別のロールしか持っていなければ今までどおり拒否 (ロールは境界を緩めない)
+  const ng = harness({ active: 1, config: withRole });
+  await ng.onInteraction(BOT, ng.interaction({ userId: 'U9', member: { roles: ['R2'] } }));
+  assert.ok(ng.log.some((l) => l.includes('許可されていません')), '拒否されていない');
+  assert.equal(ng.log.includes('defer'), false, '拒否なのに ACK している');
+});
 
 test('未許可ユーザー / 別 guild は ephemeral で拒否し job に触らない', async () => {
   for (const patch of [{ userId: 'U9' }, { guildId: 'G2' }]) {
@@ -312,6 +333,25 @@ test('/stop: スレッド内は そのスレッドだけ・scope:all は全体',
   await all.onInteraction(BOT, all.interaction({ options: { scope: 'all' }, channelId: 'T7' }));
   assert.ok(all.log.includes('select:{"threadId":"T7","all":true}'), all.log.join(' | '));
   assert.ok(all.log.some((l) => /^edit:⏹ 停止指示 \(全体\)/.test(l)));
+});
+
+test('/stop: 受付は全体停止のときだけ止め、止めた数を返す (受付はキューに載らない)', async () => {
+  const calls = [];
+  const stopIntake = () => { calls.push('intake'); return 2; };
+  const thread = harness({ active: 1, stopIntake });
+  await thread.onInteraction(BOT, thread.interaction({ channelId: 'T7' }));
+  assert.deepEqual(calls, [], 'スレッドの /stop で受付まで止めている');
+  assert.ok(!thread.log.some((l) => /受付/.test(l)), thread.log.join(' | '));
+
+  const all = harness({ active: 1, stopIntake });
+  await all.onInteraction(BOT, all.interaction({ options: { scope: 'all' }, channelId: 'T7' }));
+  assert.deepEqual(calls, ['intake']);
+  assert.ok(all.log.some((l) => /^edit:⏹ 停止指示 \(全体\)[\s\S]*⏹ 受付 2 件も止めました/.test(l)), all.log.join(' | '));
+
+  // 何も走っていなければ行を足さない
+  const idle = harness({ active: 1, stopIntake: () => 0 });
+  await idle.onInteraction(BOT, idle.interaction({ options: { scope: 'all' } }));
+  assert.ok(!idle.log.some((l) => /受付/.test(l)), idle.log.join(' | '));
 });
 
 test('/stop: スレッド外は全体扱いで、その旨を返す', async () => {
@@ -488,7 +528,7 @@ test('/case: new と offer の引数を実体へそのまま渡す', async () =>
 
 test('/case: 案件を開く / 相談を出す / 停止を解除するのは owner だけ (一覧と詳細は全員)', async () => {
   // 予算と責任を動かす操作なので org 提案の裁定と同じ扱い (Fable 裁定 2026-09-08)。
-  // 再開が同じ門なのは「解除は owner の操作か同じ認可の操作だけ」
+  // 再開が同じ門なのは §12.2 (g) —「解除は owner の操作か同じ認可の操作だけ」
   const opens = { new: 'quality', goal: 'x', acceptance: 'y' };
   const offers = { id: 'C-1', bot: 'opus' };
   const resumes = { resume: 'C-1' };

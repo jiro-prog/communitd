@@ -4,6 +4,7 @@ import { Client as DiscordClient, Events, GatewayIntentBits } from 'discord.js';
 import { SLASH_COMMANDS } from '../commands.js';
 import { channelConfigForName, channelNameOf, isExampleId } from '../config.js';
 import { sendSafe } from '../mentions.js';
+import { runtimeOf } from '../runtime.js';
 
 /** その時刻の Discord snowflake (メッセージ ID の下限として使う。epoch は 2015-01-01) */
 export function snowflakeAt(ms) {
@@ -71,17 +72,39 @@ export function createDiscordWiring({ config, bots }) {
       .map((b) => ({ userId: b.userId, roleId: botRoleFor(guild, b.userId) }));
   }
 
+  /** その bot の client から見たチャンネル (キャッシュ → fetch。取れなければ null) */
+  async function channelVia(bot, id) {
+    return bot.client.channels.cache.get(id) ?? await bot.client.channels.fetch(id).catch(() => null);
+  }
+
   /**
    * スレッドへ 1 通 (どの bot からでもよい — 起動しない運用メッセージ)。
+   *
+   * **archive されたスレッドには出さず親チャンネルへ落とす** — 何日も動かないタスクのスレッドは
+   * archive され、そこへの通知は誰にも届かない (止まったことを知らせる経路が閉じる)。
+   * 本文の 1 行目の直後に「#N のスレッド <#id> は archive されているのでこちらへ」の 1 行を挟む。
+   * **先頭には置かない** — 運用メッセージは先頭の接頭辞 (🛟 など、INFRA_PREFIXES) で文脈から
+   * 外されるので、断り書きが先に来ると親チャンネルで普通の発言として次の job の文脈に混ざる。
+   * unarchive はしない (スレッドを起こす副作用があるため)。親も取れなければ送れなかった扱い。
+   * @param {object} [opts]
+   * @param {string|number|null} [opts.taskId] 親へ落としたときの断り書きに出すタスク番号
    * @returns {Promise<boolean>} 送れたか
    */
-  async function postToThread(threadId, text) {
+  async function postToThread(threadId, text, { taskId = null } = {}) {
     if (!threadId) return false;
+    const id = String(threadId);
     for (const bot of bots.values()) {
       if (!bot.userId) continue;
-      const channel = bot.client.channels.cache.get(String(threadId))
-        ?? await bot.client.channels.fetch(String(threadId)).catch(() => null);
-      if (!channel || (channel.isThread?.() && channel.archived)) continue;
+      const channel = await channelVia(bot, id);
+      if (!channel) continue;
+      if (channel.isThread?.() && channel.archived) {
+        const parent = channel.parentId ? await channelVia(bot, String(channel.parentId)) : null;
+        if (!parent) continue;
+        const lead = `${taskId != null ? `#${taskId} の` : ''}スレッド <#${id}> は archive されているのでこちらへ`;
+        const [first, ...rest] = String(text).split('\n');
+        await sendSafe(parent, [first, lead, ...rest].join('\n').slice(0, 1900));
+        return true;
+      }
       await sendSafe(channel, String(text).slice(0, 1900));
       return true;
     }
@@ -103,12 +126,16 @@ export function createDiscordWiring({ config, bots }) {
    * 表示用の言い換えは src/rolecontext.js が行う (ここは config の素の値を渡すだけ)。
    */
   function botEntries() {
-    return [...bots.values()].map((b) => ({
+    // **受付 bot は載せない** — 通常の job を走らせないので、呼べる相手・handoff の宛先・/roster の
+    // どこに出しても空振りになる。受付の中継で起きた job の「投げ手」も人間扱いになる
+    // (job.js の issuerBotKeyOf → verify NG は人へ返る)。botKeyOf / otherBotMentionIds は残す —
+    // 受付 bot へのメンションは、他の bot から見て「よそ宛」のまま (docs/notes/2026-10-11-intake.md)
+    return [...bots.values()].filter((b) => b.cfg?.intake !== true).map((b) => ({
       key: b.key,
       displayName: b.cfg.displayName,
       userId: b.userId,
       rolePromptFile: b.cfg.rolePromptFile ?? null,
-      runtime: b.cfg.runtime ?? 'claude',
+      runtime: runtimeOf(b.cfg),
     }));
   }
 

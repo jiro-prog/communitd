@@ -1,8 +1,7 @@
-// @ts-check
 // Discord へ出す文字列の加工 (純粋関数)。
 //
 // メンションの解決・無害化は src/mentions.js が持つ (制御マーカーの解釈と
-// コード領域の判定をそちらに一本化してある)。ここは分割だけ。
+// コード領域の判定をそちらに一本化してある)。ここは分割と、切る位置の補正だけ。
 //
 // 分割はコードブロックのフェンスを保つ。素朴に切ると ``` の内側に境界が来て、
 // 前のメッセージは閉じられないコードブロック・後ろのメッセージは素のテキストとして
@@ -12,6 +11,19 @@
 // コード領域の判定を mentions.js の codeRegions と共有しないのは目的が違うため。
 // あちらは「制御フッターを実行してよいか」を決める fail-closed の判定でインラインコードも
 // 見る。こちらは表示を崩さないための整形で、行頭のフェンス行だけを追えばよい。
+
+/**
+ * index で切るとサロゲートペアを割るなら 1 つ手前を返す (割らなければ index のまま)。
+ *
+ * 上限は UTF-16 の長さで数えたまま、切る位置だけをコードポイントの境界へ寄せる。
+ * 上限ちょうどに絵文字が来ると、前半と後半が別々のメッセージで � になっていた。
+ * 前後が揃ったペアのときだけ動かす — 元から片割れの文字は守るものが無い。
+ */
+export function codePointBoundary(text, index) {
+  const high = text.charCodeAt(index - 1);
+  const low = text.charCodeAt(index);
+  return high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff ? index - 1 : index;
+}
 
 /** 行頭のコードフェンス (``` 以上)。2 つめのキャプチャは言語指定など */
 const FENCE_LINE = /^[ \t]*(`{3,})[ \t]*(.*?)[ \t]*$/;
@@ -27,7 +39,6 @@ const FENCE_LINE = /^[ \t]*(`{3,})[ \t]*(.*?)[ \t]*$/;
 function scanFences(src) {
   const marks = [];
   const fences = [];
-  /** @type {{fence: string, info: string}|null} */
   let open = null;
   let at = 0;
   for (const line of src.split('\n')) {
@@ -54,7 +65,6 @@ function scanFences(src) {
 
 /** offset までを出力した時点で開いているブロック (無ければ null) */
 function openAt(marks, offset) {
-  /** @type {{fence: string, info: string}|null} */
   let open = null;
   for (const mark of marks) {
     if (mark.at > offset) break;
@@ -79,7 +89,7 @@ function chooseCut(src, fences, pos, budget) {
   const limit = pos + budget;
   if (limit >= src.length) return src.length;
   let cut = src.lastIndexOf('\n', limit);
-  if (cut - pos < budget * 0.5) cut = limit; // 近くに改行が無ければ上限で切る
+  if (cut - pos < budget * 0.5) cut = codePointBoundary(src, limit); // 近くに改行が無ければ上限で切る
   const fenceStart = fenceLineStart(fences, cut);
   if (fenceStart > pos) cut = fenceStart; // フェンス自体を割ると閉じ直せない
   return cut;
@@ -95,7 +105,6 @@ export function chunkText(text, size) {
   const { marks, fences } = scanFences(src);
   const chunks = [];
   let pos = 0;
-  /** @type {{fence: string, info: string}|null} */
   let carry = null; // 前のチャンクを閉じたので開き直すブロック
 
   for (;;) {
@@ -113,7 +122,6 @@ export function chunkText(text, size) {
     // (詰めると開いていない位置まで戻ることがあり、そのときは補完自体が要らなくなる)
     let budget = size - prefix.length;
     let cut = pos;
-    /** @type {{fence: string, info: string}|null} */
     let open = null;
     let suffix = '';
     for (let i = 0; i < 4; i++) {

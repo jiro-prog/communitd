@@ -1,6 +1,6 @@
 {
   "name": "communitd",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "description": "Discord bridge that dispatches mentions to local Claude Code and Codex agents",
   "keywords": [
     "discord",
@@ -14,11 +14,10 @@
   "scripts": {
     "start": "node scripts/run.mjs",
     "add-project": "node --env-file=.env scripts/add-project.mjs",
+    "new-project": "node --env-file=.env scripts/new-project.mjs",
     "doctor": "node --env-file=.env scripts/doctor.mjs",
-    "lint": "eslint . && node scripts/check-doc-refs.mjs",
-    "check:docs": "node scripts/check-doc-refs.mjs",
-    "test": "node scripts/test.mjs",
-    "typecheck": "tsc -p tsconfig.check.json"
+    "lint": "eslint .",
+    "test": "node scripts/test.mjs"
   },
   "engines": {
     "node": ">=20.6"
@@ -29,10 +28,8 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/node": "^20.19.43",
     "eslint": "^10.10.0",
-    "globals": "^17.12.0",
-    "typescript": "^7.0.2"
+    "globals": "^17.12.0"
   },
   "repository": {
     "type": "git",

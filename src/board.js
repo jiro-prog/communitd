@@ -1,25 +1,32 @@
+import { existsSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { JsonStore } from './store.js';
+import { RUN_RETENTION_MS } from './jobruns.js';
 import { isSafeRepoPath, samePathLoose } from './repopath.js';
+import { jstDayKey } from './time.js';
 
 /**
- * エージェント社会のタスクボード。
+ * エージェント社会のタスクボード (docs/social-engineering.md §3.2)。
  *
- * スケジューラ (未実装) が読む**状態の正本**で、1 タスク = 1 Discord スレッド。
+ * スケジューラ (§7-4、未実装) が読む**状態の正本**で、1 タスク = 1 Discord スレッド。
  * ここが持つのは状態機械だけで、「次に何を起動するか」の判断は持たない —
  * tick の判断はスケジューラ側の純粋関数へ置く。
  *
  * 保存先は `data/tasks.json` (`.gitignore` 済み)。既存ストアと同じく `JsonStore` を継承し、
  * 保存は tmp 書き → rename、壊れたファイルは退避される。
+ * 終わってから保持期間を過ぎたタスクは月ごとのアーカイブ (`data/archive/tasks-YYYY-MM.json`) へ
+ * 移すので、ファイルは終わったタスクで膨らみ続けない (`archiveEnded`)。
  */
 
-/** ボードが取りうる状態 */
+/** ボードが取りうる状態 (§3.2) */
 export const TASK_STATES = Object.freeze([
   'proposed', 'approved', 'in-progress', 'review', 'merged', 'blocked', 'dropped',
 ]);
 
 /**
- * これ以上進まない状態。ボードからは消さない (スレッドと 1:1 なので履歴が読めなくなる) が、
- * スケジューラの着手対象からは外れる。
+ * これ以上進まない状態。すぐにはボードから消さない (スレッドと 1:1 なので、直後の発言で
+ * 履歴が読めなくなる) が、スケジューラの着手対象からは外れる。終わってから保持期間を
+ * 過ぎたものは月ごとのアーカイブへ移す (`archiveEnded`)。
  *
  * **`blocked` はここに入らない** (検収裁定 2026-08-27)。要人間で止まったタスクは
  * `resume()` で `approved` へ戻せる — 「人間の発言そのもの」ではなく再開操作が状態を
@@ -28,15 +35,24 @@ export const TASK_STATES = Object.freeze([
 export const TERMINAL_STATES = Object.freeze(['merged', 'dropped']);
 
 /**
- * 「まだ着手されていない」状態。**起票の枠はこの数で数える** —
+ * 「まだ着手されていない」状態。**起票の枠 (§9.2a) はこの数で数える** —
  * スケジューラがスカウトを起こすかどうかを見る定義 (`OPEN_STATES` — src/scheduler.js) と
  * 同じにそろえてある。2 か所が食い違うと「起こしたのに 1 件も載らない」巡回ができる。
  * ずれは test/scheduler.test.js が planTick と突き合わせて固定している。
  */
 const OPEN_STATES = Object.freeze(['proposed', 'approved']);
 
-/** スカウトへ見せる「直近に着地したもの」の窓。48 時間 */
+/** スカウトへ見せる「直近に着地したもの」の窓 (§9.1a)。48 時間 */
 export const MERGED_WINDOW_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * 終わってからこれだけ経ったタスクをアーカイブへ移す。**実行記録の終端の保持期間と同じ 30 日** —
+ * そろえておくと、タスクとその実行記録・軌跡が同じ頃に片付く (片方だけ残っても突き合わせられない)
+ */
+export const TASK_ARCHIVE_AFTER_MS = RUN_RETENTION_MS;
+
+/** アーカイブのファイル名 (`tasks-2026-09.json` — 終わった月 (JST) ごとに 1 つ) */
+const TASK_ARCHIVE_FILE = /^tasks-\d{4}-\d{2}\.json$/;
 
 /**
  * 起票の枠が読めないときの既定。**config.js の `DEFAULT_SCOUT_MAX_OPEN_TASKS` と同じ値** —
@@ -54,18 +70,18 @@ const NON_SPENDING_STATES = Object.freeze(['merged', 'blocked', 'dropped']);
 /**
  * 許される遷移だけを列挙した表。**ここに無い辺は API が拒否する。**
  *
- * 幹は `proposed → approved → in-progress → review → merged`。
+ * 幹は §3.2 の `proposed → approved → in-progress → review → merged`。
  * `blocked` / `dropped` はどの作業中の状態からも起こりうるので、幹の各段から出す:
- * - `blocked` = 要人間 (「差し戻し 2 回 / verify が原因不明で落ち続ける / job 予算切れ」)。
+ * - `blocked` = 要人間 (§6「差し戻し 2 回 / verify が原因不明で落ち続ける / job 予算切れ」)。
  *   予算切れは in-progress、差し戻しは review で起きるので終端だけに置くと表現できない。
  * - `dropped` = 破棄 (承認されなかった提案・不要になったタスク)。
  *
  * 復帰は `blocked → approved` の一辺だけ (検収裁定 2026-08-27)。承認済みまで戻して
  * 着手の列へ並べ直す形にすると、「どこまで進んでいたか」を推測して復元せずに済む。
  *
- * 差し戻しは `review → in-progress` (裁定 2026-08-28)。スレッドも作業ブランチも
+ * 差し戻しは `review → in-progress` (§3.2 裁定 2026-08-28)。スレッドも作業ブランチも
  * そのままなので、承認まで戻さず**同じスレッドの続き**として直させる。
- * 2 回目の差し戻しは要人間 — 判断はボードではなくスケジューラ側が持つ。
+ * 2 回目の差し戻しは要人間 (§6) — 判断はボードではなくスケジューラ側が持つ。
  */
 export const TRANSITIONS = Object.freeze({
   proposed: Object.freeze(['approved', 'blocked', 'dropped']),
@@ -77,20 +93,20 @@ export const TRANSITIONS = Object.freeze({
   dropped: Object.freeze([]),
 });
 
-/** その遷移が遷移表 (TRANSITIONS) にあるか (スケジューラが着手可否を判断するためにも使う純粋関数) */
+/** その遷移が §3.2 の表にあるか (スケジューラが着手可否を判断するためにも使う純粋関数) */
 export function canTransition(from, to) {
   return TRANSITIONS[from]?.includes(to) ?? false;
 }
 
 /**
- * 1 タスクに払い出す job 予算の既定値 (例)。
- * 実際の値はチャンネルの autonomy config (未実装) から渡す想定で、
+ * 1 タスクに払い出す job 予算の既定値 (§3.5 の例)。
+ * 実際の値はチャンネルの autonomy config (§7-2、未実装) から渡す想定で、
  * ここは「渡されなかったときに無制限にしない」ための床。
  */
 export const DEFAULT_JOB_BUDGET = 20;
 
 /**
- * そのタスクが今まで何回差し戻されたか (「差し戻し 2 回で要人間」を数える純関数)。
+ * そのタスクが今まで何回差し戻されたか (§6 の「差し戻し 2 回で要人間」を数える純関数)。
  * 履歴が台帳なので、回数を別フィールドで持たずここから数える — 二重管理にしない。
  */
 export function sendBackCount(task) {
@@ -99,7 +115,48 @@ export function sendBackCount(task) {
 }
 
 /**
- * touch を宣言していない終端でないタスク。
+ * 承認したときの本文 (§3.2 の proposed → approved の note) と、承認した bot のキー。
+ * 承認する側は着手する人への注意 (触る範囲・設計の穴) をここに書くので、着手の起動と
+ * レビューの依頼へ渡す — 承認のスレッドにしか無いと、別スレッドで動く着手者には届かない。
+ * 封鎖からの復帰 (blocked → approved) の note は承認ではないので見ない。
+ * @returns {{note: string, by: string}} 無ければ note は空文字
+ */
+export function approvalNote(task) {
+  const history = Array.isArray(task?.history) ? task.history : [];
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i];
+    if (entry?.from !== 'proposed' || entry?.to !== 'approved') continue;
+    return {
+      note: typeof entry.note === 'string' ? entry.note.trim() : '',
+      by: typeof entry.by === 'string' ? entry.by : '',
+    };
+  }
+  return { note: '', by: '' };
+}
+
+/** レビューの証拠を history note に残すときの頭 (次の巡回が数える目印) */
+export const REVIEW_EVIDENCE_NOTE_PREFIX = 'レビューの証拠: ';
+
+/**
+ * review へ進めた回に測ったレビューの証拠 (review 遷移の note) と、その遷移の時刻。
+ * `/review` の出し直しと自動復旧の呼び直しは測り直さず、ここから読み直して依頼に載せる。
+ * 見るのは**最後の review 遷移だけ** — そこに証拠が無ければ空で、前の周回には遡らない
+ * (差し戻し前に測った証拠は、直した後のブランチの証拠ではない)。
+ * @returns {{evidence: string, at: string}} 無ければ両方とも空文字
+ */
+export function reviewEvidenceNote(task) {
+  const history = Array.isArray(task?.history) ? task.history : [];
+  const entry = history.findLast((item) => item?.to === 'review');
+  const note = typeof entry?.note === 'string' ? entry.note : '';
+  if (!note.startsWith(REVIEW_EVIDENCE_NOTE_PREFIX)) return { evidence: '', at: '' };
+  return {
+    evidence: note.slice(REVIEW_EVIDENCE_NOTE_PREFIX.length),
+    at: typeof entry.at === 'string' ? entry.at : '',
+  };
+}
+
+/**
+ * touch を宣言していない終端でないタスク (§3.9)。
  *
  * **1 件でもあると、そのボードでは組織提案が全件拒否される** — 発議側の競合判定
  * (`taskConflicts` — src/proposals.js) は touch 不明のタスクを「どこを触っているか
@@ -156,7 +213,7 @@ export function canSpendJob(task) {
   return Boolean(task) && !NON_SPENDING_STATES.includes(task?.state);
 }
 
-/** 残り job (「使い切ったら blocked」の判定を 1 箇所に置く) */
+/** 残り job (§3.5「使い切ったら blocked」の判定を 1 箇所に置く) */
 export function remainingJobs(task) {
   const spent = Number(task?.jobsSpent) || 0;
   const budget = Number(task?.jobBudget) || 0;
@@ -167,7 +224,7 @@ export function remainingJobs(task) {
 const isoAt = (now) => new Date(now).toISOString();
 
 /**
- * タスクが触るファイル (末尾)。**起票の時点で必須**にしてある。
+ * タスクが触るファイル (§3.9 の末尾)。**起票の時点で必須**にしてある。
  *
  * 発議の競合判定 (`taskConflicts` — src/proposals.js) は、touch を持たないタスクを
  * 「どこを触っているか分からない」として**何とでも競合する**と見なす (fail-closed)。
@@ -207,7 +264,7 @@ export function normalizeTouch(value, name = 'touch') {
 }
 
 /**
- * 2 つの touch 集合が同じファイルを掴んでいるか (重複ゲート)。
+ * 2 つの touch 集合が同じファイルを掴んでいるか (§9.1(b) の重複ゲート)。
  *
  * 比較は `samePathLoose` (src/repopath.js) — 大小文字だけが違うパスは同じ実体として
  * 扱う。発議側の競合判定 (`entriesConflict` — src/proposals.js) と同じ規則で、
@@ -228,7 +285,7 @@ export function touchOverlaps(a, b) {
 }
 
 /**
- * スカウトへ見せるボードの現状。
+ * スカウトへ見せるボードの現状 (§9.1a)。
  *
  * **非終端すべて + 直近に merged になったもの。** proposed / approved しか見せないと、
  * 誰かが review まで進めた仕事が一覧から消え、同じものがもう一度起票される
@@ -240,8 +297,9 @@ export function touchOverlaps(a, b) {
  * 直近扱いになる。読めないものは「直近」と言い切れないので載せない。
  * **未来の時刻も載せない** (`now` の取り方しだいで、窓を過ぎても消えなくなる)。
  *
- * 並びは**非終端が先・merged が後**。長すぎる一覧は末尾から削られる
- * (`scoutStartMessage` — src/mentions.js) ので、削ってよい方を後ろに置く。
+ * 並びは**非終端が先・merged が後**で、merged は**着地の新しい順**。長すぎる一覧は
+ * 末尾から削られる (`scoutStartMessage` — src/mentions.js) ので、削ってよい方を後ろに置く
+ * — id 順のままだと、いちばん二重起票されやすい直近の merged から消える。
  *
  * @param {object[]} tasks 同じチャンネルのタスク (`list()` の戻り)
  * @param {{now?: number, mergedWindowMs?: number}} options
@@ -250,13 +308,15 @@ export function touchOverlaps(a, b) {
 export function scoutBoardView(tasks, { now = Date.now(), mergedWindowMs } = {}) {
   const list = (Array.isArray(tasks) ? tasks : []).filter(isTaskLike);
   const window = countOr(mergedWindowMs, MERGED_WINDOW_MS);
-  const landed = list.filter((task) => {
-    if (task.state !== 'merged') return false;
-    const at = mergedAtOf(task);
+  const landed = list
+    .filter((task) => task.state === 'merged')
+    .map((task) => ({ task, at: mergedAtOf(task) }))
     // 未来の時刻は窓に入れない。`now` が list を読む前に取られていると、その隙に
     // 着地した merge が「ずっと直近」になり、窓が過ぎても一覧から消えなくなる
-    return at !== null && now - at >= 0 && now - at <= window;
-  });
+    .filter(({ at }) => at !== null && now - at >= 0 && now - at <= window)
+    // 同時刻は元の並びのまま (sort は安定)
+    .sort((a, b) => b.at - a.at)
+    .map(({ task }) => task);
   return [...list.filter((task) => !TERMINAL_STATES.includes(task.state)), ...landed];
 }
 
@@ -278,7 +338,65 @@ function mergedAtOf(task) {
 }
 
 /**
- * 起票をボードへ載せる前の制動 (重なり + 枠)。**ボードには触らない** —
+ * 終端 (merged / dropped) になった時刻 (ms)。`mergedAtOf` と同じく**履歴の行だけを見る** —
+ * `updatedAt` は手で触られても動くので、古いタスクを新しく見せ、新しいタスクを古く見せる。
+ * 今の状態と同じ終端への行を採る (読めなければ null)。
+ */
+function endedAtOf(task) {
+  const history = Array.isArray(task.history) ? task.history : [];
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i]?.to !== task.state) continue;
+    const at = Date.parse(history[i]?.at);
+    if (Number.isFinite(at)) return at;
+  }
+  return null;
+}
+
+/**
+ * アーカイブへ移すタスクと、移す先の月 (純粋 — `archiveEnded` の判断の部分)。
+ *
+ * 移すのは **終端になってから `afterMs` を過ぎたもの**。残すもの:
+ * - **終端でないもの** — 止まったままのタスクも含めて、片付けるかは人と巡回が決める
+ * - **id が最大のもの (終わっていても)** — `nextId` は今あるキーの最大値 + 1 で採るので、
+ *   移すと番号が戻り、`task/N` のブランチ・実行記録・復旧の台帳の同じ番号とぶつかる
+ * - **終端になった時刻を履歴から読めないもの** — いつ終わったか分からないものを古いと決めない
+ *
+ * @param {object[]} tasks ボードのタスク
+ * @param {{now?: number, afterMs?: number}} options
+ * @returns {Array<{task: object, month: string}>} month は終わった月 (JST、`2026-09`)
+ */
+export function planTaskArchive(tasks, { now = Date.now(), afterMs } = {}) {
+  const list = (Array.isArray(tasks) ? tasks : []).filter(isTaskLike);
+  const after = countOr(afterMs, TASK_ARCHIVE_AFTER_MS);
+  let top = null;
+  for (const task of list) {
+    const n = Number.parseInt(task.id, 10);
+    if (Number.isInteger(n) && (top === null || n > top)) top = n;
+  }
+  const out = [];
+  for (const task of list) {
+    if (!TERMINAL_STATES.includes(task.state)) continue;
+    if (Number.parseInt(task.id, 10) === top) continue;
+    const endedAt = endedAtOf(task);
+    if (endedAt === null || now - endedAt <= after) continue;
+    const month = jstDayKey(endedAt)?.slice(0, 7);
+    if (month) out.push({ task, month });
+  }
+  return out;
+}
+
+/**
+ * アーカイブのファイル (月の古い順)。ディレクトリが無ければ空 — まだ 1 件も移していない。
+ * @param {string} dir アーカイブのディレクトリ (既定の配備では `data/archive`)
+ * @returns {string[]} パス
+ */
+export function taskArchiveFiles(dir) {
+  if (!dir || !existsSync(dir)) return [];
+  return readdirSync(dir).filter((name) => TASK_ARCHIVE_FILE.test(name)).sort().map((name) => join(dir, name));
+}
+
+/**
+ * 起票をボードへ載せる前の制動 (§9.1b 重なり + §9.2a 枠)。**ボードには触らない** —
  * ここで落ちたものは proposed にすらならないので、次の巡回でまた起票できる。
  *
  * 順序は **重なり → 枠**。重なりで落ちたものに枠を消費させると、重複を 1 件書いただけで
@@ -383,7 +501,7 @@ export class TaskBoardStore extends JsonStore {
       });
   }
 
-  /** スレッドからタスクを引く (スレッドと 1:1 — job 側は自分のスレッドしか知らない) */
+  /** スレッドからタスクを引く (§3.2 スレッドと 1:1 — job 側は自分のスレッドしか知らない) */
   findByThread(threadId) {
     if (threadId === null || threadId === undefined || threadId === '') return null;
     const key = String(threadId);
@@ -406,9 +524,9 @@ export class TaskBoardStore extends JsonStore {
   }
 
   /**
-   * 起票 (スカウトの出力がここへ入る)。
+   * 起票 (スカウトの出力がここへ入る — §3.3)。
    *
-   * `touch` は必須。起票の時点で「どこを触る仕事か」を宣言させないと、
+   * `touch` は必須 (§3.9)。起票の時点で「どこを触る仕事か」を宣言させないと、
    * 発議側がそのタスクとの競合を判定できない (normalizeTouch のコメント参照)。
    *
    * @returns {object} 作られたタスク
@@ -444,7 +562,7 @@ export class TaskBoardStore extends JsonStore {
     return task;
   }
 
-  /** 承認 (裁定: 起票 Opus・承認 Fable)。着手はここを通った後だけ */
+  /** 承認 (§3.2 裁定: 起票 Opus・承認 Fable)。着手はここを通った後だけ */
   approve(id, options = {}) {
     return this.transition(id, 'approved', options);
   }
@@ -452,9 +570,9 @@ export class TaskBoardStore extends JsonStore {
   /**
    * 着手。スレッドとブランチをここで結び付ける。
    *
-   * `branch` 省略時は `task/<id>` (1 タスク = 1 マージコミット = revert 一発)。
+   * `branch` 省略時は §3.6 の `task/<id>` (1 タスク = 1 マージコミット = revert 一発)。
    *
-   * `touch` を渡すと起票時の宣言を差し替える (touch を持つのは `propose` / `start`)。
+   * `touch` を渡すと起票時の宣言を差し替える (§3.9 — touch を持つのは `propose` / `start`)。
    * 着手の時点で対象が絞れた・広がったことは実際にあるので、**履歴に残したうえで**
    * 更新できるようにしてある。省略時は据え置き。
    */
@@ -479,18 +597,18 @@ export class TaskBoardStore extends JsonStore {
     });
   }
 
-  /** レビュー提出 (worker の完了 report をブリッジが見て進める) */
+  /** レビュー提出 (worker の完了 report をブリッジが見て進める — §3.5) */
   submitForReview(id, options = {}) {
     return this.transition(id, 'review', options);
   }
 
-  /** 完了 = main へ昇格済み。merge コミットなどは note に残す */
+  /** 完了 = main へ昇格済み (§3.6)。merge コミットなどは note に残す */
   complete(id, options = {}) {
     return this.transition(id, 'merged', options);
   }
 
   /**
-   * 差し戻し (裁定 2026-08-28)。レビューが通らなかったので実装中へ戻す。
+   * 差し戻し (§3.2 裁定 2026-08-28)。レビューが通らなかったので実装中へ戻す。
    *
    * 承認まで戻さないのは、スレッドも作業ブランチもそのまま使えるから —
    * 同じスレッドの続きとして直させる方が、文脈を捨てずに済む。
@@ -500,7 +618,7 @@ export class TaskBoardStore extends JsonStore {
     return this.transition(id, 'in-progress', { now, by, note: reason });
   }
 
-  /** 封鎖 = 要人間。理由は履歴に残す — 人間が覗いたとき何で止まったか分かるように */
+  /** 封鎖 = 要人間 (§6)。理由は履歴に残す — 人間が覗いたとき何で止まったか分かるように */
   block(id, { reason = '', now = Date.now(), by = null } = {}) {
     return this.transition(id, 'blocked', { now, by, note: reason });
   }
@@ -541,7 +659,7 @@ export class TaskBoardStore extends JsonStore {
   }
 
   /**
-   * job 予算を消費する (タスク単位予算)。状態は動かさず履歴も汚さない —
+   * job 予算を消費する (§3.5 のタスク単位予算)。状態は動かさず履歴も汚さない —
    * 履歴は「誰が何を決めたか」の台帳で、job の消費は計数だから。
    *
    * 使い切ったときに `blocked` にするかはスケジューラの判断なので、ここではしない。
@@ -560,14 +678,14 @@ export class TaskBoardStore extends JsonStore {
   }
 
   /**
-   * touch を持っていないタスクへ後から宣言を入れる (**移行専用**)。
+   * touch を持っていないタスクへ後から宣言を入れる (**移行専用** — §3.9)。
    *
    * `propose` が touch を必須にする前に起票されたタスクだけが対象。
    * **既に持っているタスクは断る** — 上書きを許すと、発議の競合判定と `linkTask` の
    * 範囲照合の根拠を、走っている最中に広げられる口になる (着手時の差し替えは `start`)。
    * 終端のタスクも断る (競合判定の材料ではないので、閉じた記録を書き換える理由が無い)。
    *
-   * **履歴は積まない。** 履歴は状態遷移の台帳で、後から埋めた宣言は遷移ではない。
+   * **履歴は積まない。** 履歴は §3.2 の状態遷移の台帳で、後から埋めた宣言は遷移ではない。
    *
    * @throws {Error} 既に touch があるとき / 終端のとき / touch が正規形でないとき
    */
@@ -585,6 +703,100 @@ export class TaskBoardStore extends JsonStore {
   }
 
   /**
+   * 改訂の下書きの検証 (src/replay.js) の記録を書き換える。**review のタスクにだけ** —
+   * 解き直しを待つ改訂は review のまま記録だけが進む (遷移ではないので履歴は積まない)。
+   * @throws {Error} 無いタスク / review でないとき
+   */
+  setReplay(id, replay, { now = Date.now() } = {}) {
+    const task = this.require(id);
+    if (task.state !== 'review') {
+      throw new Error(`タスク ${task.id} は ${task.state} なので下書きの検証の記録を書き換えません (review のときだけ)`);
+    }
+    const next = { ...task, replay, updatedAt: isoAt(now) };
+    this.write(task.id, next);
+    return next;
+  }
+
+  /**
+   * 複数件の touch を**1 回の保存で**入れる (移行 CLI の書き込み口)。
+   *
+   * `setTouch` を件数ぶん呼ぶと、保存も件数ぶんに分かれる — k 件目の保存が I/O で
+   * 落ちると、1〜k-1 件目だけが移行された台帳が残る。touch 不明の非終端タスクが
+   * 1 件でも残ると起票が全件断られる (`planFiling`) ので、途中まで移行された台帳は
+   * 「移行したのにチャンネルが止まったまま」に見える。
+   *
+   * 検証は `planTouchMigration` と同じ判定で**書く前に全件**行い、1 件でも通らなければ
+   * 何も書かない。保存に失敗したときはメモリも元へ戻る (`commit`)。
+   *
+   * @param {Iterable<[string, string[]]>} entries id → touch
+   * @returns {object[]} 更新後のタスク (渡した順)
+   * @throws {Error} 1 件でも対象外・不在・重複・正規形でないとき / 保存に失敗したとき
+   */
+  setTouchMany(entries, { now = Date.now() } = {}) {
+    const planned = planTouchMigration(this.list(), entries);
+    if (!planned.ok) throw new Error(planned.reason);
+    if (planned.plan.length === 0) return [];
+    const at = isoAt(now);
+    const next = { ...this.data };
+    const updated = planned.plan.map(({ id, touch }) => {
+      const task = { ...this.require(id), touch, updatedAt: at };
+      next[id] = task;
+      return task;
+    });
+    this.commit(next);
+    return updated;
+  }
+
+  /**
+   * 終わってから保持期間を過ぎたタスクを、終わった月ごとのファイル (`<dir>/tasks-YYYY-MM.json`) へ
+   * 移す (起動時と 1 日 1 回 — src/index.js)。どれを移すかは `planTaskArchive`。
+   *
+   * **アーカイブへ書いてからボードから消す。** 逆順だと、間で落ちたときにタスクがどちらにも
+   * 無くなる。この順なら落ちても両方に同じものが残るだけで、次の回が同じ id を上書きして消す。
+   * 月のファイルはボードと同じ id → タスクの object (集計の `readBoard` がそのまま読める) で、
+   * 既にあるファイルへは id で足す。
+   *
+   * 月のファイルが読めない・書けないときは、その月の分だけボードに残して先へ進み、理由を返す
+   * (壊れたファイルの上からは書かない — `JsonStore`)。移すものが無ければ何も書かない。
+   * ボードが読めないときも何もしない (メモリが空なので移すものが無い)。
+   *
+   * @param {{dir: string, now?: number, afterMs?: number}} options
+   * @returns {{moved: number, files: string[], errors: string[]}} files は書いたファイルの名前
+   */
+  archiveEnded({ dir, now = Date.now(), afterMs = TASK_ARCHIVE_AFTER_MS } = {}) {
+    const result = { moved: 0, files: [], errors: [] };
+    if (this.broken || !dir) return result;
+    // 採番の正本はキーの最大値 (nextId)。タスクの id と食い違う手編集があっても、そのキーは残す
+    const top = Number.parseInt(this.nextId(), 10) - 1;
+    const byMonth = new Map();
+    for (const { task, month } of planTaskArchive(this.list(), { now, afterMs })) {
+      if (this.data[String(top)] === task) continue;
+      if (!byMonth.has(month)) byMonth.set(month, []);
+      byMonth.get(month).push(task);
+    }
+    const archived = new Set();
+    for (const [month, tasks] of byMonth) {
+      const name = `tasks-${month}.json`;
+      try {
+        const file = new JsonStore(join(dir, name));
+        file.commit({ ...file.data, ...Object.fromEntries(tasks.map((task) => [String(task.id), task])) });
+        for (const task of tasks) archived.add(task);
+        result.files.push(name);
+      } catch (err) {
+        result.errors.push(`${name}: ${err.message}`);
+      }
+    }
+    if (archived.size === 0) return result;
+    const next = {};
+    for (const [key, value] of Object.entries(this.data)) {
+      if (!archived.has(value)) next[key] = value;
+    }
+    this.commit(next);
+    result.moved = archived.size;
+    return result;
+  }
+
+  /**
    * 遷移の実体。**表に無い辺は書き込む前に拒否する** (拒否した時はディスクもメモリも動かない)。
    *
    * @param {string} id
@@ -598,7 +810,7 @@ export class TaskBoardStore extends JsonStore {
     if (!canTransition(task.state, to)) {
       throw new Error(
         `タスク ${task.id} は ${task.state} から ${to} へ進めません `
-        + '(タスクの遷移表 TRANSITIONS に無い)',
+        + `(docs/social-engineering.md §3.2 の遷移表に無い)`,
       );
     }
     const at = isoAt(now);

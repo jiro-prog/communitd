@@ -1,4 +1,3 @@
-// @ts-check
 // スレッドの transcript からモデルへ渡す prompt を組む (src/index.js から切り出し)。
 // 取捨の判断は src/transcript.js (selectTranscript)、添付の取得は src/attachments.js。
 // ここは Discord の fetch と整形だけを持つ。
@@ -14,7 +13,7 @@ import { selectTranscript } from '../transcript.js';
 // 🔐 は承認待ちの placeholder、ℹ️ は権限通知の注記 (どちらも job の状態であって発言ではない)。
 // 承認カード本文は `**` 始まりなのでここには載らない — カードはスレッドの中身として
 // 次の文脈にも出るのが正 (何を申請したかが agent 側からも見える)
-// 🛟 は停滞の通知 — job の状態であって発言ではない
+// 🛟 は停滞の通知 (§11.2) — job の状態であって発言ではない
 export const INFRA_PREFIXES = ['⏳', '⚙️', '⚠️', '❌', '⏹', '🔐', 'ℹ️', '🛟'];
 
 /**
@@ -60,8 +59,7 @@ export function attachmentSuffix(msg, refs) {
 /**
  * @param {object} deps
  * @param {Map<string, {key: string, userId: string|null}>} deps.bots 起動中の bot (自分たちの投稿の判定に使う)
- * @param {{fetchLimit: number, transcriptCharBudget: number,
- *   attachments: import('../attachments.js').AttachmentLimits}} deps.limits
+ * @param {{fetchLimit: number, transcriptCharBudget: number, attachments: object}} deps.limits
  */
 export function createPromptBuilder({ bots, limits }) {
   const FETCH_LIMIT = limits.fetchLimit;
@@ -73,7 +71,11 @@ export function createPromptBuilder({ bots, limits }) {
     return authorIsOurs && INFRA_PREFIXES.some((p) => msg.content.startsWith(p));
   }
 
-  async function buildPrompt(bot, triggerMsg, thread, entry, includeSelf = false) {
+  /**
+   * @param {{charBudget?: number}} [opts] `charBudget` は遡り分の文字数予算をこの呼び出しだけ絞る
+   *   (セッションを切った直後の再構築 — 切った直後が大きいと、すぐしきい値に届いて切り続ける)
+   */
+  async function buildPrompt(bot, triggerMsg, thread, entry, includeSelf = false, { charBudget = TRANSCRIPT_CHAR_BUDGET } = {}) {
     // 前回このボットが読んだ位置以降 (新規セッションなら遡り + トリガー以降) の発言を集める。
     // history = 予算超過時に落としてよい遡り分 / required = 落とすと恒久欠落する分。
     // 既読カーソル経由で拾った差分は「次回はもう読まれない」ので全件 required にする
@@ -130,7 +132,7 @@ export function createPromptBuilder({ bots, limits }) {
       botUserId: bot.userId,
       includeSelf,
       isInfra: isInfraMessage,
-      charBudget: TRANSCRIPT_CHAR_BUDGET,
+      charBudget,
       measure: (m) => formatLine(m, null).length + 1,
     });
 

@@ -161,7 +161,7 @@ test('society: mode が off なら担当が居なくても起動できる (機�
   }), []);
 });
 
-test('society: observe / active は担当 bot が実在し codex でないことを求める', () => {
+test('society: observe / active は担当 bot が実在し構造化出力を返せることを求める', () => {
   for (const mode of ['observe', 'active']) {
     // 書いた担当が居ない (既定の解決は config.bots の先頭へ倒すので、明示指定で見る)
     const absent = validateSociety({
@@ -174,14 +174,14 @@ test('society: observe / active は担当 bot が実在し codex でないこと
       channels: { 'society-trial': {} }, bots: { opus: {} }, society: { mode },
     }), []);
 
-    const codex = validateSociety(society({ mode, authority: 'sol' }));
-    assert.ok(codex.some((e) => e.includes('runtime: "codex"')), codex.join(' / '));
+    // **P-3 で反転**: codex も構造化出力を返せるので担当になれる
+    assert.deepEqual(validateSociety(society({ mode, authority: 'sol' })), []);
     assert.deepEqual(validateSociety(society({ mode })), []);
     assert.deepEqual(validateSociety(society({ mode, authority: 'opus2' })), []);
   }
 });
 
-test('society: 既定の担当は config.bots の先頭だが、明示指定は倒さない', () => {
+test('society: 既定の担当は config.bots の先頭だが、明示指定は倒さない (§12.4)', () => {
   // **コードは bot キーを決め打ちしない** — 顔ぶれは配備ごとに違う
   const oneBot = { channels: { 'society-trial': {} }, bots: { second: {} }, society: { mode: 'observe' } };
   assert.equal(defaultSocietyAuthority(oneBot), 'second');
@@ -189,13 +189,14 @@ test('society: 既定の担当は config.bots の先頭だが、明示指定は�
   assert.deepEqual(validateSociety(oneBot), []);
 
   assert.equal(defaultSocietyAuthority({ bots: { first: {}, second: {} } }), 'first');
-  // codex ランタイムは候補にしない (構造化出力を返せない)
-  assert.equal(defaultSocietyAuthority({ bots: { first: { runtime: 'codex' }, second: {} } }), 'second');
+  // **P-3 で反転**: 外すのは「構造化出力を返せないランタイム」で、codex はもう該当しない
+  // (現表では全ランタイムが候補になるので、この門が効くのは 3 つ目の CLI が載った日)
+  assert.equal(defaultSocietyAuthority({ bots: { first: { runtime: 'codex' }, second: {} } }), 'first');
+  assert.equal(defaultSocietyAuthority({ bots: { first: { runtime: 'codex' } } }), 'first');
   // 候補が居なければ null。稼働条件の検証が「担当を決められない」として落とす
-  assert.equal(defaultSocietyAuthority({ bots: { first: { runtime: 'codex' } } }), null);
   assert.equal(defaultSocietyAuthority({ bots: {} }), null);
   const noCandidate = validateSociety({
-    channels: { 'society-trial': {} }, bots: { first: { runtime: 'codex' } }, society: { mode: 'observe' },
+    channels: { 'society-trial': {} }, bots: {}, society: { mode: 'observe' },
   });
   assert.equal(noCandidate.length, 1, noCandidate.join('\n'));
   assert.match(noCandidate[0], /担当になれる bot/);
@@ -213,7 +214,8 @@ test('society: Mandate ごとの authority も実在と runtime を見る', () =
     mode: 'active',
     mandates: { delivery: mandate({ authority: 'sol' }), quality: mandate({ authority: 'nobody' }) },
   }));
-  assert.ok(errs.some((e) => e.includes('society.mandates.delivery.authority') && e.includes('codex')), errs.join(' / '));
+  // **P-3 で反転**: codex の担当 (delivery) はもう落ちない。実在しない担当だけが残る
+  assert.ok(!errs.some((e) => e.includes('society.mandates.delivery.authority')), errs.join(' / '));
   assert.ok(errs.some((e) => e.includes('society.mandates.quality.authority') && e.includes('nobody')), errs.join(' / '));
 });
 
@@ -260,7 +262,7 @@ test('society: 担当を bots ではなく注入で渡せる (config を組み�
   assert.deepEqual(validateSociety(config, { bots: { fable: {} } }), []);
 });
 
-// ---- 受諾時の実効権限 ----
+// ---- 受諾時の実効権限 (docs/society-ledger.md §3・受入 C05) ----
 
 const BOTS = {
   opus: { runtime: 'claude', online: true },
@@ -282,9 +284,10 @@ test('実効権限: 落ちる分岐は理由をすべて返す', () => {
   assert.equal(offline.ok, false);
   assert.ok(offline.reasons.some((r) => /起動していません/.test(r)));
 
+  // **P-3 (2026-09-18) で反転。** codex は `--output-schema` で引受けを構造化して返せる
+  // ので、ランタイムを理由には落とさない (門は能力表の `schema` に残っている)
   const codex = checkEffectivePermission({ botKey: 'sol', bots: BOTS });
-  assert.equal(codex.ok, false);
-  assert.ok(codex.reasons.some((r) => /codex/.test(r)));
+  assert.deepEqual(codex, { ok: true, reasons: [] });
 
   const plain = checkEffectivePermission({
     botKey: 'opus', bots: BOTS, structuredOutput: false, channelName: 'chat',
@@ -305,9 +308,10 @@ test('実効権限: 落ちる分岐は理由をすべて返す', () => {
   assert.equal(offRoster.ok, false);
   assert.ok(offRoster.reasons.some((r) => /編成に入っていません/.test(r)));
 
-  // 複数落ちたら全部返す (1 つ直したら次が出る、を繰り返さない)
+  // 複数落ちたら全部返す (1 つ直したら次が出る、を繰り返さない)。
+  // **P-3 で codex が理由から外れた**ので、3 つ目は「起動していない」で数える
   const many = checkEffectivePermission({
-    botKey: 'sol', bots: BOTS, channelName: 'chat', structuredOutput: false, roster: ['fable'],
+    botKey: 'ghost', bots: BOTS, channelName: 'chat', structuredOutput: false, roster: ['fable'],
   });
   assert.equal(many.ok, false);
   assert.equal(many.reasons.length, 3, many.reasons.join(' / '));

@@ -18,7 +18,7 @@ import {
 } from './adjudication.js';
 import { digestOf, isTerminal } from './proposals.js';
 import { formatInbox } from './inbox.js';
-import { isAuthorizedSender } from './authz.js';
+import { isAuthorizedSender, roleIdsOf } from './authz.js';
 import { grantFingerprint } from './grants.js';
 import { formatPauseState, resolveCaseRequest, resolveStopScope } from './commands.js';
 import { formatJst } from './time.js';
@@ -94,17 +94,20 @@ export function createInteractionHandler({
   reissueReview = null,
   // 適用の基点を返す非同期関数 (git を読むのでここでは持たない)。省略すると基点なしで裁定する
   resolveBaseCommit = null,
-  // 復旧待ちの一覧 (`/inbox` の 4 節目)。省略すると節が出ない
+  // 復旧待ちの一覧 (`/inbox` の 4 節目 — §11.2)。省略すると節が出ない
   recoveryRows = null,
-  // `/retry` の実体 (board・実行記録・キュー・契約・bots を持つ index 側)。省略すると無効
+  // `/retry` の実体 (§11.3 — board・実行記録・キュー・契約・bots を持つ index 側)。省略すると無効
   retryTask = null,
-  // `/status` の実体。チャンネル名を受けて 1 通の本文を返す。省略すると無効
+  // `/status` の実体 (§11.5)。チャンネル名を受けて 1 通の本文を返す。省略すると無効
   statusReport = null,
-  // `/case` の実体。台帳の読み書きは society の配線が持つ。省略すると無効
+  // `/case` の実体 (docs/society-ledger.md)。台帳の読み書きは society の配線が持つ。省略すると無効
   caseCommand = null,
-  // `/stop` で案件へ停止マーカーを付ける実体。省略すると案件は止まらない
+  // `/stop` で案件へ停止マーカーを付ける実体 (§12.2 (g))。省略すると案件は止まらない
   // (社会を持たない配備・mode off はここが no-op になる)
   societyStop = null,
+  // `/stop scope:all` で受付 (src/bridge/intake.js の abortAll) も止める口。止めた数を返す。
+  // 受付はキューに載らない (レーンの外で走る) ので stopJobs では撃てない。省略すると受付は止まらない
+  stopIntake = null,
 }) {
   // 配線漏れを実行時まで持ち越さない。承認台帳があるのに保存先が無い状態で
   // 起動すると、押せるカードが出て「承認したのに何も保存されない」ことになる
@@ -120,7 +123,7 @@ export function createInteractionHandler({
   return async function onInteraction(bot, interaction) {
     if (interaction?.isButton?.()) {
       // 裁定カードとツール権限カードは**別系統**。custom ID の接頭辞で振り分け、
-      // 認可も台帳も共有しない (数日待つ裁定を 30 分の承認と混ぜない)
+      // 認可も台帳も共有しない (§3.9 — 数日待つ裁定を 30 分の承認と混ぜない)
       const proposalButton = parseProposalCustomId(interaction.customId);
       if (proposalButton) await handleProposalButton(interaction, proposalButton);
       else await handleApprovalButton(bot, interaction);
@@ -141,6 +144,7 @@ export function createInteractionHandler({
         authorId: interaction.user?.id,
         isBot: false,
         ourBotIds: [],
+        roleIds: roleIdsOf(interaction.member),
       })
     ) {
       await replyQuietly(interaction, '⚠️ このサーバー / ユーザーからの操作は許可されていません');
@@ -219,6 +223,7 @@ export function createInteractionHandler({
         authorId: interaction.user?.id,
         isBot: false,
         ourBotIds: [],
+        roleIds: roleIdsOf(interaction.member),
       }),
     });
 
@@ -297,7 +302,7 @@ export function createInteractionHandler({
     } catch { /* カードを描き直せなくても許可の可否は確定している */ }
   }
 
-  // ---- 組織提案の裁定 ----
+  // ---- 組織提案の裁定 (§3.9) ----
 
   /**
    * 裁定の入口で毎回通す関門。**押した人・提案・現在の digest を一度に揃える。**
@@ -318,7 +323,12 @@ export function createInteractionHandler({
       return { ok: false };
     }
     if (!isAuthorizedSender({
-      config, guildId: interaction.guildId, authorId: interaction.user?.id, isBot: false, ourBotIds: [],
+      config,
+      guildId: interaction.guildId,
+      authorId: interaction.user?.id,
+      isBot: false,
+      ourBotIds: [],
+      roleIds: roleIdsOf(interaction.member),
     })) {
       await say('⚠️ このサーバー / ユーザーからの操作は許可されていません');
       return { ok: false };
@@ -540,7 +550,7 @@ export function createInteractionHandler({
   }
 
   /**
-   * /status — このチャンネルの状況。集計と描画は index 側 (`statusReport`) が
+   * /status — このチャンネルの状況 (§11.5)。集計と描画は index 側 (`statusReport`) が
    * board・実行記録・pause・勘定を持って行い、ここはチャンネル名を渡して本文を出すだけ。
    * スレッドで打てば親チャンネルの状況になる (channelConfigFor と同じ解決)。
    */
@@ -590,7 +600,7 @@ export function createInteractionHandler({
     // **案件を開く / 相談を出す / 停止を解除するのは owner だけ** (Fable 裁定 2026-09-08)。
     // 予算と責任を動かす操作なので org 提案の裁定と同じ扱いにする。一覧と詳細は許可ユーザー
     // 全員が読める。ownerUserId が未設定なら誰も通さない (fail-closed — 設定漏れを「全員可」にしない)。
-    // 再開が owner 限定なのは「解除は owner の操作か同じ認可の操作だけ」
+    // 再開が owner 限定なのは §12.2 (g) —「解除は owner の操作か同じ認可の操作だけ」
     if (['new', 'offer', 'resume'].includes(resolved.request.action)
       && (!ownerUserId || interaction.user?.id !== ownerUserId)) {
       await respond(interaction, '⚠️ 案件を開く / 相談を出す / 停止を解除できるのは作者 (ownerUserId) だけです', acked);
@@ -613,7 +623,7 @@ export function createInteractionHandler({
   }
 
   /**
-   * /retry — 止まったタスクを同じ仕事の続きとして起こし直す。
+   * /retry — 止まったタスクを同じ仕事の続きとして起こし直す (§11.3)。
    *
    * `/review` と同じ型: 判断も実行も index 側 (`retryTask`)、ここは「タスクのスレッドで
    * 打たれたか」の門番と結果の表示だけ。認可は既存の許可ユーザー (入口で済んでいる)。
@@ -723,7 +733,7 @@ export function createInteractionHandler({
    * - **終端の提案** … `withdrawn` / `measured` / `adjudicated:rejected`。store 側も遷移表で
    *   断るが、理由が「終端からは動かせません」になるので、ここで状態を添えて返す
    * - **適用中の提案** … 錠 (`applyTaskId`) が掛かっている = 適用 task と作業ツリーが
-   *   生きている。先に閉じると検収の宛先が消えて後始末の道が無くなる
+   *   生きている。先に閉じると検収の宛先が消えて後始末の道が無くなる (§3.9)
    */
   async function withdrawProposal(interaction, proposal, reason, acked) {
     const shown = escapeForDisplay(String(proposal.id));
@@ -754,7 +764,7 @@ export function createInteractionHandler({
   }
 
   /**
-   * /inbox — 作者を待っているもの (停止・質問 / 稟議 / 要人間) の一覧。
+   * /inbox — 作者を待っているもの (停止・質問 / 稟議 / 要人間) の一覧 (§10.4)。
    *
    * **正本は動かさない。** 台帳を持つのは停止通知だけで、稟議と blocked は
    * ここで読むだけ。だから稟議 / blocked は `close` の対象にしない — あちらは
@@ -825,7 +835,7 @@ export function createInteractionHandler({
     });
     const threadId = inThread ? interaction.channel.id : null;
 
-    // 案件 (自律社会) の停止マーカーは **job を止めるより先に**付ける —
+    // 案件 (自律社会) の停止マーカーは **job を止めるより先に**付ける (§12.2 (g)) —
     // 先に印があれば、実行中 job の settle も待機中 job の取り消しも台帳の停止分岐に入り、
     // 結果は残しつつ案件は動かない。後から付けると、その間に届いた戻りが案件を進めてしまう
     let stopped = null;
@@ -861,6 +871,16 @@ export function createInteractionHandler({
     // **案件ごとに 1 行**。止めた本人がそのまま再開の口を打てるように、id 付きで書く
     for (const caseId of stopped?.stopped ?? []) {
       lines.push(`⏹ 案件 ${escapeForDisplay(String(caseId))} も停止しました (再開は \`/case resume:${caseId}\`)`);
+    }
+    // 受付は全体停止のときだけ (スレッドの /stop はそのスレッドの job の話 — 受付はチャンネル直下で動く)
+    if (all && typeof stopIntake === 'function') {
+      let intakeStopped = 0;
+      try {
+        intakeStopped = stopIntake();
+      } catch (err) {
+        lines.push(`⚠️ 受付を止められませんでした (${escapeForDisplay(String(err?.message ?? err))})`);
+      }
+      if (intakeStopped > 0) lines.push(`⏹ 受付 ${intakeStopped} 件も止めました (振り分けていない投稿は貼り直してください)`);
     }
     await respond(interaction, lines.join('\n').slice(0, 1900), acked);
   }
@@ -943,7 +963,7 @@ export function createInteractionHandler({
   }
 
   /**
-   * /pause・/resume 処理 (自律運転の kill switch)。
+   * /pause・/resume 処理 (docs/social-engineering.md §3.7 の kill switch)。
    *
    * **止めるのは自律起動だけ。** 実行中の job は殺さず、人間のメンション・handoff・
    * 自己呼び出しは従来どおり通る — 「社会が勝手に動き出すのを止める」ためのもので、
@@ -957,7 +977,7 @@ export function createInteractionHandler({
       await respond(interaction, '⚠️ 自律運転の停止機能が無効です', acked);
       return;
     }
-    // 台帳が読めないときは停止扱いで固定。**どちらの操作も効かない** —
+    // 台帳が読めないときは停止扱いで固定 (§12.3 (1))。**どちらの操作も効かない** —
     // 書けば壊れた中身 (人が直すための証拠) が消えるし、解けてしまえば
     // 「pause.json を壊せば kill switch が外れる」経路になる
     const broken = pauseStore.broken ?? null;
@@ -1034,47 +1054,86 @@ export function createInteractionHandler({
       return;
     }
 
-    // 再起動が確定した — **最初の await より前に**受付を閉じる。応答を待っている
-    // 数百 ms の間に届いたメンションを spawn すると、直後の shutdown で中断される
-    // だけの job が生まれる (sol 指摘)。job の有無によらず閉じる
-    lifecycle.stopAccepting();
-
-    // stop all 相当 — 実行中は abort、待機は取り消してから落とす。
-    // **job が 0 件でも通す。** キューに載っていない受付 (⏳ の送信中) が
-    // 残っていることがあり、busy 判定だけで分岐すると取りこぼす (sol 指摘)
-    const { active, dequeued, cancelled } = stopJobs(jobs, {
-      all: true, message: CANCEL_ON_RESTART, stopKind: STOP_BY.SHUTDOWN,
-    });
-    // 取消編集・応答・drain・進行中の受付を**同じ起点から並行に**走らせ、全体を
-    // 1 つの締め切り (restartDrainMs = 作者裁定 30 秒) に収める。直列にすると
-    // 待ち時間が足し算になって裁定した上限を超える (sol 指摘)。
-    // 応答を待たずに drain を始めるのも要点 — 応答が返らないだけで中断完了の
-    // 確認が始まらないのは本末転倒。ここはまだ shutdown の hardExit の管理外
-    // なので、返らない I/O は自前の上限で打ち切る (でないと受付を閉じたまま居座る)。
-    // allSettled なのは 1 本の失敗で締め切り待ちごと倒さないため
-    await withDeadline(
-      Promise.allSettled([
-        cancelled,
-        // 応答は drain の完了を待たずに返す (待つと再起動の間に interaction が失効する)
-        respond(
-          interaction,
-          verdict.busy
-            ? `🔄 再起動します (実行中 ${active.length} 件へ中断を送信・待機 ${dequeued.length} 件を取り消し)`
-            : '🔄 再起動します',
-          acked,
-        ),
-        active.length > 0 ? waitForJobsDrained(restartDrainMs) : Promise.resolve(),
-        lifecycle.waitForAdmissions(),
-      ]),
+    // 再起動が確定した。手順の本体は restartBridge (再起動の依頼 = data/restart-request.json
+    // の経路と共有)。**同期のまま呼ぶ** — restartBridge は最初の await より前に受付を閉じる
+    await restartBridge({
+      jobs,
+      lifecycle,
+      waitForJobsDrained,
+      writeRestartNotice,
+      shutdown,
       restartDrainMs,
-    );
-
-    writeRestartNotice({ channelId: interaction.channelId, botKey: bot.key });
-    // 上の 1 枠 (restartDrainMs = 作者裁定 30 秒) で drain も進行中の受付も
-    // 待ち切っている。drained を伝えないと shutdown 側が待ち直し、実効待機が
-    // 30 秒 + shutdown 側の枠になって裁定とずれる (sol 指摘)
-    await shutdown(RESTART_EXIT_CODE, CANCEL_ON_RESTART, { drained: true });
+      notice: { channelId: interaction.channelId, botKey: bot.key },
+      // 応答は drain の完了を待たずに返す (待つと再起動の間に interaction が失効する)
+      announce: ({ active, dequeued }) => respond(
+        interaction,
+        verdict.busy
+          ? `🔄 再起動します (実行中 ${active.length} 件へ中断を送信・待機 ${dequeued.length} 件を取り消し)`
+          : '🔄 再起動します',
+        acked,
+      ),
+    });
   }
+}
+
+/**
+ * 再起動の手順 (/restart と再起動の依頼で共有)。中断してよいかの判断は呼び出し側が済ませている。
+ *
+ * @param {object} p
+ * @param {object} p.jobs
+ * @param {object} p.lifecycle
+ * @param {(ms: number, label?: string) => Promise<void>} p.waitForJobsDrained
+ * @param {(notice: object) => void} p.writeRestartNotice
+ * @param {(code: number, cancelMessage?: string, opts?: object) => Promise<void>} p.shutdown
+ * @param {number} p.restartDrainMs
+ * @param {{channelId: string, botKey: string}|null} [p.notice] 再起動後に「✅ 再起動完了」を出す先 (無ければ出さない)
+ * @param {(stopped: {active: object[], dequeued: object[]}) => unknown} [p.announce] 中断と並行に走らせる告知
+ */
+export async function restartBridge({
+  jobs, lifecycle, waitForJobsDrained, writeRestartNotice, shutdown, restartDrainMs,
+  notice = null, announce = () => undefined,
+}) {
+  // **最初の await より前に**受付を閉じる。応答を待っている数百 ms の間に届いた
+  // メンションを spawn すると、直後の shutdown で中断されるだけの job が生まれる
+  // (sol 指摘)。job の有無によらず閉じる
+  lifecycle.stopAccepting();
+
+  // stop all 相当 — 実行中は abort、待機は取り消してから落とす。
+  // **job が 0 件でも通す。** キューに載っていない受付 (⏳ の送信中) が
+  // 残っていることがあり、busy 判定だけで分岐すると取りこぼす (sol 指摘)
+  const { active, dequeued, cancelled } = stopJobs(jobs, {
+    all: true, message: CANCEL_ON_RESTART, stopKind: STOP_BY.SHUTDOWN,
+  });
+  // 取消編集・告知・drain・進行中の受付を**同じ起点から並行に**走らせ、全体を
+  // 1 つの締め切り (restartDrainMs = 作者裁定 30 秒) に収める。直列にすると
+  // 待ち時間が足し算になって裁定した上限を超える (sol 指摘)。
+  // 告知を待たずに drain を始めるのも要点 — 応答が返らないだけで中断完了の
+  // 確認が始まらないのは本末転倒。ここはまだ shutdown の hardExit の管理外
+  // なので、返らない I/O は自前の上限で打ち切る (でないと受付を閉じたまま居座る)。
+  // allSettled なのは 1 本の失敗で締め切り待ちごと倒さないため。
+  // announce は **drain より先に同期で呼ぶ** (応答 → drain の順を守る)。同期で投げても
+  // 締め切り待ちごと倒さないよう、例外は rejected として allSettled に渡す
+  let announced;
+  try {
+    announced = announce({ active, dequeued });
+  } catch (err) {
+    announced = Promise.reject(err);
+  }
+  await withDeadline(
+    Promise.allSettled([
+      cancelled,
+      announced,
+      active.length > 0 ? waitForJobsDrained(restartDrainMs) : Promise.resolve(),
+      lifecycle.waitForAdmissions(),
+    ]),
+    restartDrainMs,
+  );
+
+  if (notice) writeRestartNotice(notice);
+  // 上の 1 枠 (restartDrainMs = 作者裁定 30 秒) で drain も進行中の受付も
+  // 待ち切っている。drained を伝えないと shutdown 側が待ち直し、実効待機が
+  // 30 秒 + shutdown 側の枠になって裁定とずれる (sol 指摘)
+  await shutdown(RESTART_EXIT_CODE, CANCEL_ON_RESTART, { drained: true });
 }
 
 /**
@@ -1208,9 +1267,6 @@ export async function admitJob({
  * (sol 指摘)。全体の上限は hardExitMs。
  *
  * @param {object} p
- * @param {import('./queue.js').JobQueue} [p.jobs]
- * @param {object} [p.lifecycle]
- * @param {string} [p.cancelMessage] 待機中の job の placeholder に書く文言
  * @param {number} p.drainMs      中断完了を待つ上限。**hardExitMs より短いこと**。
  *        0 なら drain しない
  * @param {number} p.hardExitMs   Discord API が固まっても必ず終わる保険
@@ -1219,9 +1275,11 @@ export async function admitJob({
  * @param {(ms: number) => Promise<void>} p.drain  中断完了待ち
  * @param {() => Promise<unknown>} p.destroyClients Discord client の切断
  * @param {() => void} p.exit     プロセス終了 (process.exit)
- * @param {(() => unknown)|null} [p.abortOrgApply] **job ではない子プロセス**の中断。
+ * @param {() => unknown} [p.abortOrgApply] **job ではない子プロセス**の中断。
  *        org-apply の verify は tick から走るのでキューに居らず、`stopJobs` では撃てない
  *        (`/stop` の対象外なのも同じ理由 — あれはスレッド単位の job 停止)
+ * @param {() => unknown} [p.abortIntake] 受付 (src/bridge/intake.js の abortAll) の中断。
+ *        受付もレーンの外で走るのでキューに居ない (こちらは `/stop scope:all` からも撃つ)
  * @returns {Promise<boolean>} 自分が終了処理を走らせたなら true (二重呼び出しは false)
  */
 export async function runShutdown({
@@ -1235,6 +1293,7 @@ export async function runShutdown({
   destroyClients,
   exit,
   abortOrgApply = null,
+  abortIntake = null,
 }) {
   if (!lifecycle.beginShutdown()) return false;
   const hardExit = setTimeout(exit, hardExitMs);
@@ -1246,6 +1305,10 @@ export async function runShutdown({
   if (typeof abortOrgApply === 'function') {
     try { abortOrgApply(); }
     catch (err) { console.error(`[org-apply] 停止を伝えられませんでした: ${err.message}`); }
+  }
+  if (typeof abortIntake === 'function') {
+    try { abortIntake(); }
+    catch (err) { console.error(`[intake] 停止を伝えられませんでした: ${err.message}`); }
   }
   await Promise.all([
     cancelled,

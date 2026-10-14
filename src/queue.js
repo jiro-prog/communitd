@@ -1,4 +1,3 @@
-// @ts-check
 import { resolve } from 'node:path';
 
 // cwd レーン単位のジョブキュー (副作用なし — タイマーも I/O も持たない)。
@@ -50,6 +49,7 @@ export function formatJobMetrics({
   cacheReadTokens,
   cacheWriteTokens,
   outputTokens,
+  contextTokens,
   verifyMs,
   verifyPassed,
   verifyAttempts,
@@ -70,7 +70,7 @@ export function formatJobMetrics({
     ...(count(contextMessages) === null
       ? []
       : [`ctx ${count(contextMessages)} 件 (省略 ${count(omittedMessages) ?? 0})`]),
-    ...tokenParts({ inputTokens, cacheReadTokens, cacheWriteTokens, outputTokens }),
+    ...tokenParts({ inputTokens, cacheReadTokens, cacheWriteTokens, outputTokens, contextTokens }),
     // 「最初の編集までに何回読んだか」は文脈注入が足りているかの代理指標。
     // 編集の無い job では取れないので括弧ごと落とす。失敗 0 件のときも書かない
     ...(count(toolCalls) === null
@@ -105,7 +105,7 @@ function parenthesize(notes) {
  * トークン内訳を 1 パートへ畳む。in / out が両方取れなければパートごと出さない
  * (キャッシュの値だけが単独で並んでも読めないため)。
  */
-function tokenParts({ inputTokens, cacheReadTokens, cacheWriteTokens, outputTokens }) {
+function tokenParts({ inputTokens, cacheReadTokens, cacheWriteTokens, outputTokens, contextTokens }) {
   const head = [
     tokens(inputTokens) === null ? null : `in ${tokens(inputTokens)}`,
     tokens(outputTokens) === null ? null : `out ${tokens(outputTokens)}`,
@@ -116,6 +116,8 @@ function tokenParts({ inputTokens, cacheReadTokens, cacheWriteTokens, outputToke
       + parenthesize([
         tokens(cacheReadTokens) === null ? null : `cacheR ${tokens(cacheReadTokens)}`,
         tokens(cacheWriteTokens) === null ? null : `cacheW ${tokens(cacheWriteTokens)}`,
+        // 最後のリクエストの文脈 = セッションを切るかの物差し (src/session-cut.js)
+        tokens(contextTokens) === null ? null : `文脈 ${tokens(contextTokens)}`,
       ]),
   ];
 }

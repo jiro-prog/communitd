@@ -1,5 +1,5 @@
 // 1 ターンの成果物を Discord へ届ける配線 (src/index.js から切り出し)。
-// 投稿順と完了境界 (postTurn)、添付 (sendAttachments)、停止通知の受信箱への記録。
+// 投稿順と完了境界 (postTurn)、添付 (sendAttachments)、停止通知の受信箱への記録 (§10)。
 // 順序の判断は src/delivery.js (deliverTurn) が持つ。
 import { AttachmentBuilder } from 'discord.js';
 import { randomUUID } from 'node:crypto';
@@ -36,12 +36,17 @@ import { formatVerifyResult } from '../verify.js';
  * @param {(userId: string|null|undefined) => string|null} deps.botKeyOf
  * @param {() => Array<{key: string, displayName: string, userId: string|null}>} deps.botEntries
  * @param {(cc: object) => string} deps.contractCwd 契約を束縛する cwd (リポジトリ本体)
- * @param {(p: object) => Promise<boolean>} deps.noteTaskCompletion worker の完了報告でタスクをレビューへ進める
+ * @param {(p: object) => Promise<{submitted: boolean, summoned: boolean}>} deps.noteTaskCompletion
+ *   worker の完了報告でタスクをレビューへ進める (verify NG のままレビューへ回す経路も含む)
+ * @param {(p: object) => 'review'|null} [deps.taskVerifyRoute] verify 最終 NG の板タスクの行き先
+ *   (§12.3 (3) の (ii))。**決めるのはここ 1 か所**で、決めた結果を `noteTaskCompletion` へ
+ *   `route` として渡す。渡さなければ (dep 無し) 従来どおり全部「投げ手へ戻す」
  * @param {(thread: object, bot: object, cc: object, denials: object[], askLedger: object|null) => Promise<void>} deps.postApprovalRequests
  */
 export function createTurnWiring({
   config, inbox, contracts, ownerTargets: OWNER_TARGETS, limits,
-  botKeyOf, botEntries, contractCwd, noteTaskCompletion, postApprovalRequests,
+  botKeyOf, botEntries, contractCwd, noteTaskCompletion, taskVerifyRoute = null,
+  postApprovalRequests,
 }) {
   const ATTACHMENT_LIMITS = limits.attachments;
 
@@ -96,7 +101,7 @@ export function createTurnWiring({
     {
       verifyResult = null, traceSummary = null, askLedger = null,
       outgoingText = null, contractOut = null, contractNotes = [], run = null,
-      issuerBotKey = null, societyAction = null,
+      issuerBotKey = null, societyAction = null, handle = null,
     } = {},
   ) {
     // マーカー行は本文から取り除いてから送る (Discord にマーカーを晒さない)。
@@ -193,20 +198,27 @@ export function createTurnWiring({
     // verify NG は結果まで配送したうえで**元の handoff を落とす**。配送失敗に偽装しないため、
     // 成功した verify step を throw させず、完了境界へ渡す mention を差し替える。
     //
-    // **落としたままにはしない**。壊れたまま次へ回さないのが門の目的だが、
+    // **落としたままにはしない** (§12.3 (3))。壊れたまま次へ回さないのが門の目的だが、
     // 「誰が受けるか」が無いと人間が次の担当を呼ぶまで仕事が止まる (作者指摘 2026-09-07、2 回)。
     // 代わりに**この job を頼んだ投げ手**へ戻す — 投げ手は touch 集合を広げるか、
     // 直させるか、受け入れるかを決められる唯一の相手 (居なければ owner を呼ぶ)。
     const verifyFailed = Boolean(verifyResult && !verifyResult.ok);
     // **元の宛先が人間への質問 (`[[notify:owner]]`) なら差し替えない** — verify NG は「人間に聞く」を
-    // 無効にしない。戻しに化けると質問が投げ手への handoff になり、受信箱にも残らない
+    // 無効にしない。戻しに化けると質問が投げ手への handoff になり、受信箱 (§10.3) にも残らない
     // (Opus2 レビュー 2026-09-07 Major1)。owner 宛は bot キーが無いので契約も元から保存されない
     const keepNotify = verifyFailed && outgoing.mention?.kind === 'notify';
+    // **板タスクの完了報告が verify NG なら、戻すのではなくレビューへ回す** (§12.3 (3) の (ii)、
+    // 作者の裁定 2026-09-18)。指摘を書ける役へ渡すほうが、投げ手へ戻して「直す番」を
+    // 決め直させるより早い。実際にレビューへ進めるのは**配送後**の noteTaskCompletion で、
+    // ここでは「戻しと handoff を出さない」ことだけを決める (二重に呼ばない)
+    const taskRoute = verifyFailed && !keepNotify && !societyAction && taskVerifyRoute
+      ? taskVerifyRoute({ thread, bot, cc, contractOut, mention: outgoing.mention })
+      : null;
     // **案件付きの job に「投げ手」は居ない。** 起動を投げたのは配送係 (`pickAnnouncer` が
     // 機械的に選んだ bot) で、その bot はこの案件を知らないし、戻しても案件付きでない
-    // 普通の job になるので台帳は動かない。「投げ手が居なければ owner」を
+    // 普通の job になるので台帳は動かない。§12.3 (3) の「投げ手が居なければ owner」を
     // そのまま当てるのが正しい (Opus2 S2-3a 再レビュー)
-    const sendBack = verifyFailed && !keepNotify
+    const sendBack = verifyFailed && !keepNotify && taskRoute !== 'review'
       ? sendBackTarget({
         bot,
         issuerBotKey: societyAction ? null : issuerBotKey,
@@ -217,7 +229,7 @@ export function createTurnWiring({
       : null;
     let handoffMention = !verifyFailed || keepNotify ? outgoing.mention : sendBack?.mention ?? null;
 
-    // **案件に結ばれた job の起動は台帳が決める**。
+    // **案件に結ばれた job の起動は台帳が決める** (docs/society-ledger.md §5・S2-3a)。
     // 自由文の `[[handoff:...]]` を通すと、台帳を経ない Action が生まれ、予算も世代も
     // 照合も効かないまま次の job が走る (「bot の自由文を権限の根拠にしない」)。
     //
@@ -304,7 +316,7 @@ export function createTurnWiring({
         const sent = await sendControlMention(thread, handoffMention, {
           suffix: sendBack?.note ?? (savedFor ? formatContractTag(savedFor.nonce) : ''),
         });
-        // **送れたときだけ**受信箱へ記録する。handoff は作者を待たせないので
+        // **送れたときだけ**受信箱へ記録する (§10.3)。handoff は作者を待たせないので
         // 載せない — 依頼でないものを混ぜた瞬間に「全部読まないと分からない」に戻る
         if (handoffMention?.kind === 'notify') {
           noteOwnerCall({ thread, bot, cc, body: outgoing.body, sent });
@@ -324,9 +336,20 @@ export function createTurnWiring({
     // スレッドには何も無いのにボードだけレビューへ進む
     let taskSubmitted = false;
     if (result.delivered) {
-      taskSubmitted = await noteTaskCompletion({
-        thread, bot, cc, contractOut, mention: outgoing.mention, verifyResult,
-      }) === true;
+      const completion = await noteTaskCompletion({
+        // **配送前に決めた行き先をそのまま渡す** — 同じ判断を 2 か所で持つと、
+        // 片方だけが倒れたときに戻しとレビュー召喚の両方が起きる
+        thread, bot, cc, contractOut, mention: outgoing.mention, verifyResult, route: taskRoute,
+        // job の停止の口 — レビューの証拠の測定が止まったら src と test/ を HEAD へ戻して抜ける
+        handle,
+      });
+      taskSubmitted = completion?.submitted === true;
+      // **レビューへ回すつもりで戻しを止めたのに召喚できなかったら人間を呼ぶ** ((i) へ倒す)。
+      // 止めたままにすると「誰も呼ばれない job」になり、§12.3 (3) の目的が破れる。
+      // タスクは review のまま残るので `/review` で出し直せる (理由の 1 行は board 側が出す)
+      if (taskRoute === 'review' && completion?.summoned !== true) {
+        await notifyReviewSummonFailure({ thread, bot, cc, body: outgoing.body, original: outgoing.mention });
+      }
     }
     // 実行記録へ返す文脈: 誰を呼んだか (呼べたときだけ) と、レビューへ進めたか
     result.handoff = result.handedOff && handoffMention
@@ -354,7 +377,7 @@ export function createTurnWiring({
   }
 
   /**
-   * verify が最終 NG だった job の戻し先。
+   * verify が最終 NG だった job の戻し先 (§12.3 (3))。
    *
    * **戻すのは「頼んだ相手」** — 元の handoff 先ではない。壊れた成果を次の担当へ流さない
    * という門はそのままに、止まったことを**必ず誰かの受信箱へ落とす**ための経路。
@@ -397,6 +420,35 @@ export function createTurnWiring({
           + ` (本文の handoff は実行していません${dropped})`
         : `⛔ verify NG で止まりました — 戻す相手が居ません (元の handoff は実行していません${dropped})`,
     };
+  }
+
+  /**
+   * verify NG の板タスクをレビューへ回せなかったときの退避 (§12.3 (3) の (i))。
+   *
+   * **戻しを止めたのは「レビューが受ける」前提**だったので、召喚が落ちた
+   * (pause 中・reviewer が未起動・自己レビュー禁止・投稿失敗) ときに黙って終わると、
+   * 誰も呼ばれないまま verify NG の報告だけが残る。宛先の解決は戻しと同じ 1 か所を
+   * 通す (`issuerBotKey: null` = 投げ手を見ずに owner へ倒す)。
+   *
+   * 文面は「戻す相手が居ません」ではなく**召喚できなかったこと**を言う — 直前に
+   * board 側が理由の 1 行を出しているので、人間はそれと合わせて読む。
+   */
+  async function notifyReviewSummonFailure({ thread, bot, cc, body, original }) {
+    const fallback = sendBackTarget({ bot, issuerBotKey: null, original, effectiveRoster: null });
+    // owner を設定していない配備では従来どおり黙って止まる (呼ぶ相手が居ない)
+    if (!fallback) return;
+    const dropped = original?.label ? ` / 元の宛先: ${original.label}` : '';
+    try {
+      const sent = await sendControlMention(thread, fallback.mention, {
+        suffix: '⛔ verify NG のままレビューを召喚できませんでした — 次の担当は呼んでいません'
+          + `${dropped} (タスクは review のまま。\`/review\` で出し直せます)`,
+      });
+      noteOwnerCall({ thread, bot, cc, body, sent });
+    } catch (err) {
+      console.error(
+        `[${bot.key} thread:${thread.id}] レビュー召喚の失敗を人間へ通知できません: ${err?.message ?? err}`,
+      );
+    }
   }
 
   /**

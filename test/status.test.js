@@ -108,6 +108,52 @@ test('formatStatus: 自律運転を設定していないチャンネルに「動
   assert.match(paused, /⏸ 自律運転は停止中/);
 });
 
+// 枠待ちの材料: 状態はタスクごとに直接与える (枠の数え方はボードの状態、ラベルは判定の状態)
+const slotStatus = (status, since = null) => ({ status, reason: '', since, waitedMs: null, next: 'unknown', run: null });
+const slotSummary = (tasks, statuses, over = {}) => summarizeStatus({
+  channelName: 'kt', tasks, runs: [], now: T0, autonomy: true, maxConcurrentTasks: 1,
+  statusOf: (t) => statuses[t.id] ?? slotStatus('open'), ...over,
+});
+
+test('formatStatus: 承認済みが同時枠の空き待ちなら「着手待ち」に枠を持っているタスクを添え、止まっているものは経過も出す', () => {
+  // 着手は in-progress + review が同時枠を埋めていると起きない (src/scheduler.js の planTick)。
+  // 「着手待ち N 件」だけでは、ループが止まっていることもその原因も読めない
+  const tasks = [task('12', 'in-progress'), task('20', 'approved'), task('21', 'approved'), task('22', 'proposed')];
+  const s = slotSummary(tasks, { 12: slotStatus('recovery-wait', iso(T0 - hours(24 * 5))) });
+  assert.equal(s.open, 3, '外の数は従来どおり proposed + approved');
+  assert.match(formatStatus(s), / \/ 着手待ち 3 件 \(承認済み 2 件が同時枠 1\/1 の空き待ち — #12 復旧待ち 5d0h\) \/ job 0 本/);
+
+  // review も枠を使う。どの節にも入らない判定 (paused) でも枠は塞いでいる。
+  // 経過を添えるのは復旧待ち・要照合だけ (走っている・レビュー待ちには付けない)
+  const many = slotSummary([
+    task('12', 'in-progress'), task('13', 'review'), task('14', 'in-progress'), task('15', 'in-progress'), task('20', 'approved'),
+  ], {
+    12: slotStatus('running', iso(T0 - hours(1))),
+    13: slotStatus('review-wait', iso(T0 - minutes(3))),
+    14: slotStatus('reconcile', iso(T0 - hours(2))),
+    15: slotStatus('paused', iso(T0 - hours(3))),
+  }, { maxConcurrentTasks: 4 });
+  assert.match(formatStatus(many), /着手待ち 1 件 \(承認済み 1 件が同時枠 4\/4 の空き待ち — #12 実行中、#13 レビュー待ち、#14 要照合 2h0m、#15 自律運転停止中\)/);
+});
+
+test('formatStatus: 枠に空きがある・承認済みが 0・自律運転が無効・同時枠が渡されないときは「着手待ち」を今の文言のまま出す', () => {
+  const stuck = { 12: slotStatus('recovery-wait', iso(T0 - hours(24 * 5))) };
+  const plain = (s) => {
+    assert.equal(s.slotWait, null);
+    assert.match(formatStatus(s), /着手待ち \d+ 件 \/ job 0 本/);
+  };
+  // 枠に空きがある (着手を止めているのは枠ではない)
+  plain(slotSummary([task('12', 'in-progress'), task('20', 'approved')], stuck, { maxConcurrentTasks: 2 }));
+  // 承認済みが 0 (proposed は枠が空いても着手されない)
+  plain(slotSummary([task('12', 'in-progress'), task('22', 'proposed')], stuck));
+  // 自律運転が無効
+  plain(slotSummary([task('12', 'in-progress'), task('20', 'approved')], stuck, { autonomy: false }));
+  // 同時枠が渡されない (index.js は自律運転が無効なら null を渡す)・読めない値
+  for (const maxConcurrentTasks of [null, 0, -1, 1.5, '1']) {
+    plain(slotSummary([task('12', 'in-progress'), task('20', 'approved')], stuck, { maxConcurrentTasks }));
+  }
+});
+
 test('formatStatus: 検証記録なしは不明と書き、実行記録が読めなければ job の数字を出さず、pause は誰がいつ止めたか', () => {
   const s = summarizeStatus({
     channelName: 'kt', tasks: [mergedTask('1', T0 - hours(2))], runs: [], runsError: 'JSON として読めません', now: T0,
@@ -218,7 +264,7 @@ test('/status はスラッシュコマンドとして登録され、実体へチ
   assert.ok(log.some((l) => /^edit:⚠️ 状況表示の機能が無効です/.test(l)), log.join(' | '));
 });
 
-// ---- 自律社会の 1 行 ----
+// ---- 自律社会の 1 行 (docs/society-ledger.md・S2-1) ----
 
 const societyStatus = (society) => formatStatus(summarizeStatus({
   channelName: 'kt', tasks: [], runs: [], now: T0, statusOf: () => ({ status: 'done' }), society,

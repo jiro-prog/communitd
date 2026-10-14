@@ -1,5 +1,4 @@
-// @ts-check
-// 社会台帳 `data/society.json` の明示初期化。
+// 社会台帳 `data/society.json` の明示初期化 (docs/society-ledger.md §1)。
 //
 //   node scripts/society-init.mjs [--file <path>]
 //
@@ -16,7 +15,6 @@ import { initSocietyLedger } from '../src/society-store.js';
 const ROOT = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), '..')).replaceAll('\\', '/');
 const DEFAULT_FILE = 'data/society.json';
 
-/** @returns {{file?: string, help?: boolean, error?: string}} */
 function parseArgs(argv) {
   let file = DEFAULT_FILE;
   for (let i = 0; i < argv.length; i += 1) {
@@ -51,7 +49,7 @@ function main() {
     console.error(`❌ ${args.error}`);
     return 1;
   }
-  const target = resolve(ROOT, args.file ?? DEFAULT_FILE);
+  const target = resolve(ROOT, args.file);
   let result;
   try {
     result = initSocietyLedger(target);

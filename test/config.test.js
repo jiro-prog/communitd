@@ -7,9 +7,12 @@ import { DEFAULT_LIMITS } from '../src/attachments.js';
 import { CLAUDE_EFFORTS } from '../src/claude.js';
 import { CODEX_EFFORTS } from '../src/codex.js';
 import { DEFAULT_MAX_BOT_HOPS } from '../src/hops.js';
+import { PI_EFFORTS } from '../src/pi.js';
 import { resolveSociety } from '../src/society-policy.js';
 import {
   ATTACHMENT_LIMIT_KEYS,
+  AUTONOMY_HARNESS_KEYS,
+  AUTONOMY_PLANNER_KEYS,
   AUTONOMY_KEYS,
   AUTONOMY_SCOUT_KEYS,
   AUTONOMY_WORKER_KEYS,
@@ -68,6 +71,9 @@ import {
   resolveToolApprovalTtlMs,
   resolveToolApprovalWaitMs,
   resolveTranscriptCharBudget,
+  DEFAULT_SESSION_LIMITS,
+  resolveSessionLimits,
+  validateSessionLimits,
   isInitiativeEnabled,
   resolveDuties,
   resolveDutyBots,
@@ -78,6 +84,9 @@ import {
   validateAutonomy,
   unregisteredChannelNotice,
   validateConfig,
+  validateIntake,
+  intakeBotKeyOf,
+  isIntakeChannel,
 } from '../src/config.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -178,12 +187,12 @@ test('owner の呼び名と bot 同士の重複は別々に出る (同じ名前�
   assert.equal(errors.length, 3, errors.join(' / '));
 });
 
-test('runtime は claude | codex だけ (省略 = claude)', () => {
+test('runtime は claude | codex | pi だけ (省略 = claude)', () => {
   // コード側は 10 箇所以上で `runtime === 'codex'` の厳密一致を見ているので、綴り違いは
   // **全部 claude 側へ倒れる**。起動する CLI も effort / codexInstructionsFile の可否も
   // model の要否も、1 語の書き損じでまとめて黙って変わる
-  assert.deepEqual(BOT_RUNTIMES, ['claude', 'codex']);
-  for (const runtime of [undefined, 'claude', 'codex']) {
+  assert.deepEqual(BOT_RUNTIMES, ['claude', 'codex', 'pi']);
+  for (const runtime of [undefined, 'claude', 'codex', 'pi']) {
     assert.deepEqual(validateConfig(cfg({ bots: { w: bot({ runtime }) } })), [],
       `runtime: ${JSON.stringify(runtime)} が通らない`);
   }
@@ -277,20 +286,21 @@ test('同梱の例は写しただけで安全寄り、強い設定は dev の例
   assert.equal(resolveVerifyCommand(dev), null, 'dev の例に verify を持たせない');
 });
 
-test('claudeBin / codexCmd は文字列 1 語でも語の配列でも書ける (省略可)', () => {
+test('claudeBin / codexCmd / piCmd は文字列 1 語でも語の配列でも書ける (省略可)', () => {
   for (const value of ['claude', ['claude'], ['node', 'C:/x/cli.js'], 'C:/bin/claude.exe']) {
     assert.deepEqual(validateConfig(cfg({ claudeBin: value })), [], JSON.stringify(value));
     assert.deepEqual(validateConfig(cfg({ codexCmd: value })), [], JSON.stringify(value));
+    assert.deepEqual(validateConfig(cfg({ piCmd: value })), [], JSON.stringify(value));
   }
   assert.deepEqual(validateConfig(cfg()), []);
 });
 
-test('claudeBin / codexCmd の書き損じは起動時に落とす', () => {
-  // **この 2 つは「起動できません」の案内が指す唯一の直し先**なので、黙って既定へ
+test('claudeBin / codexCmd / piCmd の書き損じは起動時に落とす', () => {
+  // **この 3 つは「起動できません」の案内が指す唯一の直し先**なので、黙って既定へ
   // 落とすと直したつもりで同じエラーが出続ける (Opus2 指摘 2026-09-10)。
   // 空配列は「設定したつもり」の典型
   for (const value of [[], 42, '', '   ', ['node', ''], {}, null, ['a', 3]]) {
-    for (const key of ['claudeBin', 'codexCmd']) {
+    for (const key of ['claudeBin', 'codexCmd', 'piCmd']) {
       const errors = validateConfig(cfg({ [key]: value }));
       assert.equal(errors.length, 1, `${key}: ${JSON.stringify(value)} が通ってしまう`);
       assert.ok(errors[0].includes(key), errors[0]);
@@ -359,6 +369,29 @@ test('effort の値域はランタイム側の定数が正本 (config.js に写�
       `claude が受けない ${effort} が通ってしまう`,
     );
   }
+});
+
+test('pi bot の effort は pi の --thinking の値域で受け、model は省略できない', () => {
+  for (const effort of PI_EFFORTS) {
+    assert.deepEqual(
+      validateConfig(cfg({ bots: { sol: bot({ runtime: 'pi', model: 'openai/gpt-6.1-sol', effort }) } })),
+      [],
+      `pi bot が effort=${effort} で落ちる`,
+    );
+  }
+  // pi にしか無い値 (off) は claude でも codex でも落とす
+  assert.ok(validateConfig(cfg({ bots: { opus: bot({ effort: 'off' }) } })).some((e) => e.includes('bots.opus.effort')));
+  assert.ok(validateConfig(cfg({ bots: { sol: bot({ runtime: 'codex', effort: 'off' }) } }))
+    .some((e) => e.includes('bots.sol.effort')));
+  // codex にしか無い値 (none) は pi で落とし、案内に pi の値域も出す
+  const none = validateConfig(cfg({ bots: { sol: bot({ runtime: 'pi', effort: 'none' }) } }));
+  assert.ok(none.some((e) => e.includes('bots.sol.effort') && e.includes('pi:') && e.includes('off')), none.join(' / '));
+  // --model は必ず渡すので省略させない (codex と違って既定モデルに頼らない)
+  const noModel = validateConfig(cfg({ bots: { sol: bot({ runtime: 'pi', model: undefined }) } }));
+  assert.ok(noModel.some((e) => e.startsWith('bots.sol.model が要る')), noModel.join(' / '));
+  // Codex の指示差し替えは pi には配線が無い (どのランタイムで無いのかを言う)
+  const instructions = validateConfig(cfg({ bots: { sol: bot({ runtime: 'pi', codexInstructionsFile: 'x.md' }) } }));
+  assert.ok(instructions.some((e) => e.includes('codexInstructionsFile') && e.includes('pi ランタイム')), instructions.join(' / '));
 });
 
 test('codexInstructionsFile は codex bot だけ・非空の文字列で書く', () => {
@@ -510,6 +543,37 @@ test('allowedUserIds 欠落・空配列・非文字列は起動拒否', () => {
     assert.ok(
       errors.some((e) => e.includes('allowedUserIds')),
       `allowedUserIds=${JSON.stringify(allowedUserIds)} が通ってしまう`,
+    );
+  }
+});
+
+test('allowedRoleIds は任意だが、書いたなら非文字列・空文字は起動拒否', () => {
+  assert.deepEqual(validateConfig(cfg()), []);                       // 未設定は設定ミスではない
+  assert.deepEqual(validateConfig(cfg({ allowedRoleIds: [] })), []); // 空 = ロールでは誰も増えない
+  assert.deepEqual(validateConfig(cfg({ allowedRoleIds: ['R1', 'R2'] })), []);
+  for (const allowedRoleIds of ['R1', [''], [123], null, {}]) {
+    const errors = validateConfig(cfg({ allowedRoleIds }));
+    assert.ok(
+      errors.some((e) => e.includes('allowedRoleIds')),
+      `allowedRoleIds=${JSON.stringify(allowedRoleIds)} が通ってしまう`,
+    );
+  }
+});
+
+test('allowedRoleIds に guildId (= @everyone) は書けない', () => {
+  // 書けると「サーバーの全員が呼べる」になり、しかも経路によって効いたり効かなかったりする
+  const errors = validateConfig(cfg({ allowedRoleIds: ['R1', '1'] }));
+  assert.equal(errors.length, 1, JSON.stringify(errors));
+  assert.ok(errors[0].includes('@everyone'), errors[0]);
+});
+
+test('maintenanceBotIds は任意だが、書いたなら空・非文字列・重複・guildId は起動拒否', () => {
+  assert.deepEqual(validateConfig(cfg({ maintenanceBotIds: ['MB1'] })), []);
+  for (const maintenanceBotIds of [[], 'MB1', [''], [123], null, {}, ['MB1', 'MB1'], ['1']]) {
+    const errors = validateConfig(cfg({ maintenanceBotIds }));
+    assert.ok(
+      errors.some((e) => e.includes('maintenanceBotIds')),
+      `maintenanceBotIds=${JSON.stringify(maintenanceBotIds)} が通ってしまう`,
     );
   }
 });
@@ -833,6 +897,41 @@ test('transcriptCharBudget は範囲外を起動時に落とし、省略は既�
   }
 });
 
+test('session (セッションの切り替え) は全体 → チャンネルの順にキーごと上書きし、範囲外は起動時に落とす', () => {
+  // 既定は実データで出した値 (docs/notes/2026-09-18-t2-session-cut.md)
+  assert.deepEqual(resolveSessionLimits({}, {}), { maxContextTokens: 150000, maxJobs: 25, transcriptCharBudget: 30000 });
+  assert.deepEqual(resolveSessionLimits({}), DEFAULT_SESSION_LIMITS);
+  // チャンネルはキーごとに全体を上書きする (書かなかったキーは全体 → 既定)
+  assert.deepEqual(
+    resolveSessionLimits({ limits: { session: { maxContextTokens: 200000, maxJobs: 10 } } }, { session: { maxJobs: 0 } }),
+    { maxContextTokens: 200000, maxJobs: 0, transcriptCharBudget: 30000 },
+  );
+  // 範囲外は既定へ (validateConfig が起動を止めるので実運用では到達しない保険)
+  assert.equal(resolveSessionLimits({ limits: { session: { maxContextTokens: -1 } } }).maxContextTokens, 150000);
+  assert.equal(resolveSessionLimits({}, { session: { maxJobs: '25' } }).maxJobs, 25);
+
+  const base = { guildId: 'G1', allowedUserIds: ['U1'] };
+  assert.deepEqual(validateConfig({ ...base, limits: { session: { maxContextTokens: 0, maxJobs: 0 } } }), [],
+    '0 (切らない) を落としている');
+  assert.deepEqual(validateConfig({ ...base, limits: { session: { transcriptCharBudget: 2000 } } }), []);
+  for (const bad of [-1, 1.5, '150000', null]) {
+    assert.ok(
+      validateConfig({ ...base, limits: { session: { maxContextTokens: bad } } }).some((e) => e.includes('limits.session.maxContextTokens')),
+      `落とせていない: ${JSON.stringify(bad)}`,
+    );
+  }
+  // スレッド発言の予算は通常の再構築と同じ下限 (1 件も載らない設定にしない)
+  assert.ok(validateConfig({ ...base, limits: { session: { transcriptCharBudget: 0 } } }).some((e) => e.includes('transcriptCharBudget')));
+  assert.ok(validateConfig({ ...base, limits: { session: { maxContext: 1 } } }).some((e) => e.includes('不明なキー')));
+  assert.ok(validateConfig({ ...base, limits: { session: 150000 } }).some((e) => e.includes('limits.session はオブジェクト')));
+  assert.ok(
+    validateConfig({ ...base, channels: { kt: { cwd: 'C:/x', session: { maxJobs: -1 } } } })
+      .some((e) => e.includes('channels.kt.session.maxJobs')),
+    'チャンネル側を検証していない',
+  );
+  assert.deepEqual(validateSessionLimits(undefined, 'limits.session'), []);
+});
+
 test('codexSandbox 未指定の既定は read-only (書込みは明示時のみ)', () => {
   assert.equal(resolveCodexSandbox({}), 'read-only');
   assert.equal(resolveCodexSandbox({ codexSandbox: 'workspace-write' }), 'workspace-write');
@@ -1073,8 +1172,12 @@ test('config 分離: policy と secrets を 1 枚の config へ合成する', ()
 
 test('config 分離: secrets に置けるキーは allowlist で固定する', () => {
   // ownerUserId / ownerNames が secrets 側なのは、org-apply (policy にしか触れない)
-  // から裁定権者とその呼称を変更できなくするため
-  assert.deepEqual(SECRET_KEYS, ['guildId', 'allowedUserIds', 'ownerUserId', 'ownerNames']);
+  // から裁定権者とその呼称を変更できなくするため (docs/social-engineering.md §3.9)。
+  // maintenanceBotIds も同じ理由で secrets 側 — 起動できる bot を policy の書き換えで増やせない
+  assert.deepEqual(
+    SECRET_KEYS,
+    ['guildId', 'allowedUserIds', 'allowedRoleIds', 'ownerUserId', 'ownerNames', 'maintenanceBotIds'],
+  );
 });
 
 test('config 分離: allowlist 外のキーを secrets へ置いたら起動させない', () => {
@@ -1232,7 +1335,7 @@ test('structuredOutput の書き損じは起動時に落とす', () => {
   }
 });
 
-// ---- channels.<name>.autonomy (自律運転) ----
+// ---- channels.<name>.autonomy (自律運転 — docs/social-engineering.md §3.7) ----
 
 /**
  * 自律運転を書いたチャンネルの config。
@@ -1245,7 +1348,7 @@ function autonomyCfg(autonomy, channelExtra = {}) {
   });
 }
 
-test('autonomy: 未設定なら自律運転は止まっていて、数値は既定値', () => {
+test('autonomy: 未設定なら自律運転は止まっていて、数値は §3.7 の既定値', () => {
   assert.equal(DEFAULT_AUTONOMY_ENABLED, false);
   // 既定値そのものを固定する (SETUP.md の記述と乖離したら気付けるように)
   assert.equal(DEFAULT_MAX_CONCURRENT_TASKS, 2);
@@ -1262,13 +1365,18 @@ test('autonomy: 未設定なら自律運転は止まっていて、数値は既�
     directionFile: 'docs/direction.md',
     baseBranch: 'main',
     scout: { bot: null, intervalMin: 60, maxOpenTasks: 6 },
+    // ハーネスの改訂の巡回は提案役を書いたときだけ (src/harness.js)
+    harness: { bot: null, intervalMin: 24 * 60, minRuns: 20, replay: { cases: 2, canary: 1, jobBudget: 2, timeoutMin: 12 * 60 } },
+    // 企画の巡回も企画役を書いたときだけ (src/themes.js)
+    planner: { bot: null, intervalMin: 24 * 60, maxThemes: 2, themesFile: 'docs/themes.md' },
     worker: { bots: [] },
     reviewer: null,
     maxConcurrentTasks: 2,
     maxJobsPerDay: 40,
     taskJobBudget: 20,
-    // 自動復旧の既定は観測だけ — 書かない配備で勝手に起こし直さない
-    recovery: { mode: 'observe', graceMin: 5, maxAutoRetries: 2, retryDelaysMin: [5, 15] },
+    // 自動復旧 (§11.4) の既定は auto (2026-10-07 — 止まったタスクが同時枠を塞いで自律運転ごと止まっていた)。
+    // 自律運転そのもの (enabled) は既定で止まっているので、書かない配備で勝手に動き出すことはない
+    recovery: { mode: 'auto', graceMin: 5, maxAutoRetries: 3, retryDelaysMin: [5, 15, 30] },
   });
   assert.deepEqual(resolveAutonomy(), a, '引数なしでも同じ形');
   assert.deepEqual(resolveAutonomy({ autonomy: {} }), a);
@@ -1424,6 +1532,57 @@ test('autonomy の担当に知らない bot キーを書いたら落とす', () 
   assert.ok(errors.some((e) => e.includes('使えるのは opus / fable / sol')), '使えるキーを示していない');
 });
 
+test('autonomy.harness: 提案役と数を採り、未知キー・知らない bot・型違いを落とす', () => {
+  assert.deepEqual(validateConfig(autonomyCfg({ harness: { bot: 'fable', intervalMin: 60, minRuns: 30 } })), []);
+  assert.deepEqual(
+    resolveAutonomy({ autonomy: { harness: { bot: ' fable ', minRuns: 30 } } }).harness,
+    { bot: 'fable', intervalMin: 24 * 60, minRuns: 30, replay: { cases: 2, canary: 1, jobBudget: 2, timeoutMin: 12 * 60 } },
+  );
+  // 下書きの検証 (src/replay.js): 件数は 0 を書ける (その種類は解き直さない)、予算と期限は 1 以上
+  assert.deepEqual(validateConfig(autonomyCfg({ harness: { replayCases: 0, replayCanary: 0, replayJobBudget: 3, replayTimeoutMin: 60 } })), []);
+  assert.deepEqual(
+    resolveAutonomy({ autonomy: { harness: { replayCases: 0, replayCanary: 3, replayJobBudget: 3, replayTimeoutMin: 60 } } }).harness.replay,
+    { cases: 0, canary: 3, jobBudget: 3, timeoutMin: 60 },
+  );
+  for (const harness of [{ replayCases: -1 }, { replayCanary: 1.5 }, { replayJobBudget: 0 }, { replayTimeoutMin: '60' }]) {
+    assert.ok(
+      validateConfig(autonomyCfg({ harness })).some((e) => e.includes('channels.obs.autonomy.harness.replay')),
+      `${JSON.stringify(harness)} が通ってしまう`,
+    );
+  }
+  const errors = validateConfig(autonomyCfg({ harness: { bot: 'haiku', every: 3 } }));
+  assert.ok(errors.some((e) => e.includes('autonomy.harness.bot に知らない bot キー: haiku')), errors.join('\n'));
+  assert.ok(errors.some((e) => e.includes('channels.obs.autonomy.harness.every は不明なキー')));
+  assert.ok(errors.some((e) => e.includes(AUTONOMY_HARNESS_KEYS.join(' / '))));
+  for (const harness of ['fable', { bot: 42 }, { minRuns: 0 }, { intervalMin: 1.5 }]) {
+    assert.ok(
+      validateConfig(autonomyCfg({ harness })).some((e) => e.includes('channels.obs.autonomy.harness')),
+      `${JSON.stringify(harness)} が通ってしまう`,
+    );
+  }
+});
+
+test('autonomy.planner: 企画役・数・主題ファイルを採り、未知キー・知らない bot・型違いを落とす', () => {
+  assert.deepEqual(
+    validateConfig(autonomyCfg({ planner: { bot: 'fable', intervalMin: 60, maxThemes: 3, themesFile: 'docs/plan.md' } })),
+    [],
+  );
+  assert.deepEqual(
+    resolveAutonomy({ autonomy: { planner: { bot: ' fable ', maxThemes: 3, themesFile: ' docs/plan.md ' } } }).planner,
+    { bot: 'fable', intervalMin: 24 * 60, maxThemes: 3, themesFile: 'docs/plan.md' },
+  );
+  const errors = validateConfig(autonomyCfg({ planner: { bot: 'haiku', every: 3 } }));
+  assert.ok(errors.some((e) => e.includes('autonomy.planner.bot に知らない bot キー: haiku')), errors.join('\n'));
+  assert.ok(errors.some((e) => e.includes('channels.obs.autonomy.planner.every は不明なキー')));
+  assert.ok(errors.some((e) => e.includes(AUTONOMY_PLANNER_KEYS.join(' / '))));
+  for (const planner of ['fable', { bot: 42 }, { maxThemes: 0 }, { intervalMin: 1.5 }, { themesFile: ' ' }]) {
+    assert.ok(
+      validateConfig(autonomyCfg({ planner })).some((e) => e.includes('channels.obs.autonomy.planner')),
+      `${JSON.stringify(planner)} が通ってしまう`,
+    );
+  }
+});
+
 test('autonomy.enabled: true には verify が要る (無人で main へ昇格する経路だから)', () => {
   const withoutVerify = validateConfig(cfg({
     bots: { opus: bot(), fable: bot() },
@@ -1463,7 +1622,7 @@ test('autonomy: worker が reviewer だけの編成は起動時に落とす (自
   );
 });
 
-// ---- 発議機構 ----
+// ---- 発議機構 (§3.9) ----
 
 const initiativeCfg = (initiative, over = {}) => cfg({
   bots: { fable: bot(), opus: bot() },
@@ -1504,7 +1663,7 @@ test('initiative: execBotKeys は実在する bot だけ・既定は空 (誰も�
   assert.ok(errors.some((e) => e.includes('居ない bot')), '存在しない bot に裁定権を与えている');
 });
 
-/** 適用回路として通る形のチャンネル (autonomy はあるが scout は持たない) */
+/** 適用回路として通る形のチャンネル (§3.9 — autonomy はあるが scout は持たない) */
 const applyChannels = (over = {}) => ({
   apply: {
     cwd: 'C:/tmp',
@@ -1570,6 +1729,14 @@ test('initiative: 適用回路のチャンネルは cwd・autonomy・scout ま�
     validateConfig(withChannels(applyChannels({ scout: { bot: 'opus' } })))
       .some((e) => e.includes('scout.bot は未設定にする')),
   );
+  assert.ok(
+    validateConfig(withChannels(applyChannels({ harness: { bot: 'fable' } })))
+      .some((e) => e.includes('harness.bot は未設定にする')),
+  );
+  assert.ok(
+    validateConfig(withChannels(applyChannels({ planner: { bot: 'fable' } })))
+      .some((e) => e.includes('planner.bot は未設定にする')),
+  );
 });
 
 test('initiative: 機構を止めていれば applyChannel の稼働条件までは求めない', () => {
@@ -1604,17 +1771,19 @@ test('initiative: 構造化出力を返せない bot には duty も裁定権も
   const declared = () => 'report';
   const undeclared = () => null;
 
-  // codex は --json-schema を持たない
+  // **P-3 (2026-09-18) で反転。** codex は `--output-schema` で構造化出力を返せるように
+  // なったので、duty も裁定権も持てる。門 (能力表の `schema`) は残っていて、
+  // 表の全ランタイムが true のいまは通る側になるだけ
   const codex = withBots({ sol: bot({ runtime: 'codex' }), fable: bot() }, { enabled: true, execBotKeys: ['sol'] });
-  assert.ok(
-    validateConfig(codex, { contractKindOf: declared }).some((e) => e.includes('runtime: "codex"')),
-    '裁定を回収できない設定を通している',
+  assert.deepEqual(
+    validateConfig(codex, { contractKindOf: declared }), [],
+    'codex の裁定権を落としている (P-3 で返せるようになった)',
   );
   const codexDuty = withBots(
     { sol: bot({ runtime: 'codex', duties: { audit: {} } }), fable: bot() },
     { enabled: true, execBotKeys: ['fable'] },
   );
-  assert.ok(validateConfig(codexDuty, { contractKindOf: declared }).some((e) => e.includes('duty')));
+  assert.deepEqual(validateConfig(codexDuty, { contractKindOf: declared }), []);
 
   // 役割文にスキーマ宣言が無い bot は種別の上書きが乗らない
   const bare = withBots({ fable: bot({ duties: { ops: {} } }) }, { enabled: true, execBotKeys: ['fable'] });
@@ -1624,9 +1793,9 @@ test('initiative: 構造化出力を返せない bot には duty も裁定権も
   );
   assert.deepEqual(validateConfig(bare, { contractKindOf: declared }), []);
 
-  // 読み手を渡さなければ役割文は見ない (config だけで分かる codex は落とす)
+  // 読み手を渡さなければ役割文は見ない
   assert.deepEqual(validateConfig(bare), []);
-  assert.ok(validateConfig(codex).some((e) => e.includes('runtime: "codex"')));
+  assert.deepEqual(validateConfig(codex), []);
 
   // 無効なら縛らない (止まっている機構の設定は途中経過として許す)
   const off = withBots({ sol: bot({ runtime: 'codex', duties: { audit: {} } }) }, { enabled: false });
@@ -1690,7 +1859,7 @@ test('initiative: duty があるのに自律チャンネルの構造化出力が
   assert.deepEqual(validateConfig(noDuty, { contractKindOf: declared }), []);
 });
 
-// ---- duty (bot 組織 OS) ----
+// ---- duty (§3.8 bot 組織 OS) ----
 
 test('duty: 書かなければ持たない / 書けば既定を埋めて key 昇順で返す', () => {
   assert.deepEqual(resolveDuties({}), []);
@@ -1753,7 +1922,7 @@ test('duty: 綴り違い・型違い・pointer に書けないキーは起動時
   assert.ok(errs({ initiativeBudget: 1.5 }).some((e) => e.includes('initiativeBudget')));
 });
 
-// ---- 自律社会 ----
+// ---- 自律社会 (docs/society-ledger.md・§12.4) ----
 
 test('society: 書いていない config には何も言わない (既定は off)', () => {
   assert.deepEqual(validateConfig(cfg()), []);
@@ -1776,6 +1945,60 @@ test('society: validateConfig から validateSociety が呼ばれている', () 
   assert.deepEqual(errs({ mandates: { delivery: { ...mandate, channels: ['sandbox'] } } }), []);
   // mode ≠ off は担当 bot の実在と runtime を見る
   assert.ok(errs({ mode: 'observe', authority: 'nobody' }).some((e) => e.includes('居ない bot')));
-  assert.ok(errs({ mode: 'active', authority: 'sol' }).some((e) => e.includes('codex')));
+  // codex の担当は P-3 で通るようになった (構造化出力を返せるため)
+  assert.deepEqual(errs({ mode: 'active', authority: 'sol' }), []);
   assert.deepEqual(errs({ mode: 'active' }), []);
+});
+
+// ---- 受付 (docs/notes/2026-10-11-intake.md) ----
+
+test('受付: 書いていない config には何も言わない', () => {
+  assert.deepEqual(validateIntake(cfg({ bots: { fable: bot() } })), []);
+  assert.equal(intakeBotKeyOf(cfg({ bots: { fable: bot() } })), null);
+  assert.equal(isIntakeChannel({ cwd: 'C:/tmp' }), false);
+});
+
+test('受付: 受付 bot 1 体 + 有効なチャンネルは通り、validateConfig からも呼ばれている', () => {
+  const config = cfg({
+    bots: { fable: bot(), uketsuke: bot({ intake: true, rolePromptFile: 'roles/intake.md' }) },
+    channels: { sandbox: { cwd: 'C:/tmp', intake: true } },
+  });
+  assert.deepEqual(validateConfig(config), []);
+  assert.equal(intakeBotKeyOf(config), 'uketsuke');
+  assert.equal(isIntakeChannel(config.channels.sandbox), true);
+  // true と書いたときだけ (書き損じは受付にしない側へ倒す)
+  assert.equal(isIntakeChannel({ intake: 'true' }), false);
+  assert.equal(intakeBotKeyOf(cfg({ bots: { fable: bot({ intake: 'yes' }) } })), null);
+  const broken = cfg({ bots: { fable: bot(), u: bot({ intake: true }) }, channels: { sandbox: { cwd: 'C:/tmp', intake: 1 } } });
+  assert.ok(validateConfig(broken).some((e) => e.includes('channels.sandbox.intake: boolean')));
+});
+
+test('受付: 型・数・ランタイムの不備を落とす', () => {
+  const errs = (bots, channels = { sandbox: { cwd: 'C:/tmp' } }) => validateIntake(cfg({ bots, channels }));
+  assert.ok(errs({ u: bot({ intake: 'true' }) }).some((e) => e.includes('bots.u.intake: boolean')));
+  assert.ok(errs({ a: bot({ intake: true }), b: bot({ intake: true }) }).some((e) => e.includes('1 体まで')));
+  assert.ok(errs({ s: bot({ intake: true, runtime: 'codex' }) }).some((e) => e.includes("は受付を担えない")));
+  // 受付を有効にしたのに受付 bot が居ない = 直下の発言が誰にも拾われない
+  assert.ok(errs({ fable: bot() }, { sandbox: { cwd: 'C:/tmp', intake: true } }).some((e) => e.includes('受付 bot が居ない')));
+  // false と書いた bot は受付ではない
+  assert.deepEqual(errs({ fable: bot({ intake: false }) }), []);
+});
+
+test('受付: 受付 bot を編成や自律運転の担当に書けない', () => {
+  const bots = { fable: bot(), opus: bot(), u: bot({ intake: true }) };
+  const errs = (channel) => validateIntake(cfg({ bots, channels: { sandbox: { cwd: 'C:/tmp', ...channel } } }));
+  assert.ok(errs({ roster: ['fable', ' u '] }).some((e) => e.includes('channels.sandbox.roster に受付 bot (u)')));
+  assert.ok(errs({ autonomy: { scout: { bot: 'u' } } }).some((e) => e.includes('autonomy.scout.bot')));
+  assert.ok(errs({ autonomy: { harness: { bot: 'u' } } }).some((e) => e.includes('autonomy.harness.bot')));
+  assert.ok(errs({ autonomy: { planner: { bot: 'u' } } }).some((e) => e.includes('autonomy.planner.bot')));
+  assert.ok(errs({ autonomy: { worker: { bots: ['opus', 'u'] } } }).some((e) => e.includes('autonomy.worker.bots')));
+  assert.ok(errs({ autonomy: { reviewer: 'u' } }).some((e) => e.includes('autonomy.reviewer')));
+  assert.deepEqual(errs({ roster: ['fable', 'opus'], autonomy: { worker: { bots: ['opus'] }, reviewer: 'fable' } }), []);
+});
+
+test('受付: 受付 bot を発議の裁定役 (initiative.execBotKeys) に書けない — 無効のときも', () => {
+  const bots = { fable: bot(), u: bot({ intake: true }) };
+  const errs = (initiative) => validateIntake(cfg({ bots, initiative }));
+  assert.ok(errs({ enabled: false, execBotKeys: ['fable', ' u '] }).some((e) => e.includes('initiative.execBotKeys に受付 bot (u)')));
+  assert.deepEqual(errs({ enabled: true, execBotKeys: ['fable'] }), []);
 });

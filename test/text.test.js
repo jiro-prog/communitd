@@ -1,6 +1,36 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { chunkText } from '../src/text.js';
+import { chunkText, codePointBoundary } from '../src/text.js';
+
+test('codePointBoundary はサロゲートペアの間なら 1 つ手前、境界ならそのまま', () => {
+  const s = 'a😀b'; // a / 上位 / 下位 / b
+  assert.equal(codePointBoundary(s, 2), 1, 'ペアの間で切らせている');
+  for (const at of [0, 1, 3, s.length]) assert.equal(codePointBoundary(s, at), at);
+  // 元から片割れなら守るものが無いので動かさない
+  assert.equal(codePointBoundary('a\uD83Db', 2), 2);
+  assert.equal(codePointBoundary('a\uDE00b', 2), 2);
+});
+
+test('chunkText は上限の位置に絵文字が来てもサロゲートペアを割らない', () => {
+  const text = `${'x'.repeat(99)}😀${'y'.repeat(50)}`;
+  const chunks = chunkText(text, 100);
+  // 上限 (100) で切ると 😀 の上位と下位が別のメッセージへ分かれ、両方で � になる
+  assert.deepEqual(chunks, ['x'.repeat(99), `😀${'y'.repeat(50)}`]);
+  for (const c of chunks) assert.ok(c.isWellFormed(), `ペアが割れている: ${JSON.stringify(c)}`);
+});
+
+test('chunkText はコードブロックの中の絵文字も、閉じフェンスで詰め直した位置で割らない', () => {
+  // 'a' を 1 字挟んで、上限 (50) も詰め直した位置 (46) もペアの間に来る配置にする
+  const body = `\`\`\`js\na${'😀'.repeat(60)}\n\`\`\``;
+  const chunks = chunkText(body, 50);
+  assert.ok(chunks.length > 1);
+  for (const c of chunks) {
+    assert.ok(c.length <= 50, `chunk が上限超過: ${c.length}`);
+    assert.ok(c.isWellFormed(), `ペアが割れている: ${JSON.stringify(c)}`);
+    assert.equal(fenceCount(c) % 2, 0, `フェンスが閉じていない: ${JSON.stringify(c)}`);
+  }
+  assert.equal(chunks.join('').match(/😀/gu).length, 60, '絵文字が落ちた・増えた');
+});
 
 test('chunkText は上限以下ならそのまま 1 個', () => {
   assert.deepEqual(chunkText('hello', 10), ['hello']);
@@ -82,7 +112,7 @@ function lcg(seed) {
 }
 
 /** フェンス・長短の行・空行を混ぜた本文 (閉じ忘れたブロックも混ざる) */
-function randomBody(rand, { withInfo = false } = {}) {
+function randomBody(rand, { withInfo = false, withEmoji = false } = {}) {
   const lines = [];
   const count = 3 + Math.floor(rand() * 30);
   for (let i = 0; i < count; i++) {
@@ -90,7 +120,8 @@ function randomBody(rand, { withInfo = false } = {}) {
     const info = withInfo && rand() < 0.5 ? 'js' : '';
     if (r < 0.2) lines.push('`'.repeat(3 + Math.floor(rand() * 2)) + info);
     else if (r < 0.3) lines.push('');
-    else if (r < 0.4) lines.push('x'.repeat(1 + Math.floor(rand() * 120)));
+    // 絵文字は 'x' と交互に置く — 長い行の途中のどこで切っても、半分はペアの間に当たる
+    else if (r < 0.4) lines.push((withEmoji ? 'x😀' : 'x').repeat(1 + Math.floor(rand() * 120)));
     else lines.push(`line ${i} ${'y'.repeat(Math.floor(rand() * 20))}`);
   }
   return lines.join('\n');
@@ -99,7 +130,10 @@ function randomBody(rand, { withInfo = false } = {}) {
 /** 上限と、ブロックの開閉状態が分割前後で変わっていないこと */
 function assertSplitSafe(body, size, label) {
   const chunks = chunkText(body, size);
-  for (const c of chunks) assert.ok(c.length <= size, `上限超過 (${c.length} > ${size}) — ${label}`);
+  for (const c of chunks) {
+    assert.ok(c.length <= size, `上限超過 (${c.length} > ${size}) — ${label}`);
+    assert.ok(c.isWellFormed(), `サロゲートペアが割れている — ${label}`);
+  }
   // 途中のメッセージは必ず閉じて終わる (閉じ忘れると以降が丸ごとコード表示になる)
   for (const c of chunks.slice(0, -1)) {
     assert.equal(endsOpen(c), false, `途中のチャンクが開いたまま — ${label}`);
@@ -147,5 +181,18 @@ test('chunkText は言語指定つきのフェンスでも上限と開閉を守�
     const body = randomBody(rand, { withInfo: true });
     const size = 20 + Math.floor(rand() * 180);
     assertSplitSafe(body, size, `${i} 回目 / size ${size}: ${JSON.stringify(body.slice(0, 80))}`);
+  }
+});
+
+test('chunkText は絵文字が混ざってもサロゲートペアを割らず、文字も保存する', () => {
+  const rand = lcg(113);
+  for (let i = 0; i < 1000; i++) {
+    const body = randomBody(rand, { withEmoji: true });
+    const size = 20 + Math.floor(rand() * 180);
+    const label = `${i} 回目 / size ${size}: ${JSON.stringify(body.slice(0, 80))}`;
+    const chunks = assertSplitSafe(body, size, label);
+
+    const strip = (s) => s.replaceAll('`', '').replaceAll('\n', '');
+    assert.equal(chunks.map(strip).join(''), strip(body), `本文が変わっている — ${label}`);
   }
 });

@@ -1,4 +1,3 @@
-// @ts-check
 // 実行中の job からの承認要求を、人間が押すまで待たせる層 (T5)。
 //
 // PreToolUse hook は claude の子プロセスで、ブリッジ本体は別プロセス。localhost に
@@ -42,8 +41,7 @@ export const MAX_ASK_INPUT_CHARS = 8000;
 /**
  * ask 1 件をどう扱うか (純粋関数)。
  *
- * @param {{tool_name?: string, toolName?: string, tool_input?: object, permission_mode?: string}} ask
- *        hook の payload (tool_name / tool_input)
+ * @param {object} ask hook の payload (tool_name / tool_input)
  * @param {{cwd?: string|null, allowedRules?: string[],
  *          isApproved?: (grant: object) => boolean}} ctx
  *        allowedRules = この job へ実際に渡した --allowedTools。
@@ -56,7 +54,7 @@ export function decideAsk(ask, { cwd = null, allowedRules = [], isApproved = () 
   const tool = String(ask?.tool_name ?? ask?.toolName ?? '').trim();
   if (tool === '') return { decision: 'pass' };
   // 全許可モードのチャンネルでは、どうせ通る呼び出しにカードを出しても意味がない
-  // (payload に permission_mode が入っている)
+  // (payload に permission_mode が入っている — T0 §1.1)
   if (ask?.permission_mode === 'bypassPermissions') return { decision: 'pass' };
   // 素のツール名で既に許可されている = hook が無くても通る呼び出し。聞かない
   if (allowedRules.includes(tool)) return { decision: 'pass' };
@@ -223,7 +221,7 @@ export class ApprovalBroker {
    */
   stop(reason = 'job が終了したため承認を待てません') {
     this.stopped = true;
-    clearInterval(this.timer ?? undefined);
+    clearInterval(this.timer);
     this.timer = null;
     for (const [id, controller] of this.pending) {
       controller.abort();
@@ -261,7 +259,6 @@ export class ApprovalBroker {
     // 待ち上限はここ 1 か所だけが持つ。decide 側にも期限を置くと、
     // どちらが先に切れたかで挙動が変わる
     const controller = new AbortController();
-    /** @type {NodeJS.Timeout|null} */
     let timer = null;
     const expired = new Promise((resolveExpired) => {
       timer = setTimeout(() => {
@@ -282,7 +279,7 @@ export class ApprovalBroker {
       this.onError(err);
       answer = { decision: 'deny', reason: '承認処理でエラーが発生したため実行しません' };
     } finally {
-      clearTimeout(timer ?? undefined);
+      clearTimeout(timer);
       this.pending.delete(id);
     }
     this.answer(id, answer);
@@ -375,7 +372,7 @@ async function main() {
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   main().catch((err) => {
-    // **判定できないまま実行させない。** 理由はそのままモデルへ渡る。
+    // **判定できないまま実行させない。** 理由はそのままモデルへ渡る (T0 §1.3)。
     // exit code は 0 のまま — 異常終了にすると出した deny が読まれない
     process.stdout.write(JSON.stringify(decisionOutput({
       decision: 'deny',

@@ -2,13 +2,17 @@
 // 構造化出力の受け取り → verify → 配送、を 1 本の runJob が順に通す。
 // 判断はそれぞれの純粋モジュール (src/contract.js / src/rolecontext.js / src/verify.js …) が持ち、
 // ここは一時ファイル・子プロセス・Discord の placeholder を結ぶ。
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import {
+  closeSync, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, writeFileSync,
+} from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { writeImageFiles } from '../attachments.js';
 import { APPROVAL_POLL_MS, ApprovalBroker, createAskLedger } from '../broker.js';
 import { runClaude as runClaudeReal } from '../claude.js';
 import { runCodex as runCodexReal } from '../codex.js';
+import { runPi as runPiReal } from '../pi.js';
+import { PI_REPORT_TOOL } from '../pi-policy.js';
 import {
   resolveAddDirs,
   resolveAllowedTools,
@@ -16,6 +20,7 @@ import {
   resolveCodexSandbox,
   resolveHooksEnabled,
   resolvePermissionMode,
+  resolveSessionLimits,
   resolveStructuredOutputEnabled,
   resolveVerifyCommand,
   resolveVerifyMaxRetries,
@@ -34,15 +39,30 @@ import {
   buildTraceToolHooks,
   buildVerifyStopHooks,
 } from '../hooks.js';
-import { editSafe } from '../mentions.js';
+import { countFinalAnswers, finalAnswerWarning, sessionLogPath } from '../final-answers.js';
+import { harnessFingerprint } from '../harness.js';
+import { editSafe, stripFooterControls } from '../mentions.js';
 import { createProgressReporter } from '../progress.js';
 import { checkRoleProtocol } from '../protocol.js';
 import { buildRuntimeContext } from '../rolecontext.js';
 import { applyRoster, resolveEffectiveRoster } from '../roster.js';
+import { capabilitiesOf, runtimeOf } from '../runtime.js';
+import {
+  MEMO_PROMPT,
+  cutNotice,
+  editedFilesFromLog,
+  estimateContext,
+  lastContextFromLog,
+  memoFromResult,
+  renderCarryOver,
+  shouldCutSession,
+} from '../session-cut.js';
 import { msOfTime } from '../time.js';
 import { sanitizeForDisplay } from '../toolrules.js';
 import { TRACE_HOOK_TIMEOUT_MS, readTraceEntries, summarizeTrace } from '../trace.js';
-import { DEFAULT_VERIFY_TIMEOUT_MS, readVerifyState, runVerify } from '../verify.js';
+import { saveRunTrace } from '../trace-store.js';
+import { worktreePathFor } from '../worktree.js';
+import { DEFAULT_VERIFY_TIMEOUT_MS, VERIFY_TAIL_LINES, readVerifyState, runVerify, tailText } from '../verify.js';
 
 /**
  * 引き継ぎ文書の在り処 (実行文脈へ出す — src/rolecontext.js)。
@@ -88,6 +108,76 @@ function appendBeforeFooter(text, line) {
   return lines.join('\n');
 }
 
+/** verify NG の理由として実行記録へ載せる末尾の行数と長さ (長さは stageDetail の他の書き手と同じ 200 字) */
+const VERIFY_DETAIL_LINES = 5;
+const VERIFY_DETAIL_MAX_CHARS = 200;
+
+/**
+ * verify の最終 NG を実行記録の `stageDetail` 用に 1 行へ畳む — 出口 (exit n / timeout / 起動エラー) と
+ * 出力の末尾数行。終了理由の `verify-failed` の一語だけでは、ハーネスの成績の問題の抜粋が改訂の材料にならない。
+ * 切り詰めは先頭の側から (失敗が書かれるのは末尾)
+ */
+function verifyFailureDetail(result) {
+  const exit = result?.timedOut
+    ? 'timeout'
+    : result?.aborted
+      ? 'aborted'
+      : Number.isInteger(result?.code) ? `exit ${result.code}` : '起動エラー';
+  const raw = [result?.error, result?.output].filter(Boolean).join('\n');
+  const lines = tailText(raw, { maxLines: VERIFY_TAIL_LINES })
+    .split('\n').map((line) => line.trim()).filter(Boolean).slice(-VERIFY_DETAIL_LINES);
+  if (lines.length === 0) return exit;
+  const head = `${exit}: `;
+  return `${head}${tailText(lines.join(' / '), { maxLines: 1, maxChars: VERIFY_DETAIL_MAX_CHARS - head.length })}`;
+}
+
+/**
+ * この job で最終回答を何回出したか (src/final-answers.js)。読むのは Claude Code の内部ファイルなので、
+ * 読めなければ null を返すだけで、job も配送も止めない。設定フォルダの決め方は src/bridge/contracts.js と同じ
+ * @returns {number|null}
+ */
+function countFinalAnswersInSession({ cwd, sessionId, sinceMs }) {
+  const lines = readSessionLogLines({ cwd, sessionId });
+  return lines ? countFinalAnswers(lines, sinceMs) : null;
+}
+
+/**
+ * 文脈の測定で読むセッション記録の末尾の大きさ。最後のリクエストの行だけあればよいが、
+ * 1 行にツールの入出力 (ファイルの中身) が丸ごと載ることがあるので余裕を見る
+ */
+const SESSION_LOG_TAIL_BYTES = 2 * 1024 * 1024;
+
+/** 切る job の終わりに引き継ぎメモを書かせる 1 ターンの上限。超えたらメモ無しで切る */
+const CUT_MEMO_TIMEOUT_MS = 3 * 60 * 1000;
+
+/**
+ * セッション記録 (Claude Code の内部ファイル) の行。`tailBytes` を渡すと末尾だけ読む
+ * (長いセッションの記録は数十 MB になる)。読めなければ null — 測れないだけで job は止めない。
+ * 末尾読みの先頭行は途中で切れているが、読み手は壊れた行を飛ばす
+ * @param {{cwd: string, sessionId: string, tailBytes?: number|null}} p
+ * @returns {string[]|null}
+ */
+function readSessionLogLines({ cwd, sessionId, tailBytes = null }) {
+  if (!cwd || !sessionId) return null;
+  const configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+  const path = sessionLogPath({ configDir, cwd, sessionId });
+  try {
+    if (!tailBytes) return readFileSync(path, 'utf8').split('\n');
+    const fd = openSync(path, 'r');
+    try {
+      const size = fstatSync(fd).size;
+      const length = Math.min(size, tailBytes);
+      const buf = Buffer.alloc(length);
+      readSync(fd, buf, 0, length, size - length);
+      return buf.toString('utf8').split('\n');
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
 /**
  * @param {object} deps
  * @param {object} deps.config
@@ -116,13 +206,15 @@ function appendBeforeFooter(text, line) {
  * @param {() => object[]} deps.botEntries
  * @param {Function} [deps.runClaude]         テストから差し替えるためのランタイム (既定は src/claude.js)
  * @param {Function} [deps.runCodex]          同上 (既定は src/codex.js)
+ * @param {Function} [deps.runPi]             同上 (既定は src/pi.js)
+ * @param {string|null} [deps.traceDir]      job の軌跡を残す置き場 (src/trace-store.js)。null なら残さない
  */
 export function createJobRunner({
   config, root: ROOT, commonRolePath: COMMON_ROLE_PATH, store, roster, jobRuns, board, limits,
   ownerTargets: OWNER_TARGETS, runRecorder, approvedRulesFor, applyIncomingContract,
   claimContractKindOverride, buildPrompt, isInfraMessage, postTurn, fileProposal, applyApproval,
   applyReview, applyProposalAdjudication, raiseProposal, decideApproval, botEntries, society = null,
-  runClaude = runClaudeReal, runCodex = runCodexReal,
+  runClaude = runClaudeReal, runCodex = runCodexReal, runPi = runPiReal, traceDir = null,
 }) {
   const MAX_APPROVAL_CARDS = limits.maxApprovalCards;
   const APPROVAL_WAIT_MS = limits.approvalWaitMs;
@@ -184,7 +276,7 @@ export function createJobRunner({
   }
 
   /**
-   * この job を頼んだ相手 (「verify NG で戻す先」)。
+   * この job を頼んだ相手 (§12.3 (3) の「verify NG で戻す先」)。
    *
    * **契約があればその `fromBotKey` が正本。** 起動メッセージは別の bot の client から
    * 投げられることがある (レビュー召喚・再開要求は担当以外の client が投稿する) ので、
@@ -198,6 +290,48 @@ export function createJobRunner({
     const author = triggerMsg?.author;
     if (!author?.bot || !author.id) return null;
     return botEntries().find((b) => b.userId && b.userId === author.id)?.key ?? null;
+  }
+
+  /**
+   * 切ると決めたセッションに、引き継ぎメモを 1 ターンだけ書かせる (T-2 — src/session-cut.js)。
+   *
+   * **起動引数は本 job と同じにする。** tools・スキーマ (= ツール一覧) ・effort・role のどれかが変わると
+   * プロンプトの前方一致が切れ、畳む直前のセッション全体 (〜150k) をキャッシュへ書き直す —
+   * 切り替えの中で一番高いリクエストになる。外すのは settings だけ: Stop hook の verify がもう一度走り、
+   * block されるとモデルが作業を再開してしまう。
+   *
+   * 失敗・停止・時間切れはメモ無しで切る (切る印は保存済み)。Discord には何も出さない。
+   */
+  async function writeCutMemo({ claudeOpts, thread, bot, sessionId, handle }) {
+    let res = null;
+    try {
+      res = await runClaude({
+        ...claudeOpts,
+        settingsFile: undefined,
+        prompt: MEMO_PROMPT,
+        images: [],
+        sessionId,
+        resume: true,
+        timeoutMs: CUT_MEMO_TIMEOUT_MS,
+        handle,
+      });
+    } catch (err) {
+      console.error(`[session] ${thread.id}:${bot.key} 引き継ぎメモの 1 ターンが落ちました: ${err?.message ?? err}`);
+    }
+    const memo = memoFromResult(res, bodyOf);
+    if (!memo) {
+      console.error(`[session] ${thread.id}:${bot.key} 引き継ぎメモを取れませんでした (${res?.error ?? '本文なし'}) — メモ無しで切ります`);
+      return;
+    }
+    try {
+      // 書かせている間に別の job がセッションを替えていたら触らない (スレッド × bot の job は直列だが、念のため)
+      const current = store.get(thread.id, bot.key);
+      if (current?.sessionId === sessionId && current.cut) {
+        store.set(thread.id, bot.key, { ...current, cut: { ...current.cut, memo } });
+      }
+    } catch (err) {
+      console.error(`[session] ${thread.id}:${bot.key} 引き継ぎメモを保存できません: ${err?.message ?? err}`);
+    }
   }
 
   /**
@@ -224,10 +358,17 @@ export function createJobRunner({
     let imageDir = null;
     let roleDir = null;
     let settingsDir = null;
-    let verifyCommand = null;
+    // ランタイムを問わず job の途中で 1 回だけ解決する (下の「検証はランタイムを問わず」)
+    let verifyCommand;
     let verifyStateFile = null;
     let traceFile = null;
     let broker = null;
+    // claude の起動引数と、セッションの始まり方 (resume / 新規 / 切った後の作り直し — src/session-cut.js)。
+    // 引き継ぎメモの 1 ターンは**同じ起動引数**で送る (下の writeCutMemo)
+    let claudeOpts = null;
+    let session = null;
+    // この job の終わりに「次から新しいセッション」と決めたもの (配送の後でメモを書かせる)
+    let pendingCut = null;
     // hook 経路で承認カードを出したルールの台帳 (重複と上限を並行 ask でも守り、
     // 出したものは job 終了後にもう一度カードにしない)
     const askLedger = createAskLedger({ max: MAX_APPROVAL_CARDS });
@@ -244,7 +385,7 @@ export function createJobRunner({
       // 表示が更新できなくても承認そのものは進む (placeholder が消えていることもある)
       try { void editSafe(placeholder, text).catch(() => {}); } catch { /* 表示だけの失敗 */ }
     };
-    // 「⚙️ 作業中…」に段階・経過・最後に完了したツールを出す。情報源は実行記録と
+    // 「⚙️ 作業中…」に段階・経過・最後に完了したツールを出す (§11.2)。情報源は実行記録と
     // trace ファイルだけ。承認待ち (🔐) の表示は上書きしない。モデルが返ったら止める —
     // 以降の placeholder は終端の表示 (❌ / ⏹ / 削除) になるので、tick に上書きさせない
     const jobStartedAt = Date.now();
@@ -294,11 +435,17 @@ export function createJobRunner({
       // 送信パーサはプロセス起動時のままなので、「role だけ先に新しい」状態では委譲が
       // 黙って落ちる。連結してから 1 回だけ見ると先頭 (共通規定) の宣言しか読めず、
       // 古い版のまま残った役割文を見逃す
+      // 解き直し (src/replay.js) の job は、改訂のタスクの作業ツリーにある**下書きの**役割文で走る —
+      // 改訂を merge する前に、過去のタスクで効き目を試すため。読めなければ他の job と同じく role-unreadable
+      const replayOf = board?.findByThread(thread.id)?.replay?.of ?? null;
+      const roleRoot = replayOf ? worktreePathFor(ROOT, replayOf) : null;
       const sources = [
-        { label: 'roles/_common.md', path: COMMON_ROLE_PATH },
-        { label: bot.cfg.rolePromptFile, path: resolve(ROOT, bot.cfg.rolePromptFile), own: true },
+        { label: 'roles/_common.md', path: roleRoot ? join(roleRoot, 'roles', '_common.md') : COMMON_ROLE_PATH },
+        { label: bot.cfg.rolePromptFile, path: resolve(roleRoot ?? ROOT, bot.cfg.rolePromptFile), own: true },
       ];
       const parts = [];
+      // 読んだ本文はハーネスの版の指紋にも使う (読み直すと、読んだ後に書き換わった版を指す)
+      const readSources = [];
       // この bot 自身の役割文 (スキーマ宣言を読む対象。共通規定側には置かせない —
       // 種別は「その役の仕事」であって全員共通の規定ではない)
       let ownRoleText = '';
@@ -322,7 +469,16 @@ export function createJobRunner({
         }
         if (src.own) ownRoleText = text;
         parts.push(text.trim());
+        readSources.push({ label: src.label, text, own: src.own === true });
       }
+      // この job を動かしたハーネスの版 (src/harness.js)。改訂の前後を実行記録から比べるための印で、
+      // 書けなくても job は止めない (記録の口の約束)
+      run.harness(harnessFingerprint({
+        sources: readSources,
+        runtime: runtimeOf(bot.cfg),
+        model: bot.cfg.model,
+        effort: bot.cfg.effort,
+      }));
       // 権限と編成は config.json (+ スレッド編成は data/roster.json) が正本。役割文へ書くと
       // 設定を変えた瞬間に嘘になるので、job ごとに起こして**最後に**置く
       // (直前の記述が食い違ったらこちらを信じる、と共通規定にある)。
@@ -337,15 +493,16 @@ export function createJobRunner({
 
       // ---- 委譲契約 (T6) ----
       // role がスキーマ種別を宣言していない bot は、ここから下がすべて素通りする
-      // (構造化を有効にしていない job の挙動は完全に不変)。codex は --json-schema を
-      // 持たないランタイムなので対象外
+      // (構造化を有効にしていない job の挙動は完全に不変)。**能力表で `schema` が false の
+      // ランタイム**も同じく対象外 (src/runtime.js)。渡し方はランタイムで違い、claude は
+      // `--json-schema`、codex は `--output-schema` + strict 変換 (src/strict-schema.js)
       // チャンネルが構造化を切っていれば、役割文が宣言していても contractKind は null。
       // 様式が振る舞いを決めるので、成果物へ向かわない場 (雑談) では様式ごと外す。
       // **CLI の --json-schema を落とすだけでは足りない** — 役割文に残る「スキーマで検査する」
       // の指示を実行文脈で打ち消さないと、モデルは報告調のまま返す (sol 指摘 2026-08-14)
       const structuredOutput = resolveStructuredOutputEnabled(cc);
       // スケジューラが起こしたスカウト job だけは、その 1 job のあいだ種別が
-      // task-proposal に差し替わる。取り出した時点で消えるので次の job には残らない
+      // task-proposal に差し替わる (§3.3)。取り出した時点で消えるので次の job には残らない
       // 目印つきの投稿は**共有枠に触らない** (sol 指摘 2026-08-30) — 順序は
       // resolveJobContractKind が持つ。ここは枠の取り出し方を渡すだけ
       const declaredKind = resolveJobContractKind({
@@ -382,7 +539,7 @@ export function createJobRunner({
         buildRuntimeContext({
           selfKey: bot.key,
           displayName: bot.cfg.displayName,
-          runtime: bot.cfg.runtime ?? 'claude',
+          runtime: runtimeOf(bot.cfg),
           channelName: cc.channelName,
           cwd: cc.cwd,
           sandbox: resolveCodexSandbox(cc),
@@ -397,6 +554,8 @@ export function createJobRunner({
             : null,
           handoffFile: handoffFileFor(cc.cwd),
           societyCase,
+          // pi は最終報告を道具の引数で受け取る (CLI に最終出力を縛る口が無い — src/pi-extension.js)
+          reportTool: runtimeOf(bot.cfg) === 'pi' && contractKind ? PI_REPORT_TOOL : null,
         }),
       );
       // 契約は実行文脈の**後ろ**に置く。ファイル権限の実範囲は実行文脈にも出る
@@ -408,6 +567,13 @@ export function createJobRunner({
       }
       const roleText = parts.join('\n\n---\n\n');
 
+      // **検証はランタイムを問わず走らせる** (P-2、2026-09-18)。ここを claude 分岐の中で
+      // 決めていたので、codex の job は Stop hook (hooks を持たない) もブリッジ側の最終検証も
+      // 素通りしていた — 契約を返せるようになった codex bot が、verify NG でも報告と
+      // handoff で仕事を先へ進められる穴だった (Opus2 指摘 2026-09-18)。
+      // hook を持たないランタイムでは差し戻しが効かないので、**1 回目の NG が最終 NG**になる
+      verifyCommand = resolveVerifyCommand(cc);
+
       const gitBefore = gitStatusSnapshot(cc.cwd);
 
       let built;
@@ -416,7 +582,9 @@ export function createJobRunner({
       // (claude は system prompt のファイル / codex は本文へ連結) ので、本文だけ数えると
       // role を厚くした分が計測から消え、bot 間の比較も噛み合わない
       let sentChars = 0;
-      if (bot.cfg.runtime === 'codex') {
+      // **ここは能力ではなく「どの CLI を起動するか」**なので、能力表ではなく名前で引き分ける
+      // (src/runtime.js の表は「できるか」だけを持ち、起動の仕方は claude.js / codex.js が持つ)
+      if (runtimeOf(bot.cfg) === 'codex') {
         // codex ランタイム (Sol): セッション永続なし (書込み可否は codexSandbox 次第)。
         // 文脈は毎回スレッド transcript の再構成で渡す (entry=null = 遡り + トリガー以降、
         // 自分の過去発言も含める — resume セッションを持たないため)
@@ -445,14 +613,81 @@ export function createJobRunner({
           instructionsFile: bot.cfg.codexInstructionsFile
             ? resolve(ROOT, bot.cfg.codexInstructionsFile)
             : null,
+          // role が種別を宣言している bot だけ最終出力をスキーマへ拘束する (claude 側と同じ値)。
+          // strict 変換と null の後始末は runCodex の中 (src/strict-schema.js)
+          jsonSchema: contractKind ? SCHEMAS[contractKind] : null,
           timeoutMs: config.limits?.claudeTimeoutMs ?? 3600000,
           scrubEnvKeys: Object.values(config.bots).map((b) => b.tokenEnv),
           handle,
           onSpawn: (info) => run.spawn(info),
         });
+      } else if (runtimeOf(bot.cfg) === 'pi') {
+        // pi ランタイム (docs/reference/pi-runtime.md): この版はセッションを残さないので、文脈は
+        // codex と同じく毎回スレッド transcript の再構成で渡す (自分の過去発言も含める)。
+        // 権限・差し戻し・最終報告は claude と**同じ設定**を job ごとの拡張が効かせる
+        built = await buildPrompt(bot, triggerMsg, thread, null, true);
+        let imagePaths = [];
+        if (built.images.length > 0) {
+          imageDir = mkdtempSync(join(tmpdir(), 'communitd-img-'));
+          imagePaths = writeImageFiles(built.images, imageDir);
+        }
+        // **検査した内容そのもの**を読ませる (claude と同じ理由 — 版照合を素通りする窓を作らない)
+        roleDir = mkdtempSync(join(tmpdir(), 'communitd-role-'));
+        const rolePromptFile = join(roleDir, 'role.md');
+        writeFileSync(rolePromptFile, roleText);
+        // ツール軌跡は pi の JSON 出力から取れる (hook のプロセスが要らない) ので常に取る。
+        // verify の差し戻しは claude と同じく hooks: true のチャンネルだけ — 切ったチャンネルでは
+        // ブリッジ側の最終検証が 1 回だけ走る
+        settingsDir = mkdtempSync(join(tmpdir(), 'communitd-settings-'));
+        traceFile = join(settingsDir, 'tool-trace.jsonl');
+        let verify = null;
+        if (verifyCommand && resolveHooksEnabled(cc)) {
+          verifyStateFile = join(settingsDir, 'verify-state.json');
+          verify = {
+            command: verifyCommand,
+            cwd: cc.cwd,
+            stateFile: verifyStateFile,
+            maxRetries: resolveVerifyMaxRetries(cc),
+            timeoutMs: DEFAULT_VERIFY_TIMEOUT_MS,
+          };
+        }
+        outcome.hooks = true;
+        res = await runPi({
+          piCmd: config.piCmd,
+          cwd: cc.cwd,
+          model: bot.cfg.model,
+          effort: bot.cfg.effort,
+          prompt: built.prompt,
+          imagePaths,
+          rolePromptFile,
+          allowedTools: effectiveAllowedTools,
+          permissionMode: effectivePermissionMode,
+          tools: applied.narrowed?.tools ?? null,
+          disallowedTools: applied.narrowed?.disallowedTools ?? [],
+          // touch 制限中は 1 つも開かない (claude の --add-dir と同じ扱い)
+          addDirs: applied.narrowed?.addDirs ?? resolveAddDirs(cc),
+          jsonSchema: contractKind ? SCHEMAS[contractKind] : null,
+          verify,
+          traceFile,
+          timeoutMs: config.limits?.claudeTimeoutMs ?? 3600000,
+          scrubEnvKeys: Object.values(config.bots).map((b) => b.tokenEnv),
+          handle,
+          onSpawn: (info) => run.spawn(info),
+        });
+        // role は --append-system-prompt のファイルで渡るので本文と合算する
+        sentChars = roleText.length + built.prompt.length;
+        if (res.stallBlocks > 0) {
+          console.log(`[pi] ${thread.id}:${bot.key} 同じ呼び出しのくり返しを ${res.stallBlocks} 回止めた`);
+        }
       } else {
         const entry = store.get(thread.id, bot.key);
         const sameCwd = Boolean(entry && entry.cwd === cc.cwd);
+        // 前の job が「次から新しいセッション」と決めていたら resume しない (T-2 — src/session-cut.js)。
+        // 作り直しは新規・幻セッションと同じ経路で、引き継ぎを本文の先頭に足し、遡りの予算だけ絞る。
+        // モデルが失敗した job ではセッションを保存しないので、切る印は次の試行まで残る
+        const carry = sameCwd && entry.cut ? entry.cut : null;
+        const resume = sameCwd && !carry;
+        session = { entry, sameCwd, resume, carry, limits: resolveSessionLimits(config, cc) };
 
         // **検査した内容そのもの**を CLI へ読ませる。元のパスを渡すと、版を確かめてから
         // spawn するまでの間 (transcript の取得・画像の取得を挟む) に role が書き換わり、
@@ -465,7 +700,6 @@ export function createJobRunner({
         // 省略時は null = 一時ファイルも --settings も無し。hooks 以外のキーは
         // buildHookSettings が拒否し、permissions による `--allowedTools` 迂回を封じる。
         const hooksEnabled = resolveHooksEnabled(cc);
-        verifyCommand = resolveVerifyCommand(cc);
         // **承認済みルールは job 開始時点のスナップショット** (承認は「次の job から」効く)。
         // hook 経路はこの不変条件の意図的な更新なので、同じ配列を承認ブローカへも渡し、
         // 「既に許可されているものは聞かない」の判定を実際に渡した値で行う。
@@ -546,7 +780,7 @@ export function createJobRunner({
           writeFileSync(settingsFile, `${JSON.stringify(hookSettings, null, 2)}\n`, 'utf8');
         }
 
-        const claudeOpts = {
+        claudeOpts = {
           claudeBin: config.claudeBin,
           cwd: cc.cwd,
           model: bot.cfg.model,
@@ -588,23 +822,41 @@ export function createJobRunner({
         // resume できるときだけ自分の過去発言を落とす (セッションが持っているため)。
         // 新規・cwd 不一致の履歴再構築では includeSelf=true — 落とすと自分の過去報告だけが
         // 欠けた文脈で走り、直前に何を返したか分からなくなる
-        built = await buildPrompt(bot, triggerMsg, thread, sameCwd ? entry : null, !sameCwd);
+        built = await buildPrompt(
+          bot, triggerMsg, thread, resume ? entry : null, !resume,
+          carry ? { charBudget: session.limits.transcriptCharBudget } : undefined,
+        );
+        if (carry) {
+          // 事実は job の開始時点のもの (git status は実行前のスナップショットを使い回す)。
+          // 自分の過去 job は終わったものだけ — 走っているこの job を「結果なし」で載せない
+          const carryText = renderCarryOver({
+            cut: carry,
+            task: board?.findByThread(thread.id) ?? null,
+            runs: jobRuns.list({ threadId: thread.id, botKey: bot.key, live: false }),
+            gitStatus: gitBefore,
+          });
+          built = { ...built, prompt: `${carryText}\n\n${built.prompt}` };
+          console.log(
+            `[session] ${thread.id}:${bot.key} 新しいセッションで再開 (前: 文脈 ${carry.contextTokens ?? '不明'} tok / `
+              + `${carry.jobs} job / メモ${carry.memo ? 'あり' : 'なし'})`,
+          );
+        }
         // 実行記録: hooks の有無 (trace が無いことを「何もしなかった」と読まないための印)
         outcome.hooks = hooksEnabled;
         res = await runClaude({
           ...claudeOpts,
           prompt: built.prompt,
           images: built.images,
-          sessionId: sameCwd ? entry.sessionId : undefined,
-          resume: sameCwd,
+          sessionId: resume ? entry.sessionId : undefined,
+          resume,
           handle,
           onSpawn: (info) => run.spawn(info),
         });
 
         // 幻セッションからの自己回復: 保存済み sessionId が CLI 側に存在しない場合は
         // entry を破棄し、履歴を遡り直した新規セッションで 1 回だけやり直す
-        if (!res.ok && !res.aborted && sameCwd && /No conversation found/i.test(`${res.error ?? ''} ${res.detail ?? ''}`)) {
-          // 消せなくても新しいセッションでやり直す (/ Opus2 レビュー Minor2)。
+        if (!res.ok && !res.aborted && resume && /No conversation found/i.test(`${res.error ?? ''} ${res.detail ?? ''}`)) {
+          // 消せなくても新しいセッションでやり直す (§12.3 (1) / Opus2 レビュー Minor2)。
           // sessions.json が読めないときは entry も読めていないのでここへは来ないが、
           // 書き込み側の失敗 (ディスク・権限) でモデルの再実行ごと落とさない
           try {
@@ -675,18 +927,49 @@ export function createJobRunner({
       // モデルが成功した時点でセッションと既読位置を確定する。以降の verify が NG / 停止でも
       // モデルは既に副作用を出しているため、戻すと次ターンで同じ発言が二重に流れるか、
       // 実在する session が分岐する。codex はステートレスなので対象外。
-      // **保存できなくても配送は止めない** (後始末)。sessions.json は制御台帳では
+      // **保存できなくても配送は止めない** (§12.3 (1) の後始末)。sessions.json は制御台帳では
       // なく「次も同じセッションを続けるための控え」なので、読めない台帳のせいでモデルの
       // 成果ごと internal-error にすると、失うものの方が大きい。失ったのは継続だけなので
       // 本文の末尾で断る (次の job は新しいセッションで始まる)
       let sessionSaveError = null;
-      if (bot.cfg.runtime !== 'codex') {
+      let cutNoticeLine = null;
+      if (capabilitiesOf(bot.cfg).resume && session) {
+        // 文脈は**しきい値と同じ物差し** (最後のリクエストの input + cache) で測る。
+        // 記録が読めなければ usage の平均で代える (小さめに出るが、job 数の保険もある)
+        const contextTokens = lastContextFromLog(
+          readSessionLogLines({ cwd: cc.cwd, sessionId: res.sessionId, tailBytes: SESSION_LOG_TAIL_BYTES }) ?? [],
+        ) ?? estimateContext(res.usage, res.numTurns);
+        if (contextTokens !== null) metrics.contextTokens = contextTokens;
+        // 同じセッションを続けた job だけ数え足す (新規・作り直し・幻セッションからの復旧は 1 から)。
+        // 項目の無い旧形式の entry は 0 扱い
+        const continued = session.resume && session.entry?.sessionId === res.sessionId;
+        const jobs = (continued ? (session.entry.jobs ?? 0) : 0) + 1;
+        const next = {
+          sessionId: res.sessionId,
+          cwd: cc.cwd,
+          lastMessageId: built.lastSeenId,
+          jobs,
+          contextTokens,
+          cuts: (session.sameCwd ? (session.entry?.cuts ?? 0) : 0) + (session.carry ? 1 : 0),
+        };
+        const cutReason = shouldCutSession({ contextTokens, jobs }, session.limits);
+        if (cutReason) {
+          next.cut = {
+            reason: cutReason,
+            contextTokens,
+            jobs,
+            // メモは配送の後で書かせる (writeCutMemo)。取れなければ null のまま切る
+            memo: null,
+            editedFiles: editedFilesFromLog(readSessionLogLines({ cwd: cc.cwd, sessionId: res.sessionId }) ?? [], { cwd: cc.cwd }),
+            at: new Date().toISOString(),
+          };
+        }
         try {
-          store.set(thread.id, bot.key, {
-            sessionId: res.sessionId,
-            cwd: cc.cwd,
-            lastMessageId: built.lastSeenId,
-          });
+          store.set(thread.id, bot.key, next);
+          if (next.cut) {
+            pendingCut = { sessionId: res.sessionId };
+            cutNoticeLine = cutNotice(next.cut);
+          }
         } catch (err) {
           sessionSaveError = err?.message ?? String(err);
           console.error(`[session] ${thread.id}:${bot.key} セッションを保存できません: ${sessionSaveError}`);
@@ -694,7 +977,7 @@ export function createJobRunner({
       }
 
       // ---- 構造化出力の受け取り (T6) ----
-      // **スキーマを渡した job では result がスキーマの JSON 文字列になる** ので、
+      // **スキーマを渡した job では result がスキーマの JSON 文字列になる** (T0 §4.1) ので、
       // 人間へ出すのは `本文` フィールド。様式に合わなければ素の result へ縮退して
       // 情報は落とさないが、**契約としては使わない** (保存も touch 制限の適用もしない)
       let outgoingText = res.result || '(空応答)';
@@ -739,11 +1022,38 @@ export function createJobRunner({
         } else {
           // 計測ログ (src/queue.js) は既知のキーだけを出すので、ここは console へ残す
           console.error(`[contract] ${bot.key}: 様式不履行 — ${checked.reason}`);
+          // JSON としては読めて本文フィールドが文字列なら、生 JSON ではなくそれを出す。
+          // ただし**末尾の呼び出しは実行しない** — contractOut が null のまま handoff が通ると、
+          // touch 制限の効かない委譲が開く。外したことは本文の 1 行で断る
+          const body = bodyOf(res.structuredOutput);
+          if (body.trim() !== '') {
+            const stripped = stripFooterControls(body);
+            outgoingText = stripped.removed.length === 0
+              ? body
+              : appendBeforeFooter(
+                stripped.text,
+                `⚠️ ${stripped.removed.map((line) => `\`${sanitizeForDisplay(line, 100)}\``).join(' ')} は、`
+                  + '契約として扱っていないので呼び出しは実行していません',
+              );
+          }
           contractNotes.push(
             `⚠️ 構造化出力が様式に合いませんでした (${sanitizeForDisplay(checked.reason, 200)})\n`
-            + '  → 本文はそのまま出しています。契約としては扱っていないので、'
-            + '委譲の touch 制限や検収の照合には使われません',
+            + `  → ${body.trim() !== '' ? '本文フィールドだけを出しています' : '本文はそのまま出しています'}。`
+            + '契約としては扱っていないので、委譲の touch 制限や検収の照合には使われません',
           );
+        }
+      }
+
+      // 最終回答を 2 回以上出した job は、届かなかった回があることを本文で断る。
+      // 結果に入るのは最後の 1 回だけで、前の回 (質問や [[notify:owner]] を含みうる) は消えるため
+      // (2026-10-03 の実例: docs/handoff/2026-10-03-final-answer-once.md)。届け直しはしない —
+      // 前の回の制御フッターを生きたまま流すと、意図しない起動や呼び出しが起きる
+      if (contractKind && capabilitiesOf(bot.cfg).resume) {
+        const finalAnswers = countFinalAnswersInSession({ cwd: cc.cwd, sessionId: res.sessionId, sinceMs: jobStartedAt });
+        const warning = finalAnswerWarning(finalAnswers);
+        if (warning) {
+          console.error(`[final-answer] ${bot.key}: 最終回答を ${finalAnswers} 回出した job (thread:${thread.id})`);
+          outgoingText = appendBeforeFooter(outgoingText, warning);
         }
       }
 
@@ -753,6 +1063,7 @@ export function createJobRunner({
           '⚠️ セッションを保存できませんでした (sessions.json が読めない) — 次回は新しいセッションで始まります',
         );
       }
+      if (cutNoticeLine) outgoingText = appendBeforeFooter(outgoingText, cutNoticeLine);
 
       // 実行後 hook が 1 行ずつ追記したもの (= 実際に実行されたツールだけ。成功も失敗も含む)。
       // verify より前に読むのは、verify を停止した job でも「モデルが何をしたか」は
@@ -822,10 +1133,12 @@ export function createJobRunner({
         thread, bot, cc, res, gitBefore, placeholder, effectiveRoster,
         {
           verifyResult, traceSummary, askLedger, outgoingText, contractOut, contractNotes, run,
-          // verify が最終 NG のとき、元の handoff の代わりに戻す先
+          // verify が最終 NG のとき、元の handoff の代わりに戻す先 (§12.3 (3))
           issuerBotKey: issuerBotKeyOf(triggerMsg, claimed),
           // 案件付きの job では自由文の handoff を実行しない (次の起動は next.plan から)
           societyAction,
+          // 完了でレビューの証拠を測っている間の /stop・/restart も、作業ツリーを HEAD へ戻してから終わる
+          handle,
         },
       );
       // 終わり方の文脈を実行記録へ (次に誰が動くかは finish が決める)
@@ -834,7 +1147,19 @@ export function createJobRunner({
       outcome.taskState = board?.findByThread(thread.id)?.state ?? null;
       if (posted.delivered) {
         await placeholder.delete().catch(() => {});
-        return verifyResult && !verifyResult.ok ? 'verify-failed' : 'ok';
+        // 配送の後 (人を待たせない)・finally の前 (role のスナップショットがまだある) に書かせる。
+        // 返答は届いているので「入力中…」はここで止める (メモは最大 3 分かかる)
+        if (pendingCut) {
+          clearInterval(typing);
+          await writeCutMemo({ claudeOpts, thread, bot, sessionId: pendingCut.sessionId, handle });
+        }
+        if (verifyResult && !verifyResult.ok) {
+          // 理由は reason と別に運ぶ (reason の 'verify-failed' は完全一致で比べる側がある)。
+          // 配送に落ちた job (deliver-failed) には載せない
+          outcome.verifyDetail = verifyFailureDetail(verifyResult);
+          return 'verify-failed';
+        }
+        return 'ok';
       }
       await editSafe(
         placeholder,
@@ -857,6 +1182,12 @@ export function createJobRunner({
       // **一時ディレクトリを消す前に**待っている hook を畳む。成功・失敗・中断の
       // どの経路もここを通るので、待機の後始末はこの 1 か所で足りる
       broker?.stop();
+      // 軌跡を実行記録と同じ寿命で残す (差し戻しはこの後のレビューで決まり、提案役はそこから手順を
+      // 読みに来る — src/trace-store.js)。一時ディレクトリを消す前に。残せなくても job の結果は変えない
+      if (traceDir && traceFile && run.id) {
+        try { saveRunTrace(traceDir, run.id, readTraceEntries(traceFile)); }
+        catch (err) { console.error(`[${bot.key}] 軌跡を残せませんでした (${run.id}): ${err.message}`); }
+      }
       for (const [label, dir] of [
         ['一時画像', imageDir],
         ['role スナップショット', roleDir],

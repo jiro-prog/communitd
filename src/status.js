@@ -1,4 +1,5 @@
-// `/status` — 朝開いて 30 秒で「何が終わり・何が動き・何を決めるか」を掴むための 1 通。**純粋関数だけ**。
+// `/status` — 朝開いて 30 秒で「何が終わり・何が動き・何を決めるか」を掴むための 1 通
+// (docs/implementation-plan.md P5 / docs/social-engineering.md §11.5)。**純粋関数だけ**。
 //
 // 状態の判定は src/taskstatus.js (受信箱と同じ判定)、組版は src/inbox.js と同じ流儀
 // (どの節も見出しと先頭 1 行は必ず出す — 判断待ちの節が大量の行で消えないように)。
@@ -18,6 +19,10 @@ const MAX_ROWS = 8;
 const DECISION_STATUSES = Object.freeze(['approval-wait', 'reply-wait', 'blocked']);
 /** 「進行中」に数える状態 */
 const ACTIVE_STATUSES = Object.freeze(['running', 'queued', 'handoff-wait', 'review-wait', 'retry-scheduled']);
+/** 同時枠を使うボードの状態 (src/scheduler.js の着手の判断と同じ数え方) */
+const SLOT_STATES = Object.freeze(['in-progress', 'review']);
+/** 枠を持っているタスクに経過も添える状態 (止まったまま枠を塞いでいる) */
+const STALLED_STATUSES = Object.freeze(['recovery-wait', 'reconcile']);
 
 /**
  * 材料を集計する (純粋)。
@@ -28,7 +33,7 @@ const ACTIVE_STATUSES = Object.freeze(['running', 'queued', 'handoff-wait', 'rev
  * @param {object[]} [p.runs] そのチャンネルの実行記録
  * @param {string|null} [p.runsError] 実行記録が読めない理由 (読めれば null)
  * @param {Array<{file: string, reason: string, gate?: boolean}>} [p.ledgerErrors] 読めない台帳
- *  。`gate !== false` = **自律起動が止まる台帳** (pause / tasks / recovery /
+ *   (§12.3 (1))。`gate !== false` = **自律起動が止まる台帳** (pause / tasks / recovery /
  *   job-runs / tick-states / proposals)。それ以外は読めないことだけを出す —
  *   sessions.json の破損で「自律起動は止まっています」と書くと、表示と実態がずれる
  * @param {number} p.now
@@ -37,11 +42,12 @@ const ACTIVE_STATUSES = Object.freeze(['running', 'queued', 'handoff-wait', 'rev
  * @param {number} [p.backoffUntil]
  * @param {number|null} [p.dayJobsLeft]
  * @param {number|null} [p.maxJobsPerDay]
+ * @param {number|null} [p.maxConcurrentTasks] 自律運転の同時枠 (無効なら null = 枠待ちを出さない)
  */
 export function summarizeStatus({
   channelName, tasks = [], statusOf, runs = [], runsError = null, ledgerErrors = [], now = Date.now(),
   windowMs = DEFAULT_STATUS_WINDOW_MS, pause = null, backoffUntil = 0, dayJobsLeft = null, maxJobsPerDay = null,
-  autonomy = false, society = null,
+  maxConcurrentTasks = null, autonomy = false, society = null,
 } = {}) {
   const from = now - windowMs;
   const list = (Array.isArray(tasks) ? tasks : []).filter((t) => t && typeof t === 'object');
@@ -62,6 +68,9 @@ export function summarizeStatus({
   const active = [];
   const recovering = [];
   const decisions = [];
+  // 同時枠を持っているタスク。どの節にも入らない状態 (unknown など) でも枠は塞ぐので、
+  // 節の振り分けではなくボードの状態で拾う
+  const holders = [];
   for (const task of list) {
     if (['merged', 'dropped'].includes(task.state)) continue;
     let status;
@@ -70,6 +79,7 @@ export function summarizeStatus({
     } catch (err) {
       status = { status: 'reconcile', reason: `判定できない (${err?.message ?? err})`, since: null, waitedMs: null, next: 'human', run: null };
     }
+    if (SLOT_STATES.includes(task.state)) holders.push({ task, status });
     if (RECOVERY_STATUSES.includes(status.status)) recovering.push({ task, status });
     else if (DECISION_STATUSES.includes(status.status)) decisions.push({ task, status });
     else if (ACTIVE_STATUSES.includes(status.status)) active.push({ task, status });
@@ -88,6 +98,13 @@ export function summarizeStatus({
     byOutcome[key] = (byOutcome[key] ?? 0) + 1;
   }
   const open = list.filter((t) => ['proposed', 'approved'].includes(t.state)).length;
+  // 承認済みが同時枠の空き待ちで着手されていない (src/scheduler.js の planTick と同じ条件)。
+  // 「着手待ち N 件」だけでは、ループが止まっていることもその原因も読めない
+  const approved = list.filter((t) => t.state === 'approved').length;
+  const max = Number.isSafeInteger(maxConcurrentTasks) && maxConcurrentTasks > 0 ? maxConcurrentTasks : null;
+  const slotWait = autonomy === true && max !== null && approved > 0 && holders.length >= max
+    ? { approved, max, holders }
+    : null;
 
   return {
     channelName,
@@ -99,6 +116,8 @@ export function summarizeStatus({
     recovering,
     decisions,
     open,
+    // 枠待ちでなければ null (「着手待ち N 件」を今の文言のまま出す)
+    slotWait,
     runs: { total: windowRuns.length, byOutcome, error: runsError },
     ledgers: (Array.isArray(ledgerErrors) ? ledgerErrors : []).filter((l) => l && l.file),
     // `autonomy` は**このチャンネルで自律運転が有効か**。止まっているかどうか (pause) とは
@@ -106,7 +125,7 @@ export function summarizeStatus({
     operation: {
       pause, backoffUntil: Number(backoffUntil) || 0, dayJobsLeft, maxJobsPerDay, autonomy: autonomy === true,
     },
-    // 自律社会。**渡されなければ null = 行を出さない** —
+    // 自律社会 (docs/society-ledger.md)。**渡されなければ null = 行を出さない** —
     // 社会を持たない配備の /status を 1 行増やさない
     society: society && typeof society === 'object' ? society : null,
   };
@@ -220,7 +239,7 @@ export function formatStatus(summary, { escape = (s) => s } = {}) {
     summary.operation.dayJobsLeft === null
       ? null
       : `日次予算 残 ${summary.operation.dayJobsLeft}${summary.operation.maxJobsPerDay ? ` / ${summary.operation.maxJobsPerDay}` : ''}`,
-    `着手待ち ${summary.open} 件`,
+    `着手待ち ${summary.open} 件${formatSlotWait(summary.slotWait, now, escape)}`,
     summary.dropped.length > 0 ? `破棄 ${summary.dropped.length} 件` : null,
     summary.runs.error
       ? `⚠️ 実行記録が読めない (${escape(oneLine(summary.runs.error, 60))}) — job の数字は出せません`
@@ -228,6 +247,20 @@ export function formatStatus(summary, { escape = (s) => s } = {}) {
   ].filter(Boolean).join(' / ');
   const body = layoutBlocks(blocks, footer, MAX_STATUS_CHARS - head.length - 1);
   return `${head}\n${body === EMPTY_INBOX ? footer : body}`.slice(0, MAX_STATUS_CHARS);
+}
+
+/**
+ * 枠待ちの括弧書き (「着手待ち N 件」の後ろ)。**枠待ちでなければ空文字**で、今の文言を変えない。
+ * 枠を持っているタスクは id と状態、止まったまま塞いでいるもの (復旧待ち・要照合) は経過も添える。
+ * 区切りは `、` — ` / ` は運転の行そのものの区切りなので、括弧の中で使うと別の項目に読める
+ */
+function formatSlotWait(slotWait, now, escape) {
+  if (!slotWait) return '';
+  const holders = slotWait.holders.map(({ task, status }) => (
+    `#${escape(String(task.id))} ${escape(statusLabel(status.status))}`
+    + `${STALLED_STATUSES.includes(status.status) ? ` ${elapsed(status.since, now)}` : ''}`
+  )).join('、');
+  return ` (承認済み ${slotWait.approved} 件が同時枠 ${slotWait.holders.length}/${slotWait.max} の空き待ち — ${holders})`;
 }
 
 /** verify の記録 → 表示。**無ければ不明** (成功と数えない) */

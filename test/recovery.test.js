@@ -44,6 +44,15 @@ test('planRetry: review はレビュー担当へ (共通の /review 判定へつ
   assert.equal(planRetry(base({ task: task({ state: 'review' }), reviewerKey: null })).ok, false);
 });
 
+test('planRetry: 改訂の解き直し待ち (replay-wait) は起こし直さず、待たずに呼ぶなら /review と添える', () => {
+  const plan = planRetry(base({
+    task: task({ state: 'review', replay: { status: 'running' } }),
+    status: stalled({ status: 'replay-wait', reason: '改訂の下書きの検証 (解き直し) の終わり待ち' }),
+  }));
+  assert.equal(plan.ok, false);
+  assert.match(plan.reason, /#77 は解き直し待ちです .* 起こし直しません。 待たずにレビューを呼ぶなら `\/review`$/);
+});
+
 test('planRetry: 対象が決まらない・終わっている・blocked・着手前は断る (理由に次の操作)', () => {
   assert.match(planRetry(base({ task: null })).reason, /対応するタスクがありません/);
   assert.match(planRetry(base({ id: '78' })).reason, /このスレッドのタスクは #77 です/);

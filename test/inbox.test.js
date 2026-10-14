@@ -11,6 +11,7 @@ import {
   MAX_ROW_SUMMARY_CHARS,
   MAX_SUMMARY_CHARS,
   formatInbox,
+  layoutBlocks,
   summarizeForInbox,
 } from '../src/inbox.js';
 import { createInteractionHandler } from '../src/interactions.js';
@@ -247,6 +248,16 @@ test('要旨は 140 字を超えると切る', () => {
   assert.equal(summarizeForInbox('あ'.repeat(MAX_SUMMARY_CHARS)).length, MAX_SUMMARY_CHARS);
 });
 
+test('要旨は 140 字の境界に絵文字が来てもサロゲートペアを割らない (1 つ手前で切る)', () => {
+  // 140 字目と 141 字目 (UTF-16) が 1 つの絵文字 — 素朴に切ると末尾が � になる
+  const split = summarizeForInbox(`${'あ'.repeat(MAX_SUMMARY_CHARS - 1)}😀${'あ'.repeat(10)}`);
+  assert.equal(split, `${'あ'.repeat(MAX_SUMMARY_CHARS - 1)}…`);
+  // 絵文字がちょうど上限に収まるなら残す
+  const fits = summarizeForInbox(`${'あ'.repeat(MAX_SUMMARY_CHARS - 2)}😀${'あ'.repeat(10)}`);
+  assert.equal(fits, `${'あ'.repeat(MAX_SUMMARY_CHARS - 2)}😀…`);
+  for (const out of [split, fits]) assert.ok(out.isWellFormed(), `ペアが割れている: ${JSON.stringify(out.slice(-3))}`);
+});
+
 // ---- formatInbox ----
 
 const proposal = (over = {}) => ({
@@ -446,6 +457,28 @@ test('一覧の要旨は 60 字で切る (台帳の 140 字はそのまま)', ()
   assert.ok(!out.includes('い'.repeat(MAX_ROW_SUMMARY_CHARS + 1)), '60 字を超えて出している');
 });
 
+test('一覧の要旨は 60 字の境界に絵文字が来てもサロゲートペアを割らない', () => {
+  const s = store();
+  s.open(notice({ summary: `${'い'.repeat(MAX_ROW_SUMMARY_CHARS - 1)}😀${'い'.repeat(10)}` }), { now: T0 });
+  const out = formatInbox({ notifies: s.openList(), now: T0 });
+  assert.ok(out.includes(`「${'い'.repeat(MAX_ROW_SUMMARY_CHARS - 1)}…」`), out);
+  assert.ok(out.isWellFormed(), 'ペアが割れている');
+});
+
+test('全体の上限で切る位置が絵文字の間に来ても、1 つ手前で切る (/status も同じ組版)', () => {
+  const head = '**節 (1 件)**';
+  const row = `・${'😀'.repeat(20)}`;
+  const blocks = [{ head, rows: [row], total: 1 }];
+  assert.equal(layoutBlocks(blocks, '', 1000), `${head}\n${row}`);
+
+  // 2 つめの絵文字の上位と下位の間が上限
+  const max = `${head}\n・😀`.length + 1;
+  const out = layoutBlocks(blocks, '', max);
+  assert.equal(out, `${head}\n・😀`);
+  assert.ok(out.length <= max);
+  assert.ok(out.isWellFormed(), 'ペアが割れている');
+});
+
 test('escape は要旨にも「誰から」にも効く', () => {
   const s = store();
   s.open(notice({ botKey: 'op@us', summary: '`rm -rf` を打ちますか' }), { now: T0 });
@@ -580,7 +613,7 @@ test('受信箱が配線されていなければ ⚠️ を返す (黙って空�
   assert.equal(h.log[1], 'edit:⚠️ 受信箱の機能が無効です');
 });
 
-// ---- 復旧待ち ----
+// ---- 復旧待ち (§11.2) ----
 
 const recoveryRow = (over = {}) => ({
   task: { id: '77', title: 'doc_path_lint に死活検査を足す', state: 'in-progress', threadId: 'T77' },
@@ -628,4 +661,15 @@ test('復旧待ちだけでも空の 1 行にならず、長い順に並び、�
   const head = lines.indexOf('**復旧待ち (2 件)**');
   assert.match(lines[head + 1], /^・#2 1h0m 「b」 \(人間による停止: 人間の \/stop で中断 \(opus\) → 続けるなら `\/retry`\)/);
   assert.match(lines[head + 2], /^・#1 5m 「a」 \(要照合: あ{80}… → 子プロセスの残りを確かめて/);
+});
+
+test('復旧待ちの理由は 80 字の境界に絵文字が来てもサロゲートペアを割らない', () => {
+  const out = formatInbox({
+    recoveries: [
+      recoveryRow({ status: { status: 'reconcile', reason: `${'あ'.repeat(79)}😀あ`, since: T0 - minutes(5), waitedMs: minutes(5), next: 'human', run: null } }),
+    ],
+    now: T0,
+  });
+  assert.match(out, /\(要照合: あ{79}… → /);
+  assert.ok(out.isWellFormed(), 'ペアが割れている');
 });

@@ -1,4 +1,3 @@
-// @ts-check
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -9,6 +8,8 @@ export const DEFAULT_VERIFY_TIMEOUT_MS = 10 * 60 * 1000;
 export const VERIFY_OUTPUT_MAX_CHARS = 1024 * 1024;
 export const VERIFY_DISPLAY_MAX_CHARS = 1900;
 export const VERIFY_TAIL_LINES = 20;
+/** 子を撃った後に close を待つ上限。過ぎたら close 無しで終える (runVerify の保険) */
+export const VERIFY_KILL_GRACE_MS = 8000;
 
 /**
  * 作者が config.json に直接書いた検証コマンドを非同期実行する。
@@ -16,16 +17,6 @@ export const VERIFY_TAIL_LINES = 20;
  * shell: true は `npm test` のような shell 文字列をそのまま受けるために必要。
  * これは allowedTools の外にある任意コマンド実行経路なので、値の出所は作者管理の
  * config.json だけに限定し、エージェント出力や承認データから組み立てない。
- *
- * @param {object} p
- * @param {string} p.command 検証コマンド (shell 文字列)
- * @param {string} p.cwd
- * @param {number} [p.timeoutMs]
- * @param {number} [p.maxOutputChars]
- * @param {string[]} [p.scrubEnvKeys] 子へ渡さない環境変数
- * @param {{stopRequested?: boolean, abort?: () => void}|null} [p.handle] 停止の口 (撃たれたら走らせない・走っていれば止める)
- * @param {boolean} [p.detachGroup]
- * @param {typeof spawn} [p.spawnImpl]
  */
 export function runVerify({
   command,
@@ -42,7 +33,7 @@ export function runVerify({
   // claude のグループに残るので**ブリッジからの停止では孫まで届く** — 総和では確実になる
   detachGroup = true,
   spawnImpl = spawn,
-}) {
+} = {}) {
   if (handle?.stopRequested) {
     return Promise.resolve({
       ran: false,
@@ -103,6 +94,17 @@ export function runVerify({
       output,
       ...extra,
     });
+    // 撃った子の結果。停止の指示が先に立っていれば、後からタイムアウトが来ても停止として返す
+    const killedResult = () => (aborted
+      ? result({ aborted: true, error: '停止指示により検証を中断' })
+      : result({ timedOut: true, error: `timeout after ${formatDuration(timeoutMs)}` }));
+    // 撃った後に close が来ない (孫が stdout を握ったまま生きている) 場合もキューを永久に
+    // 掴まない。停止の指示でもタイムアウトでも張る — 停止の側に無いと、自前のタイムアウト
+    // (job からは 10 分) まで返らず、しかも停止ではなくタイムアウトとして返っていた。
+    // 多重 resolve は settled で防ぐ。
+    const finishWithoutClose = () => {
+      setTimeout(() => finish(killedResult()), VERIFY_KILL_GRACE_MS).unref?.();
+    };
 
     if (handle) {
       handle.abort = () => {
@@ -110,6 +112,7 @@ export function runVerify({
         if (!settled) {
           aborted = true;
           killTree(child);
+          finishWithoutClose();
         }
       };
     }
@@ -117,21 +120,13 @@ export function runVerify({
     const timer = setTimeout(() => {
       timedOut = true;
       killTree(child);
-      // close が来ない場合もキューを永久に掴まない。多重 resolve は settled で防ぐ。
-      setTimeout(
-        () => finish(result({ timedOut: true, error: `timeout after ${formatDuration(timeoutMs)}` })),
-        8000,
-      ).unref?.();
+      finishWithoutClose();
     }, timeoutMs);
 
     child.on('error', (err) => finish(result({ error: `spawn failed: ${err.message}` })));
     child.on('close', (code, signal) => {
-      if (aborted) {
-        finish(result({ aborted: true, error: '停止指示により検証を中断' }));
-        return;
-      }
-      if (timedOut) {
-        finish(result({ timedOut: true, error: `timeout after ${formatDuration(timeoutMs)}` }));
+      if (aborted || timedOut) {
+        finish(killedResult());
         return;
       }
       finish(result({ ok: code === 0, code, signal }));

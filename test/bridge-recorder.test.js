@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 
 import { createRunRecorder, reconcileJobRunsOnStartup } from '../src/bridge/recorder.js';
 import { JobRunStore } from '../src/jobruns.js';
+import { saveRunTrace } from '../src/trace-store.js';
 
 // src/bridge/recorder.js — 実行記録への書き口。**記録の失敗で job を落とさない**約束をここで見る。
 
@@ -40,6 +41,10 @@ test('runRecorder(id) は各段階を実行記録へ写す', (t) => {
   assert.equal(jobRuns.get('j1').stageDetail, 'claude を起動');
   recorder.spawn({ pid: 4242, runtime: 'claude' });
   assert.equal(jobRuns.get('j1').spawn.pid, 4242);
+  recorder.harness({ rev: 'abcdef012345', role: 'worker', files: ['roles/worker.md'], runtime: 'claude', model: 'opus' });
+  assert.deepEqual(jobRuns.get('j1').harness, {
+    rev: 'abcdef012345', role: 'worker', files: ['roles/worker.md'], runtime: 'claude', model: 'opus', effort: null,
+  });
   recorder.model({ ok: true });
   assert.equal(jobRuns.get('j1').modelResult, 'ok');
   recorder.activity({ kind: 'tool', detail: 'Read a.js' });
@@ -59,6 +64,7 @@ test('id の無い呼び出し (テスト・旧経路) は黙って通す', (t) 
   const recorder = createRunRecorder({ jobRuns })(null);
   assert.equal(recorder.stage('model'), null);
   assert.equal(recorder.spawn({ pid: 1 }), null);
+  assert.equal(recorder.harness({ rev: 'x' }), null);
   assert.equal(recorder.delivery('本文', 'sent'), null);
   assert.deepEqual(errors, []);
 });
@@ -117,7 +123,40 @@ test('台帳が読めなければ退避せず在処に残し、記録が無い�
   assert.ok(warning, errors.join('\n'));
   assert.match(warning, /記録が無いことを「仕事が無い」と読まないこと/);
   assert.match(warning, /退避していません/);
-  // 退避すると次の起動が「初回」に見える。照合も掃除も壊れたファイルに触らない
+  // 退避すると次の起動が「初回」に見える (§12.3 (1))。照合も掃除も壊れたファイルに触らない
   assert.equal(readFileSync(file, 'utf8'), '{ not json');
   assert.deepEqual(readdirSync(dirname(file)), ['job-runs.json']);
+});
+
+test('起動時の掃除は、実行記録から消えた job の軌跡も消す (残っている job の軌跡は残す)', (t) => {
+  const { logs, errors } = captureConsole(t);
+  const dir = tmp(t);
+  const traceDir = join(dir, 'traces');
+  const file = join(dir, 'job-runs.json');
+  const old = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString();
+  writeFileSync(file, JSON.stringify({
+    stale: {
+      id: 'stale', taskId: null, threadId: 'T0', botKey: 'opus', stage: 'ended', outcome: 'ok', reason: 'ok',
+      acceptedAt: old, startedAt: old, observedAt: old, endedAt: old, evidence: null, handoff: null,
+    },
+  }));
+  const jobRuns = new JobRunStore(file);
+  jobRuns.open({ id: 'kept', taskId: null, threadId: 'T1', botKey: 'opus' });
+  for (const id of ['stale', 'kept', 'orphan']) saveRunTrace(traceDir, id, [{ tool: 'Read' }]);
+
+  reconcileJobRunsOnStartup(jobRuns, { traceDir });
+  assert.deepEqual(readdirSync(traceDir), ['kept.jsonl']);
+  assert.ok(logs.includes('[jobruns] 実行記録から消えた job の軌跡 2 件を消しました'), logs.join('\n'));
+  assert.deepEqual(errors, []);
+});
+
+test('台帳が読めないときは軌跡を掃除しない (空の id の集合で全部消さない)', (t) => {
+  captureConsole(t);
+  const dir = tmp(t);
+  const traceDir = join(dir, 'traces');
+  const file = join(dir, 'job-runs.json');
+  writeFileSync(file, '{ not json');
+  saveRunTrace(traceDir, 'j1', [{ tool: 'Read' }]);
+  reconcileJobRunsOnStartup(new JobRunStore(file), { traceDir });
+  assert.deepEqual(readdirSync(traceDir), ['j1.jsonl']);
 });

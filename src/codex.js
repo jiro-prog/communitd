@@ -1,10 +1,10 @@
-// @ts-check
 import { spawn } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { CODEX_CLI, cliCmdHint, cliCmdReason, resolveCliCommand, resolveConfiguredCommand } from './clicmd.js';
 import { detachOption, killTree, scrubEnv } from './proc.js';
+import { stripNullOptionals, toStrictSchema } from './strict-schema.js';
 
 // codex CLI の在り処 (`CODEX_CLI`) は src/clicmd.js が正本。**配備ごとの絶対パスは
 // 持たない** — 既定は PATH 解決で、明示したいときは config.policy.json の `codexCmd` に書く
@@ -41,7 +41,7 @@ export const DEFAULT_CODEX_SANDBOX = 'read-only';
  * **モデルによっては受け付けない値がある** (`gpt-5.5` は `max` を 400 で拒む) ので、
  * 「codex が知っている値」と「そのモデルで通る値」は別物。後者は起動して初めて分かる。
  */
-export const CODEX_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+export const CODEX_EFFORTS = Object.freeze(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 
 /**
  * ユーザー config.toml のトップレベルから model_reasoning_effort を読む。
@@ -91,7 +91,7 @@ function tomlPath(value) {
  * ので、同じ codex ランタイムのまま相談役の bot を立てられる。省略時は組み込み指示の
  * ままなので、既存の bot の振る舞いは変わらない。
  */
-export function renderCodexConfig({ sandbox, effort, instructionsFile = /** @type {string|null} */ (null) }) {
+export function renderCodexConfig({ sandbox, effort, instructionsFile = null }) {
   const lines = [];
   if (effort) lines.push(`model_reasoning_effort = "${effort}"`);
   if (instructionsFile) lines.push(`model_instructions_file = ${tomlPath(instructionsFile)}`);
@@ -128,7 +128,7 @@ const TEMP_REMOVE_RETRY_MS = [250, 1000, 4000];
 export function removeTempDir(
   dir,
   what,
-  { delays = TEMP_REMOVE_RETRY_MS, attempt = 0, rm = /** @type {((dir: string) => void)|null} */ (null) } = {},
+  { delays = TEMP_REMOVE_RETRY_MS, attempt = 0, rm = null } = {},
 ) {
   if (!dir) return;
   try {
@@ -164,10 +164,7 @@ export function removeTempDir(
  * 経路ごとに個別に消していると、後から増えた資源が片方だけ漏れる
  * (sol 指摘 2026-09-11: `spawn` の同期例外で認証コピーごと残っていた)。
  */
-function cleanupTempDirs({
-  outDir = /** @type {string|null} */ (null),
-  isolatedHome = /** @type {string|null} */ (null),
-} = {}) {
+function cleanupTempDirs({ outDir = null, isolatedHome = null } = {}) {
   removeTempDir(outDir, '一時出力ディレクトリ');
   removeTempDir(isolatedHome, '認証コピーを含む一時 CODEX_HOME');
 }
@@ -237,30 +234,23 @@ function copySandboxState(source, dir) {
  * 環境ではその bot だけ下げないと毎回落ちる (実測 2026-09-11)。省略すれば従来どおり
  * ユーザー設定を写すので、既存 bot の挙動は変わらない。
  */
-export function createIsolatedHome(
-  sandbox,
-  instructionsText = /** @type {string|null} */ (null),
-  botEffort = /** @type {string|null} */ (null),
-) {
+export function createIsolatedHome(sandbox, instructionsText = null, botEffort = null) {
   const source = realCodexHome();
   const auth = join(source, 'auth.json');
   if (!existsSync(auth)) return null;
 
   // 呼び出し側の検証 (src/config.js) を素通りした値は書き込まない — 未知の値を
   // config.toml へ書くと codex が 400 で落ち、原因が「隔離 config の中身」になって遠い
-  /** @type {string|null} */
-  let effort = typeof botEffort === 'string' && CODEX_EFFORTS.includes(botEffort) ? botEffort : null;
+  let effort = CODEX_EFFORTS.includes(botEffort) ? botEffort : null;
   if (!effort) {
     try {
       effort = readUserReasoningEffort(readFileSync(join(source, 'config.toml'), 'utf8'));
     } catch { /* config が無くても既定の推論設定で動く */ }
   }
 
-  /** @type {string|null} */
   let dir = null;
   try {
     dir = mkdtempSync(join(tmpdir(), 'communitd-codexhome-'));
-    /** @type {string|null} */
     let instructionsFile = null;
     if (instructionsText !== null) {
       instructionsFile = join(dir, 'instructions.md');
@@ -299,12 +289,16 @@ export function createIsolatedHome(
  *
  * effort を渡すと隔離 config.toml の model_reasoning_effort をその値で書く
  * (ユーザー設定より優先。モデルが拒む値を避けるための bot ごとの口 — createIsolatedHome)。
+ *
+ * jsonSchema (claude 側と同名の口) を渡すと最終出力をスキーマへ拘束し、結果を
+ * `structuredOutput` に載せて返す。**渡す前に strict 変換が要る** (src/strict-schema.js) —
+ * codex は OpenAI の strict 制約をそのまま通すので、原スキーマのままだと 400 で落ちる。
  */
 export function runCodex({
   // 未設定・1 語なら spawn の直前に PATH から解決する (src/clicmd.js)
   codexCmd = null,
   // 解決をテストから固定するための差し替え口 (実機の PATH に判定を委ねない)
-  resolveCmdImpl = /** @type {((cmd: string|string[]|null) => string[]|null)|null} */ (null),
+  resolveCmdImpl = null,
   cwd,
   model,
   // bot ごとの推論量 (`bots.<key>.effort`)。省略すればユーザー ~/.codex/config.toml の値
@@ -313,11 +307,14 @@ export function runCodex({
   imagePaths = [],
   sandbox = DEFAULT_CODEX_SANDBOX,
   instructionsFile = null,
+  // 最終出力をこのスキーマへ拘束する (claude の runClaude と同名の口)。
+  // **原スキーマをそのまま渡す** — strict 変換はこの関数の中で行う
+  jsonSchema = null,
   timeoutMs = 3600000,
   scrubEnvKeys = [],
   handle,
   // 子プロセスが立った直後に pid と時刻を知らせる (実行記録 — src/jobruns.js)。runClaude と同じ口
-  onSpawn = /** @type {((info: {pid: number|null, at: number, runtime: string}) => void)|null} */ (null),
+  onSpawn = null,
   // spawn の差し替え口 (runClaude と同じ流儀)。同期例外のような「起動そのものが失敗する」
   // 経路は実機で作れないので、後始末をテストで固定するにはここが要る
   spawnImpl = spawn,
@@ -336,7 +333,6 @@ export function runCodex({
 
   // 指示の差し替えは spawn 前に読む。読めないまま走らせると組み込み指示のまま起動し、
   // 相談役として立てた bot が Codex のコーディングエージェントとして応答してしまう
-  /** @type {string|null} */
   let instructionsText = null;
   if (instructionsFile) {
     try {
@@ -387,7 +383,6 @@ export function runCodex({
   // 出力先を作れないこと自体はありうる (TEMP に書けない等)。**素の throw にしない** —
   // 呼び出し側は Promise を待っているので、同期例外だと隔離 home を抱えたまま job が
   // internal-error で落ちる
-  /** @type {string|null} */
   let outDir = null;
   try {
     outDir = mkdtempImpl(join(tmpdir(), 'communitd-codex-'));
@@ -399,6 +394,22 @@ export function runCodex({
     });
   }
   const outFile = join(outDir, 'last-message.txt');
+  // スキーマは一時ディレクトリへ書き出して渡す (`--output-schema` はファイルパスしか受けない)。
+  // **書けなければ起動しない** — スキーマ無しで走らせると、様式を宣言している bot が
+  // 素の散文を返し、契約としては使われないまま job だけ消える
+  let schemaFile = null;
+  if (jsonSchema) {
+    schemaFile = join(outDir, 'schema.json');
+    try {
+      writeFileSync(schemaFile, `${JSON.stringify(toStrictSchema(jsonSchema), null, 2)}\n`, 'utf8');
+    } catch (err) {
+      cleanupTempDirs({ outDir, isolatedHome });
+      return Promise.resolve({
+        ok: false,
+        error: `出力スキーマを書き出せないため起動できません (${err.message})`,
+      });
+    }
+  }
   const [bin, ...binArgs] = resolvedCmd;
   const args = [
     ...binArgs,
@@ -412,6 +423,7 @@ export function runCodex({
     '--color', 'never',
     '-o', outFile,
   ];
+  if (schemaFile) args.push('--output-schema', schemaFile);
   if (model) args.push('-m', model);
   // -i は可変長引数なので 1 ファイルずつ渡す (まとめて渡すと後続の引数を飲み込む)。
   // read-only sandbox でも cwd 外の一時画像を読めることは実測で確認済み
@@ -510,7 +522,17 @@ export function runCodex({
         });
         return;
       }
-      finish({ ok: true, result });
+      // スキーマを渡した job では `-o` の最終メッセージが**生の JSON** で入る
+      // (fence 無し・実測 2026-09-18)。パースできなければ null へ縮退する —
+      // claude 側の `structured_output ?? null` と同じで、様式不履行の扱いは
+      // ブリッジ (validateContract) が決める。ここで job を失敗にはしない
+      let structuredOutput = null;
+      if (jsonSchema) {
+        try {
+          structuredOutput = stripNullOptionals(JSON.parse(result), jsonSchema);
+        } catch { /* 様式に合わない応答として扱う (result は本文へ縮退する) */ }
+      }
+      finish({ ok: true, result, structuredOutput });
     });
 
     child.stdin.on('error', () => {});

@@ -1,4 +1,4 @@
-// スケジューラの判断。
+// スケジューラの判断 (docs/social-engineering.md §3.1・§7-4)。
 //
 // **ここに置くのは純粋関数だけ。** 時計を内部で読まず `now` を引数で受け、
 // Discord にもファイルにもボードにも書かない — 「いま何を起こすべきか」を選ぶところまでが
@@ -8,16 +8,68 @@
 // テストできる。無人運転で怖いのは判断の間違いであって、Discord API の使い方ではない。
 
 import {
+  DEFAULT_HARNESS_INTERVAL_MIN,
   DEFAULT_MAX_CONCURRENT_TASKS,
   DEFAULT_MAX_JOBS_PER_DAY,
+  DEFAULT_PLANNER_INTERVAL_MIN,
   DEFAULT_SCOUT_INTERVAL_MIN,
   DEFAULT_SCOUT_MAX_OPEN_TASKS,
   DEFAULT_TASK_JOB_BUDGET,
+  MAX_CARRY_CHARS,
+  MAX_CARRY_ITEMS,
+  PLAN_EARLY_AFTER_IDLE_SCOUTS,
+  SCOUT_IDLE_BACKOFF_STEPS,
 } from './config.js';
 import { jstDayKey } from './time.js';
 
-/** tick が選べる行動の種類。増やすときは設計の裁定を経ること */
-export const ACTION_KINDS = Object.freeze(['start-task', 'scout', 'initiative']);
+/**
+ * tick が選べる行動の種類。増やすときは設計 (§3.1) の裁定を経ること。
+ * `harness` = ハーネスの改訂の巡回 (2026-10-12 作者裁定「自己改善させるには必要」、src/harness.js)
+ * `plan` = 企画の巡回 (2026-10-12 作者裁定「種を考える部門を作って、考え抜いたものを自分で取り込める
+ * ように」、src/themes.js)
+ */
+export const ACTION_KINDS = Object.freeze(['start-task', 'scout', 'harness', 'plan', 'initiative']);
+
+/** ハーネスの改訂が終わっていない (測る前に次を重ねない) とみなす状態 = 終端 (merged / dropped) 以外 */
+const UNFINISHED_STATES = Object.freeze(['proposed', 'approved', 'in-progress', 'review', 'blocked']);
+
+/**
+ * ハーネスの改訂 (役割文を触る) タスクか (src/harness.js)。改訂は 1 件ずつ測るので、
+ * 終わっていない間は次の改訂を起こさない
+ */
+export function touchesHarness(task) {
+  const touch = Array.isArray(task?.touch) ? task.touch : [];
+  return touch.some((path) => /^roles[\\/]/.test(String(path ?? '').trim()));
+}
+
+/**
+ * ハーネスの改訂の解き直しのタスクか (src/replay.js — replay 欄の of = 改訂のタスクの id)。
+ * 判断の層が持つ物差し (src/replay.js・src/harness.js・src/taskstatus.js もここを使う)
+ */
+export function isReplayTask(task) {
+  return typeof task?.replay?.of === 'string' && task.replay.of !== '';
+}
+
+/** 解き直しを待っている改訂か (着手の同時枠に数えない・見回りが固着と読まない — src/replay.js) */
+export function awaitingReplays(task) {
+  return task?.state === 'review' && task.replay?.status === 'running';
+}
+
+/**
+ * 主題ファイルを触るタスクか (src/themes.js)。主題の取り込みは 1 件ずつ — 終わっていない間は
+ * 次の企画の巡回を起こさない (承認待ちの主題に重ねて考えさせない)
+ */
+export function touchesThemes(task, themesFile) {
+  const want = normalizeRelPath(themesFile);
+  if (!want) return false;
+  const touch = Array.isArray(task?.touch) ? task.touch : [];
+  return touch.some((path) => normalizeRelPath(path) === want);
+}
+
+/** 相対パスの比較用 (区切りを / に、先頭の ./ を外す) */
+function normalizeRelPath(path) {
+  return String(path ?? '').trim().replace(/\\/g, '/').replace(/^(\.\/)+/, '');
+}
 
 /** 「走っている」とみなす状態 (同時実行数はこの合計で数える) */
 const RUNNING_STATES = Object.freeze(['in-progress', 'review']);
@@ -26,7 +78,7 @@ const RUNNING_STATES = Object.freeze(['in-progress', 'review']);
 const OPEN_STATES = Object.freeze(['proposed', 'approved']);
 
 /**
- * 起票 1 件に必ず積む job 予算の下限。
+ * 起票 1 件に必ず積む job 予算の下限 (§9.2(b))。
  *
  * **worker 1 + review 1 + 予備 2。** スカウトの自己申告をそのまま通すと、3 ファイル新規の
  * タスクに 2 (= 予備 0) が付き、1 度でも詰まればその場で予算切れになる (#51 の実例)。
@@ -39,7 +91,7 @@ export const MIN_TASK_JOB_BUDGET = 4;
 /** 失敗 1 回目のバックオフ。以後 2 倍ずつ伸ばす */
 export const BACKOFF_BASE_MS = 5 * 60 * 1000;
 
-/** バックオフの上限 (「リミット検知で数時間停止」) */
+/** バックオフの上限 (§3.7「リミット検知で数時間停止」) */
 export const BACKOFF_MAX_MS = 4 * 60 * 60 * 1000;
 
 /**
@@ -51,11 +103,23 @@ export function initialState() {
     jobsToday: 0,
     dayKey: null,
     backoffUntil: 0,
-    // 何回続けて失敗したか (指数バックオフの肩)。自律運転の状態に足した勘定で、
+    // 何回続けて失敗したか (指数バックオフの肩)。§3.7 の状態に足した勘定で、
     // これが無いと「伸ばす」ができない
     backoffLevel: 0,
     lastScoutAt: 0,
-    // 発議の巡回。`lastRunAt` は `<botKey>/<dutyKey>` → 最終実行時刻 (間隔の時計)、
+    // 提案 0 件で返った巡回が何回続いたか (スカウトの間隔を伸ばす肩 — recordScoutReport)。
+    // そのチャンネルでタスクが merge されたら 0 へ戻す (planTick)
+    scoutIdle: 0,
+    // 最後の企画の巡回の後に、提案 0 件の巡回が何回あったか (企画の巡回を前倒しする勘定)
+    scoutIdleSincePlan: 0,
+    // 申し送り (src/config.js の MAX_CARRY_*)。巡回が書いた {at, from, text} を古い順に溜め、
+    // 次の企画の巡回へ渡したら消す (addCarry / dropCarry)
+    carry: [],
+    // ハーネスの改訂の巡回 (src/harness.js) の最終実行時刻
+    lastHarnessAt: 0,
+    // 企画の巡回 (src/themes.js) の最終実行時刻
+    lastPlanAt: 0,
+    // 発議の巡回 (§3.9)。`lastRunAt` は `<botKey>/<dutyKey>` → 最終実行時刻 (間隔の時計)、
     // `spentToday` は botKey → 今日使った発議 job の数 (initiativeBudget の勘定)。
     // 日が変わったら消えるのは spentToday だけ — lastRunAt は暦日ではなく間隔で効く
     initiative: { lastRunAt: {}, spentToday: {} },
@@ -63,7 +127,7 @@ export function initialState() {
 }
 
 /**
- * 再起動をまたいで持ち越す勘定 (「定期巡回の最終実行時刻と日次消費は永続化し、
+ * 再起動をまたいで持ち越す勘定 (§3.9「定期巡回の最終実行時刻と日次消費は永続化し、
  * 再起動直後の連発を防ぐ」)。
  *
  * **バックオフは持ち越さない。** あれは「いま失敗が続いている」という走っている
@@ -75,6 +139,11 @@ export function persistedState(state) {
     dayKey: s.dayKey,
     jobsToday: s.jobsToday,
     lastScoutAt: s.lastScoutAt,
+    scoutIdle: s.scoutIdle,
+    scoutIdleSincePlan: s.scoutIdleSincePlan,
+    carry: s.carry,
+    lastHarnessAt: s.lastHarnessAt,
+    lastPlanAt: s.lastPlanAt,
     initiative: s.initiative,
   };
 }
@@ -111,16 +180,95 @@ export function backoffDelayMs(level) {
 
 /**
  * 失敗 (claude のリミットエラーなど) を記録し、バックオフを伸ばす。
+ *
+ * `until` (上限が明ける時刻 — `parseLimitReset` の戻り) が分かっていれば**そこまでは必ず待つ**。
+ * 倍々の長さは上限の明けを知らないので、数時間の上限に 5 分・10 分・20 分で起こし直し、
+ * 自動復旧の回数を明ける前に使い切った (#102、2026-10-07)。肩 (backoffLevel) の進め方は変えない。
+ *
+ * @param {object} state
+ * @param {{now: number|Date, until?: number|null}} opts `until` は ms。数でなければ使わない
  * @returns {object} 新しい state (引数は変更しない)
  */
-export function recordFailure(state, { now } = {}) {
+export function recordFailure(state, { now, until } = {}) {
   const at = msOf(now);
   const current = normalizeState(state);
+  const doubled = at + backoffDelayMs(current.backoffLevel);
   return {
     ...current,
     backoffLevel: current.backoffLevel + 1,
-    backoffUntil: at + backoffDelayMs(current.backoffLevel),
+    // 明ける時刻は BACKOFF_MAX_MS で切らない — 切ると明ける前に起こして、もう 1 回落ちる
+    backoffUntil: Number.isFinite(until) ? Math.max(doubled, until) : doubled,
   };
+}
+
+/** `resets 1:30pm (Asia/Tokyo)` — 時刻の直前に日付が入る形 (`resets Oct 8, 1:30pm …`) は当たらない */
+const LIMIT_RESET = /\bresets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^()\s]+)\)/i;
+
+/**
+ * claude の利用上限の文面から、上限が明ける時刻を読む
+ * (例: `You've hit your session limit · resets 1:30pm (Asia/Tokyo)`)。
+ *
+ * 時刻だけの表示は 24h ごとに同じ表示になって一意に決まらないので、**now から前後 12h (周期の半分) で
+ * 最も近い出現**を指すと読む (等距離なら後の方)。それが now 以前 — 明けた直後にもう一度落ちた
+ * (本当の明けは分の途中・時計のずれ・job の所要時間) — なら null で従来の倍々に任せる。
+ * 依頼の字面「now より後で最初に来る」だと、ここを翌日と読んで約 24h 止まる (変更前は 10 分)。
+ * 12h より先の明けも null になるが、倍々に戻るだけで変更前より悪くはない。
+ * 日付付き・tz 無し・解決できない tz も null — 推し量って読むより、従来の倍々に任せる。
+ * 前日・翌日はその tz の暦日をずらして組み直す (±24h だと夏時間の切り替わりの日にずれる)。
+ *
+ * @param {string} text
+ * @param {number|Date} now
+ * @returns {number|null} ms
+ */
+export function parseLimitReset(text, now) {
+  const at = msOf(now);
+  const match = typeof text === 'string' ? LIMIT_RESET.exec(text) : null;
+  if (!match) return null;
+  const [, h, mm, half, timeZone] = match;
+  const hour12 = Number(h);
+  const minute = mm === undefined ? 0 : Number(mm);
+  if (hour12 < 1 || hour12 > 12 || minute > 59) return null;
+  const hour = (hour12 % 12) + (half.toLowerCase() === 'pm' ? 12 : 0);
+  let zone;
+  try {
+    // hourCycle: 'h23' — hour12: false だと深夜 0 時を "24" で返す版がある
+    zone = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hourCycle: 'h23',
+      year: 'numeric', month: 'numeric', day: 'numeric',
+      hour: 'numeric', minute: 'numeric', second: 'numeric',
+    });
+  } catch {
+    return null; // 解決できない tz (RangeError)
+  }
+  const today = wallClock(zone, at);
+  // 前日・当日・翌日のどれかが前後 12h に入る。後の候補を `<=` で採るので、等距離なら後の方
+  let nearest = null;
+  for (const days of [-1, 0, 1]) {
+    const candidate = wallClockToMs(zone, today.year, today.month, today.day + days, hour, minute);
+    if (nearest === null || Math.abs(candidate - at) <= Math.abs(nearest - at)) nearest = candidate;
+  }
+  return nearest > at ? nearest : null;
+}
+
+/** その瞬間の tz での壁時計 (月は 1 始まり) */
+function wallClock(zone, ms) {
+  const parts = {};
+  for (const { type, value } of zone.formatToParts(ms)) parts[type] = Number(value);
+  return parts;
+}
+
+/** その瞬間の tz の UTC からのずれ (ms)。壁時計は秒までなので、比べる側も秒に落とす */
+function zoneOffsetMs(zone, ms) {
+  const w = wallClock(zone, ms);
+  return Date.UTC(w.year, w.month - 1, w.day, w.hour, w.minute, w.second) - Math.floor(ms / 1000) * 1000;
+}
+
+/** tz の壁時計 → ms。ずれを 2 回取って、切り替わりをまたいだ仮置きを補正する (日の繰り上がりは Date.UTC に任せる) */
+function wallClockToMs(zone, year, month, day, hour, minute) {
+  const guess = Date.UTC(year, month - 1, day, hour, minute);
+  const first = guess - zoneOffsetMs(zone, guess);
+  return guess - zoneOffsetMs(zone, first);
 }
 
 /**
@@ -142,15 +290,20 @@ export function recordSuccess(state) {
  *   **発議機構が無効なら呼び出し側が空配列を渡す** — この層は config を知らない
  * @param {object[]} [input.proposals] 終端でない提案 (ProposalStore.openList() の結果)。
  *   duty ごとの `maxOpenProposals` を数えるのに要る。裁定待ちを積んでも採否は速くならない
+ * @param {{due: boolean}|null} [input.harness] ハーネスの改訂を起こしてよいか (src/harness.js の
+ *   harnessGate の戻り)。実行記録を読むのは呼び出し側 — この層は台帳を知らない
+ * @param {{due: boolean}|null} [input.plan] 企画の巡回を起こしてよいか (src/themes.js の themesGate の
+ *   戻り)。主題ファイルを読むのは呼び出し側
  * @param {number|Date} input.now 現在時刻 (呼び出し側から注入する)
  * @param {object} input.state 呼び出し側が持つ勘定 (initialState() 参照)
  * @returns {{actions: object[], state: object}}
- *   actions は起こす順。`{kind:'start-task', taskId}` / `{kind:'scout'}` /
- *   `{kind:'initiative', botKey, duty}` の 3 種類だけ。
+ *   actions は起こす順。`{kind:'start-task', taskId}` / `{kind:'scout'}` / `{kind:'harness'}` /
+ *   `{kind:'plan'}` / `{kind:'initiative', botKey, duty}` の 5 種類だけ。企画の巡回を提案 0 件の巡回の
+ *   続きで間隔より前に起こすときだけ `{kind:'plan', early: true, idleScouts}` (idleScouts = その回数)。
  *   state は次の tick へ渡す新しい勘定 (引数の state は変更しない)。
  */
 export function planTick({
-  tasks = [], autonomy = {}, dutyBots = [], proposals = [], now, state,
+  tasks = [], autonomy = {}, dutyBots = [], proposals = [], harness = null, plan = null, now, state,
 } = {}) {
   const at = msOf(now);
   // 日付の繰越だけは何もしない tick でも進める (止まっている間に日が変わっても数え直せる)
@@ -163,7 +316,7 @@ export function planTick({
   if (at < base.backoffUntil) return stop();
 
   // 担当不在なら何もしない。worker が居なければ着手できず、reviewer が居なければ
-  // 着手しても main まで運べない — 走らせても review に溜まるだけなので、
+  // 着手しても main まで運べない (§3.6) — 走らせても review に溜まるだけなので、
   // 中途半端に始めずに止める
   const workers = Array.isArray(autonomy.worker?.bots) ? autonomy.worker.bots : [];
   if (workers.length === 0 || !autonomy.reviewer) return stop();
@@ -175,12 +328,15 @@ export function planTick({
   const list = Array.isArray(tasks) ? tasks.filter(isTask) : [];
 
   // 1. 着手 — 進行中の仕事を進める方が、種を増やすより先。
-  //    空き = 同時上限 - (in-progress + review)
-  const running = list.filter((task) => RUNNING_STATES.includes(task.state)).length;
+  //    空き = 同時上限 - (in-progress + review)。**解き直しを待つ改訂 (src/replay.js) は数えない** —
+  //    数えると同時上限 1 の配備で、改訂が枠を塞いだまま自分の解き直しを起こせない
+  const running = list.filter((task) => RUNNING_STATES.includes(task.state) && !awaitingReplays(task)).length;
   const maxConcurrent = positive(autonomy.maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS);
   let free = Math.max(0, maxConcurrent - running);
-  // board.list() は既に id 昇順だが、ここでも並べる (呼び出し側の順序に依存しない)
-  const approved = list.filter((task) => task.state === 'approved').sort(byTaskId);
+  // board.list() は既に id 昇順だが、ここでも並べる (呼び出し側の順序に依存しない)。
+  // 解き直しは先に起こす (改訂のレビューがそれを待っている)
+  const approved = list.filter((task) => task.state === 'approved')
+    .sort((a, b) => Number(isReplayTask(b)) - Number(isReplayTask(a)) || byTaskId(a, b));
   for (const task of approved) {
     if (free <= 0 || jobsLeft <= 0) break;
     actions.push({ kind: 'start-task', taskId: task.id });
@@ -189,10 +345,13 @@ export function planTick({
   }
 
   // 2. スカウト — 1 tick に 1 つだけ。未着手が溜まっているなら起票しない
-  //    (承認待ちの山を作らせない。この数は**この tick で着手する分を引く前**の値で見る)
-  let { lastScoutAt } = base;
+  //    (承認待ちの山を作らせない。この数は**この tick で着手する分を引く前**の値で見る)。
+  //    提案 0 件の巡回が続いたら間隔を伸ばす (scoutPace)。前の巡回の後にタスクが merge されたら
+  //    元の間隔へ戻す — ボードと主題が動いたので、次の 1 歩が見えている見込みがある
+  let { lastScoutAt, scoutIdle, scoutIdleSincePlan } = base;
+  if (scoutIdle > 0 && list.some((task) => (mergedAt(task) ?? 0) > lastScoutAt)) scoutIdle = 0;
   const scoutBot = autonomy.scout?.bot;
-  const intervalMs = positive(autonomy.scout?.intervalMin, DEFAULT_SCOUT_INTERVAL_MIN) * 60 * 1000;
+  const intervalMs = scoutPace({ autonomy, idle: scoutIdle }).intervalMin * 60 * 1000;
   const open = list.filter((task) => OPEN_STATES.includes(task.state)).length;
   const maxOpen = positive(autonomy.scout?.maxOpenTasks, DEFAULT_SCOUT_MAX_OPEN_TASKS);
   const due = !lastScoutAt || at - lastScoutAt >= intervalMs;
@@ -202,7 +361,39 @@ export function planTick({
     lastScoutAt = at;
   }
 
-  // 3. 発議の定期巡回 — 優先順位は start-task > scout > initiative。
+  // 3. ハーネスの改訂の巡回 (src/harness.js) — 1 tick に 1 つだけ。**測り終えるまで次を重ねない**:
+  //    門 (harness.due) が閉じている間と、役割文を触るタスクが終わっていない間は起こさない
+  //    (論文の改訂は「1 つ直す → 測る → 残すか戻す」の順。重ねると何が効いたか分からなくなる)
+  let { lastHarnessAt } = base;
+  const harnessBot = autonomy.harness?.bot;
+  const harnessIntervalMs = positive(autonomy.harness?.intervalMin, DEFAULT_HARNESS_INTERVAL_MIN) * 60 * 1000;
+  const harnessDue = !lastHarnessAt || at - lastHarnessAt >= harnessIntervalMs;
+  const revising = list.some((task) => UNFINISHED_STATES.includes(task.state) && touchesHarness(task));
+  if (jobsLeft > 0 && harnessBot && harnessDue && harness?.due === true && !revising) {
+    actions.push({ kind: 'harness' });
+    jobsLeft -= 1;
+    lastHarnessAt = at;
+  }
+
+  // 4. 企画の巡回 (src/themes.js) — 1 tick に 1 つだけ。主題ファイルを触るタスクが終わるまで
+  //    次を重ねない (承認待ちの主題に重ねて考えさせると、同じ主題が 2 回入る)
+  let { lastPlanAt } = base;
+  const planBot = autonomy.planner?.bot;
+  const planIntervalMs = positive(autonomy.planner?.intervalMin, DEFAULT_PLANNER_INTERVAL_MIN) * 60 * 1000;
+  const planDue = !lastPlanAt || at - lastPlanAt >= planIntervalMs;
+  // 最後の企画の巡回の後に提案 0 件の巡回が続いたら、間隔を待たない (種が尽きたら種を考える部門を
+  // 先に動かす)。前倒しの後はまた続けて数え直すので、0 件の巡回のたびに企画を起こしはしない
+  const planEarly = !planDue && scoutIdleSincePlan >= PLAN_EARLY_AFTER_IDLE_SCOUTS;
+  const themesFile = autonomy.planner?.themesFile;
+  const planning = list.some((task) => UNFINISHED_STATES.includes(task.state) && touchesThemes(task, themesFile));
+  if (jobsLeft > 0 && planBot && (planDue || planEarly) && plan?.due === true && !planning) {
+    actions.push(planEarly ? { kind: 'plan', early: true, idleScouts: scoutIdleSincePlan } : { kind: 'plan' });
+    jobsLeft -= 1;
+    lastPlanAt = at;
+    scoutIdleSincePlan = 0;
+  }
+
+  // 5. 発議の定期巡回 (§3.9) — 優先順位は start-task > scout > harness > plan > initiative。
   //    **いちばん後ろに置く**のは、進行中の仕事と種の発見が先だから。ここまでで
   //    日次上限を使い切っていれば、その日はもう巡回しない (共有の上限を分け合う)
   let { initiative } = base;
@@ -219,7 +410,102 @@ export function planTick({
   }
 
   // 選んだ行動 1 つ = 1 job (実際に起動できたかは組み込み側の話で、ここでは数え切る)
-  return stop({ ...base, jobsToday: base.jobsToday + actions.length, lastScoutAt, initiative });
+  return stop({
+    ...base,
+    jobsToday: base.jobsToday + actions.length,
+    lastScoutAt,
+    scoutIdle,
+    scoutIdleSincePlan,
+    lastHarnessAt,
+    lastPlanAt,
+    initiative,
+  });
+}
+
+/**
+ * スカウトの間隔。提案 0 件の巡回が `idle` 回続いていたら、設定の間隔を 2 倍ずつ伸ばす
+ * (`SCOUT_IDLE_BACKOFF_STEPS` 段で頭打ち)。起動文・ログ・企画の巡回の材料もここで揃える。
+ *
+ * @param {{autonomy?: object, idle?: number}} p
+ * @returns {{baseMin: number, intervalMin: number}}
+ */
+export function scoutPace({ autonomy = {}, idle = 0 } = {}) {
+  const baseMin = positive(autonomy?.scout?.intervalMin, DEFAULT_SCOUT_INTERVAL_MIN);
+  const steps = Math.min(Number.isSafeInteger(idle) && idle > 0 ? idle : 0, SCOUT_IDLE_BACKOFF_STEPS);
+  return { baseMin, intervalMin: baseMin * 2 ** steps };
+}
+
+/**
+ * スカウトの巡回が返した提案の数を勘定へ入れる (src/bridge/scheduler.js の noteScoutReport が呼ぶ)。
+ *
+ * **数えるのは提案した数** (契約の tasks) で、ボードが載せた数ではない — touch の衝突や枠で
+ * 断られた提案は「割る手が残っている」なので、そこで間隔を伸ばすと載せられる番を遅らせるだけになる。
+ * 1 件でも提案があれば、続けての 0 件の勘定を両方 0 へ戻す。
+ *
+ * @param {object} state
+ * @param {{proposed?: number}} p
+ * @returns {object} 新しい state (引数は変更しない)
+ */
+export function recordScoutReport(state, { proposed } = {}) {
+  const s = normalizeState(state);
+  if (Number.isSafeInteger(proposed) && proposed > 0) return { ...s, scoutIdle: 0, scoutIdleSincePlan: 0 };
+  return { ...s, scoutIdle: s.scoutIdle + 1, scoutIdleSincePlan: s.scoutIdleSincePlan + 1 };
+}
+
+/**
+ * 申し送りを溜める (src/bridge/scheduler.js の noteCarry が呼ぶ)。1 件は空白を畳んで 1 行にし、
+ * `MAX_CARRY_CHARS` 字で切る。空のものは落とす。溜めるのは `MAX_CARRY_ITEMS` 件までで、
+ * 超えたら**古いものから**落とす (新しい気づきの方が今のループを指している)。
+ *
+ * @param {object} state
+ * @param {{items?: string[], from?: string, at: number}} p
+ * @returns {{state: object, added: number, dropped: number}} dropped = 上限で落とした古いものの数
+ */
+export function addCarry(state, { items = [], from = '', at } = {}) {
+  const s = normalizeState(state);
+  const fresh = carryList((Array.isArray(items) ? items : []).map((text) => ({ at, from, text })));
+  const all = [...s.carry, ...fresh];
+  const dropped = Math.max(0, all.length - MAX_CARRY_ITEMS);
+  return { state: { ...s, carry: all.slice(dropped) }, added: fresh.length, dropped };
+}
+
+/**
+ * 企画の巡回へ渡し終えた申し送りを消す。渡している間に増えた分は残す (同じ時刻・書き手・本文のものだけ消す)
+ * @returns {object} 新しい state (引数は変更しない)
+ */
+export function dropCarry(state, shown = []) {
+  const s = normalizeState(state);
+  const key = (item) => `${item.at}\u0000${item.from}\u0000${item.text}`;
+  const gone = new Set(carryList(shown).map(key));
+  return { ...s, carry: s.carry.filter((item) => !gone.has(key(item))) };
+}
+
+/** 申し送りの並びを均す (形の崩れたものは落とす — 手で編集された・古い形の台帳を持ち越しても落ちない) */
+function carryList(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const item of value) {
+    const text = typeof item?.text === 'string' ? item.text.replace(/\s+/g, ' ').trim() : '';
+    if (!text || !Number.isFinite(item.at) || item.at < 0) continue;
+    out.push({
+      at: item.at,
+      from: typeof item.from === 'string' ? item.from : '',
+      text: text.length > MAX_CARRY_CHARS ? `${text.slice(0, MAX_CARRY_CHARS - 1)}…` : text,
+    });
+  }
+  return out.slice(-MAX_CARRY_ITEMS);
+}
+
+/** そのタスクが merged へ移った時刻 (history の最後の merged。無い・読めなければ null) */
+function mergedAt(task) {
+  if (task?.state !== 'merged') return null;
+  const history = Array.isArray(task.history) ? task.history : [];
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i]?.to !== 'merged') continue;
+    const ms = Date.parse(String(history[i].at ?? ''));
+    return Number.isFinite(ms) ? ms : null;
+  }
+  return null;
 }
 
 /**
@@ -274,7 +560,7 @@ function withinInitiativeBudget(state, botKey, budget) {
 }
 
 /**
- * イベント経由 (発議 3 経路のうち (2)) で発議 job を 1 本使う。
+ * イベント経由 (§3.9 の発議 3 経路のうち (2)) で発議 job を 1 本使う。
  *
  * **巡回と同じ財布から出す。** イベントだけ無制限にすると、差し戻しが続いた日に
  * 発議 job が湧いてチャンネルの日次上限を食い潰す。間隔 (`intervalMin`) と
@@ -332,7 +618,7 @@ function openProposalsFor(proposals, botKey, dutyKey) {
  * 起動メッセージを投稿する担当 (announcer) を worker と別にするのは規律ではなく必然で、
  * 自分の多行発言は shouldIgnoreOwnMessage が捨てる (src/trigger.js) —
  * worker 自身の client から投げても job は立たない。既定は reviewer
- * (で必ず居る) で、居なければ worker 以外の誰か。
+ * (§3.6 で必ず居る) で、居なければ worker 以外の誰か。
  *
  * @param {object} action tick が返した行動
  * @param {{tasks?: object[], autonomy?: object, availableBotKeys?: string[]}} context
@@ -366,7 +652,7 @@ export function resolveStartTask(action, { tasks = [], autonomy = {}, availableB
 }
 
 /**
- * スカウト job へ払い出す固定の job 予算。
+ * スカウト job へ払い出す固定の job 予算 (§3.3)。
  *
  * **小さくてよい**: 巡回して起票するだけで、実装のように往復しない。
  * それでも 0 ではなく予算を配るのは、無人スレッドを門番なしにしないため —
@@ -399,7 +685,53 @@ export function resolveScout(action, { autonomy = {}, availableBotKeys = [] } = 
 }
 
 /**
- * 発議の巡回へ払い出す固定の job 予算。
+ * `harness` を実際に適用できるかの判断 (純粋)。投げ手を担当と別にする理由は resolveScout と同じ。
+ *
+ * @returns {{ok: true, botKey: string, announcerKey: string} | {ok: false, reason: string}}
+ */
+export function resolveHarness(action, { autonomy = {}, availableBotKeys = [] } = {}) {
+  if (action?.kind !== 'harness') {
+    return { ok: false, reason: `ハーネスの改訂として適用できない行動です: ${JSON.stringify(action?.kind)}` };
+  }
+  const botKey = autonomy.harness?.bot ?? null;
+  if (!botKey || !availableBotKeys.includes(botKey)) {
+    return { ok: false, reason: `提案役が起動していません (harness.bot: ${botKey ?? '未設定'})` };
+  }
+  const announcerKey = pickAnnouncer(botKey, autonomy, availableBotKeys);
+  if (!announcerKey) {
+    return {
+      ok: false,
+      reason: `起動メッセージを投げられる別の bot が居ません (${botKey} 自身の発言では job が立たない)`,
+    };
+  }
+  return { ok: true, botKey, announcerKey };
+}
+
+/**
+ * `plan` を実際に適用できるかの判断 (純粋)。投げ手を担当と別にする理由は resolveScout と同じ。
+ *
+ * @returns {{ok: true, botKey: string, announcerKey: string} | {ok: false, reason: string}}
+ */
+export function resolvePlan(action, { autonomy = {}, availableBotKeys = [] } = {}) {
+  if (action?.kind !== 'plan') {
+    return { ok: false, reason: `企画の巡回として適用できない行動です: ${JSON.stringify(action?.kind)}` };
+  }
+  const botKey = autonomy.planner?.bot ?? null;
+  if (!botKey || !availableBotKeys.includes(botKey)) {
+    return { ok: false, reason: `企画役が起動していません (planner.bot: ${botKey ?? '未設定'})` };
+  }
+  const announcerKey = pickAnnouncer(botKey, autonomy, availableBotKeys);
+  if (!announcerKey) {
+    return {
+      ok: false,
+      reason: `起動メッセージを投げられる別の bot が居ません (${botKey} 自身の発言では job が立たない)`,
+    };
+  }
+  return { ok: true, botKey, announcerKey };
+}
+
+/**
+ * 発議の巡回へ払い出す固定の job 予算 (§3.9)。
  *
  * スカウトと同じ理由で小さい: 観測して発議するか「今回はなし」と言うだけで、
  * 実装のように往復しない。0 にしないのは無人スレッドを門番なしにしないため。
@@ -436,11 +768,11 @@ export function resolveInitiative(action, { autonomy = {}, availableBotKeys = []
 }
 
 /**
- * イベント (発議 3 経路のうち (2)) を受け取るべき duty を選ぶ (純粋)。
+ * イベント (§3.9 の発議 3 経路のうち (2)) を受け取るべき duty を選ぶ (純粋)。
  *
  * **起こす相手は「そのイベントを拾うと宣言した duty」だけ。** 全 bot へ配ると、
  * 差し戻し 1 回で社会中の bot が発議 job を立てる。宣言は
- * `bots.<key>.duties.<duty>.eventKinds`。
+ * `bots.<key>.duties.<duty>.eventKinds` (§3.8)。
  *
  * **当事者は外す。** 差し戻された実装担当や、封鎖したレビュー担当を呼び戻しても、
  * 見えるのは自分の仕事の話であって組織の乖離ではない (当人の直しは board 側の経路が回す)。
@@ -472,7 +804,7 @@ export function dutiesForEvent(eventKind, {
  * そのまま通すと、起票する側が自分の取り分を決められることになる — 提案は
  * 「これより少なくてよい」という申告としてだけ効かせる。
  *
- * **下限は `MIN_TASK_JOB_BUDGET`**。ただし cap を超えない — 上限を
+ * **下限は `MIN_TASK_JOB_BUDGET`** (§9.2(b))。ただし cap を超えない — 上限を
  * 小さく設定したチャンネルで、下限が黙って上限を押し上げることはない。
  *
  * **`touch` はそのまま渡す。** 正規形の検査と拒否はボード側 (`requiredTouch` —
@@ -560,7 +892,7 @@ export function planApproval(contract, { pending = [] } = {}) {
 }
 
 /**
- * worker のターンが「完了申告」かどうか。
+ * worker のターンが「完了申告」かどうか (§3.5)。
  *
  * **完了は「制御フッタの無い report」だけ。** 自己呼び出しで区切った途中報告も、
  * 上位へのエスカレーションもフッタを持つので、そこでレビューへ進めてしまうと
@@ -629,15 +961,15 @@ export const SEND_BACK_JOB_BUDGET = 2;
 /**
  * レビューの判定 (task-review) を、ボードへの操作に翻訳する (純粋)。
  *
- * **差し戻しは 2 回まで**。2 回目は直させずに要人間へ落とす — 同じところで
+ * **差し戻しは 2 回まで** (§6)。2 回目は直させずに要人間へ落とす — 同じところで
  * 往復し続けるのが、無人運転でいちばん静かに job を溶かす壊れ方だから。
  * 何回目かはボードの履歴が持っているので、数えた結果だけを受け取る
  * (ここから board を触らない = 判断の層に IO を持ち込まない)。
  *
- * **`drop` は差し戻し回数と関係なく通す**。「対象が不要」は仕事の質の話ではなく
+ * **`drop` は差し戻し回数と関係なく通す** (§9.4)。「対象が不要」は仕事の質の話ではなく
  * 重複や着地済みの後始末なので、往復の勘定に混ぜない。
  *
- * **`merge` は git の事実で裏を取ってから通す**。ここは判断の層なので
+ * **`merge` は git の事実で裏を取ってから通す** (§12.3 (2))。ここは判断の層なので
  * git は呼ばない — 呼び出し側 (`src/bridge/board.js` の `applyReview`) が集めた事実を
  * 受け取り、4 つ (マージコミットが実在する / base に到達可能 / 枝の先端が読める /
  * 枝の成果がそのコミットに入っている) が揃ったときだけ `complete`。**事実を渡さない
@@ -652,7 +984,7 @@ export const SEND_BACK_JOB_BUDGET = 2;
  *           (null / 不明 = 確かめられなかった)
  * @param {string} [options.mergeCheckedBy] merge の照合を**別経路が持つ**ときだけ、その名前。
  *           適用 task (org-apply) は `src/apply.js` の `planMerge` が OID・verify・枝の先端まで
- *           見てからブリッジ自身が merge を打つので、ここで二重に git を要求しない
+ *           見てからブリッジ自身が merge を打つので、ここで二重に git を要求しない (§12.3 (2))
  * @returns {{action: 'complete'|'hold'|'send-back'|'block'|'drop'|'none', note?: string,
  *           reason?: string, error?: string}}
  */
@@ -715,7 +1047,7 @@ function planMergeVerdict(contract, { git = null, mergeCheckedBy = '' } = {}) {
 }
 
 /**
- * job の終了理由 → バックオフの記録。
+ * job の終了理由 → バックオフの記録 (§3.7)。
  *
  * 数えるのは**ランタイムが動かなかったこと**だけ。verify NG は CLI が正しく動いた
  * 結果なので成功側 — テストが落ちるたびに社会が数時間止まると、直す機会まで失う。
@@ -731,7 +1063,7 @@ export function backoffOutcome(reason) {
 }
 
 /**
- * その job の終了理由を**チャンネルのバックオフへ反映してよいか**。
+ * その job の終了理由を**チャンネルのバックオフへ反映してよいか** (§3.7)。
  *
  * `backoffOutcome` が「理由の読み方」だけを見るのに対し、こちらは
  * 「その job が証拠として使えるか」まで含めて決める。除くのは 2 つ:
@@ -773,10 +1105,10 @@ export function isInitiativeTrigger(content) {
 }
 
 /**
- * 裁定待ちの提案を**いま配ってよいか** (生存性 — sol 指摘 2026-08-30)。
+ * 裁定待ちの提案を**いま配ってよいか** (§3.9 の生存性 — sol 指摘 2026-08-30)。
  *
  * 判断は 3 つ:
- * - 上限まで試したら止める (以後は人間の出番 —「要人間」)
+ * - 上限まで試したら止める (以後は人間の出番 — §6 の「要人間」)
  * - 一度も試していなければ配る
  * - **配れた後も、猶予を過ぎてまだ裁定待ちなら配り直す。** 投稿できたことは
  *   「裁定された」ではない — 起こした job が rate limit・中断・様式不履行で
@@ -820,7 +1152,7 @@ export function pickWorker(autonomy, availableBotKeys = []) {
 /**
  * 起動メッセージの投げ手。**担当自身は選ばない** — 自分の多行発言は
  * shouldIgnoreOwnMessage が捨てる (src/trigger.js) ので、投げても job が立たない。
- * 既定は reviewer (で必ず居る)、居なければ担当以外の誰か。
+ * 既定は reviewer (§3.6 で必ず居る)、居なければ担当以外の誰か。
  */
 export function pickAnnouncer(targetKey, autonomy, availableBotKeys) {
   return [autonomy.reviewer, ...availableBotKeys]
@@ -828,14 +1160,14 @@ export function pickAnnouncer(targetKey, autonomy, availableBotKeys) {
 }
 
 /**
- * タスクのスレッドで走る job が、どの作業ディレクトリを使うか。
+ * タスクのスレッドで走る job が、どの作業ディレクトリを使うか (§8-2)。
  *
  * 既定は**タスクごとの作業ツリー**。#9 が blocked になった「未マージのブランチの上に
  * 積まれる」は並行実行ではなく 1 つの作業ツリーを使い回す構造から出ていたので、
  * 直列のままでもここで断つ。
  *
  * **レビュー担当だけは本体で走る** (裁定 2026-08-28)。昇格先の main は本体の
- * チェックアウトにあり、worktree から見れば cwd の外 — 禁則「書込みは対象
+ * チェックアウトにあり、worktree から見れば cwd の外 — §6 の禁則「書込みは対象
  * リポジトリ内のみ・cwd 固定」と揉めずに merge できるのは本体側だけ。
  *
  * @returns {{useWorktree: boolean, reason?: string, taskId?: any, branch?: string, base?: string}}
@@ -852,11 +1184,15 @@ export function planTaskCwd({ task = null, autonomy = {}, botKey = null } = {}) 
   const branch = typeof task.branch === 'string' && task.branch.trim() !== ''
     ? task.branch.trim()
     : `task/${task.id}`;
-  return { useWorktree: true, taskId: task.id, branch, base: autonomy.baseBranch };
+  // 解き直し (src/replay.js) は元のタスクが始まった版から生やす
+  const base = isReplayTask(task) && typeof task.replay.base === 'string' && task.replay.base !== ''
+    ? task.replay.base
+    : autonomy.baseBranch;
+  return { useWorktree: true, taskId: task.id, branch, base };
 }
 
 /**
- * 今日の自律 job の残り (自動復旧の門)。**日付を繰り越してから**数える。
+ * 今日の自律 job の残り (§11.4 — 自動復旧の門)。**日付を繰り越してから**数える。
  * @returns {{left: number, state: object}} state は繰越後の勘定 (呼び出し側が保存してよい)
  */
 export function jobsLeftToday(state, { maxJobsPerDay = DEFAULT_MAX_JOBS_PER_DAY, now } = {}) {
@@ -912,6 +1248,13 @@ function normalizeState(state) {
     backoffUntil: counter(s.backoffUntil, init.backoffUntil),
     backoffLevel: counter(s.backoffLevel, init.backoffLevel),
     lastScoutAt: counter(s.lastScoutAt, init.lastScoutAt),
+    scoutIdle: Number.isSafeInteger(s.scoutIdle) && s.scoutIdle >= 0 ? s.scoutIdle : init.scoutIdle,
+    scoutIdleSincePlan: Number.isSafeInteger(s.scoutIdleSincePlan) && s.scoutIdleSincePlan >= 0
+      ? s.scoutIdleSincePlan
+      : init.scoutIdleSincePlan,
+    carry: carryList(s.carry),
+    lastHarnessAt: counter(s.lastHarnessAt, init.lastHarnessAt),
+    lastPlanAt: counter(s.lastPlanAt, init.lastPlanAt),
     initiative: {
       lastRunAt: counterMap(s.initiative?.lastRunAt),
       spentToday: counterMap(s.initiative?.spentToday),

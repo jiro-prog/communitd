@@ -11,6 +11,9 @@
   走らせられます。**自分以外を載せるかどうかは、その重みで決めてください。**
 - **`guildId` と `allowedUserIds` は必須です。** どちらかが空ならブリッジは起動を拒否します —
   設定漏れを「制限なし」と解釈しません。
+- **`allowedRoleIds` (任意) を書くと、そのサーバーロールを持つ人が同じ権限を持ちます。**
+  ロールを誰かに付けることが、上の「端末を渡す」を渡すことになります。`@everyone` のロール
+  (= `guildId` と同じ ID) は書けません。作者だけの判定 (`ownerUserId`) はロールでは広がりません。
 - **既定は最小権限です。** チャンネルに `tools` を書かなければ `readonly`、`permissionMode` を
   書かなければ `default`。書込みやシェルは、そのチャンネルに明示的に書いたときだけ有効になります。
 - **同梱の設定例も、写しただけで最小権限です。** `config.policy.example.json` は `readonly` /
@@ -57,6 +60,9 @@
 - **This bridge turns Discord messages into command execution on your machine.** Anyone listed in
   `allowedUserIds` can effectively run commands on it — treat adding a user as handing them a terminal.
 - `guildId` and `allowedUserIds` are mandatory; the bridge refuses to start without them.
+  The optional `allowedRoleIds` grants the same power to holders of a server role — granting the
+  role is granting the terminal. `@everyone` (the role whose ID equals `guildId`) is rejected, and
+  owner-only decisions (`ownerUserId`) are never widened by roles.
   Defaults are least privilege (`readonly` tools, `default` permission mode) — and so is the
   bundled `config.policy.example.json`. The write-enabled setup lives in a separate
   `config.policy.dev.example.json`, so copying the example never widens anything by itself.

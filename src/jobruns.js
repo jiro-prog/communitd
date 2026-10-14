@@ -1,4 +1,4 @@
-// job の実行記録。
+// job の実行記録 (docs/implementation-plan.md P1 / docs/social-engineering.md §11)。
 //
 // 「動いている」「人間を待っている」「失敗した」「結果が分からない」を、Discord の
 // スレッドを読み直さずに判定するための台帳。**task の状態は `TaskBoardStore` が正本、
@@ -82,6 +82,7 @@ export function classifyReason(reason) {
     case 'protocol-mismatch':
     case 'role-unreadable':
     case 'contract-unenforceable':
+    case 'worktree-unavailable': // 受付前に断った (`JobRunStore.refuse`)
       return { outcome: 'not-started', detail: text, stopKind: null };
     default:
       break;
@@ -114,6 +115,18 @@ export function nextActorFor({ outcome, handoff = null, taskState = null, taskSu
       if (taskSubmitted || taskState === 'review') return 'reviewer';
       return 'human';
     case 'verify-failed':
+      // **verify NG でも次の担当が決まっていることがある** (§12.3 (3))。板タスクの完了報告は
+      // レビューへ回り ((ii))、それ以外は投げ手へ戻すか人間を呼ぶ ((i))。ここを一律
+      // `recovery` にしていたので、受信箱と /status が「復旧待ちで止まっている」と嘘をついた。
+      //
+      // **順序は 'ok' と同じ (呼んだ相手が先)。** 逆にすると、review のタスクで
+      // レビュー担当自身の job が NG になったとき (行き先は投げ手への戻し) に、
+      // 板の状態だけを見て 'reviewer' と答える (Opus2 指摘 2026-09-18)。
+      // (ii) の経路は handoff を必ず落としているので、この順序でも 'reviewer' のまま
+      if (handoff?.kind === 'handoff' && handoff.toBotKey) return 'bot';
+      if (handoff?.kind === 'notify') return 'human';
+      if (taskSubmitted || taskState === 'review') return 'reviewer';
+      return 'recovery';
     case 'failed':
     case 'deliver-failed':
     case 'internal-error':
@@ -133,11 +146,11 @@ export function nextActorFor({ outcome, handoff = null, taskState = null, taskSu
  * 実行記録の台帳 (`data/job-runs.json`)。
  *
  * entry の形 (欠けた欄は null):
- * `{ id, taskId, threadId, botKey, channelName, cwd, trigger: {messageId, byBotKey, kind},
+ * `{ id, taskId, threadId, botKey, channelName, cwd, trigger: {messageId, byBotKey, kind (human|bot|self|maintenance|relay)},
  *    attempt, intent: {contractExpected, nonce}, contract, contractState,
  *    stage, stageDetail, acceptedAt, startedAt, observedAt, endedAt,
- *    spawn: {pid, at, runtime}, modelResult, lastActivity, delivery, evidence,
- *    outcome, reason, stopKind, next, handoff, reconcile, placeholderId }`
+ *    spawn: {pid, at, runtime}, harness: {rev, role, files, runtime, model, effort}, modelResult,
+ *    lastActivity, delivery, evidence, outcome, reason, stopKind, next, handoff, reconcile, placeholderId }`
  */
 export class JobRunStore extends JsonStore {
   constructor(filePath) {
@@ -153,7 +166,7 @@ export class JobRunStore extends JsonStore {
    * **基底が持つ判定をそのまま使い、文字列で返す** — 「記録が 1 件も無い =
    * 何も走っていない」と読まれないための印で、読む側 (src/index.js の /status・
    * src/bridge/recorder.js の起動ログ) は文字列を期待している。
-   * 台帳を退避しないのは基底と同じ。
+   * 台帳を退避しないのは基底と同じ (§12.3 (1))。
    *
    * @returns {string|null}
    */
@@ -219,7 +232,7 @@ export class JobRunStore extends JsonStore {
 
   /**
    * その Action ID で受け付けた記録 (受付順)。社会台帳の照合が「外で job が立ったか」を
-   * 操作 ID で探すための口 (再実行しても 1 回に収束させる鍵)。
+   * 操作 ID で探すための口 (docs/society-ledger.md §7 — 再実行しても 1 回に収束させる鍵)。
    */
   forAction(actionId) {
     const key = String(actionId ?? '');
@@ -242,10 +255,47 @@ export class JobRunStore extends JsonStore {
    *
    * @returns {object} 作った記録
    */
-  open({
+  open(fields, { now = Date.now() } = {}) {
+    const entry = this.#draft(fields, now);
+    this.write(entry.id, entry);
+    return entry;
+  }
+
+  /**
+   * 受付 (⏳) まで行かずに断った job を、**終端の 1 件として**残す (作業ツリーを用意できない等)。
+   * 何も残さないと、そのスレッドの最後の記録が前の job のままになり、/status が止まりを
+   * 「返信待ち」などに見せる。
+   *
+   * `open` → `finish` に分けない — 間で書けなくなると `queued` のまま残り、/status は
+   * 「レーン待ち」と言い続け、再起動の照合は「結末が記録されていない」と読む。
+   * モデルは起動していないので spawn は無く、契約も束縛しない (断る側が捨てる)。
+   *
+   * @param {object} fields `open` と同じ (intent・placeholderId・society は使わない)
+   * @param {{reason: string, detail?: string, now?: number}} p
+   *   reason は not-started に分類される識別子、detail は人が読む理由 (/status に出る)
+   * @returns {object} 作った記録
+   */
+  refuse({ id, taskId, threadId, botKey, channelName, cwd, trigger }, { reason, detail = '', now = Date.now() } = {}) {
+    const classified = classifyReason(reason);
+    if (classified.outcome !== 'not-started') {
+      throw new Error(`断りの理由 ${JSON.stringify(reason)} は not-started に分類されません`);
+    }
+    const entry = this.#draft({ id, taskId, threadId, botKey, channelName, cwd, trigger }, now);
+    entry.stage = 'ended';
+    entry.stageDetail = String(detail ?? '').trim().slice(0, 200) || classified.detail;
+    entry.endedAt = entry.acceptedAt;
+    entry.outcome = classified.outcome;
+    entry.reason = String(reason);
+    entry.next = nextActorFor({ outcome: classified.outcome });
+    this.write(entry.id, entry);
+    return entry;
+  }
+
+  /** `open` と `refuse` の共通部分 — 検証して受付時点の entry を組む (保存はしない) */
+  #draft({
     id, taskId = null, threadId, botKey, channelName = null, cwd = null,
     trigger = {}, intent = {}, placeholderId = null, society = null,
-  }, { now = Date.now() } = {}) {
+  }, now) {
     const key = String(id ?? '');
     if (key === '') throw new Error('実行記録には id が必要です');
     if (this.get(key)) throw new Error(`実行記録 ${key} は既にあります`);
@@ -265,7 +315,13 @@ export class JobRunStore extends JsonStore {
       trigger: {
         messageId: asText(trigger.messageId),
         byBotKey: asText(trigger.byBotKey),
-        kind: trigger.byBotKey ? (trigger.self === true ? 'self' : 'bot') : 'human',
+        // maintenance = 作者がメンテ用に登録した bot の発言 (作者の代理。src/authz.js の senderKindOf)
+        // relay = 受付 bot の中継 (人間の重みで通す — 投稿を作るのはブリッジだけ。docs/notes/2026-10-11-intake.md)
+        kind: trigger.maintenance === true
+          ? 'maintenance'
+          : trigger.relay === true
+            ? 'relay'
+            : trigger.byBotKey ? (trigger.self === true ? 'self' : 'bot') : 'human',
       },
       attempt: prior + 1,
       intent: {
@@ -283,6 +339,8 @@ export class JobRunStore extends JsonStore {
       observedAt: at,
       endedAt: null,
       spawn: null,
+      // その job を動かしたハーネスの版 (src/harness.js の harnessFingerprint)。役割文を読んだ時点で付く
+      harness: null,
       modelResult: null,
       lastActivity: null,
       delivery: {},
@@ -295,12 +353,11 @@ export class JobRunStore extends JsonStore {
       handoff: null,
       reconcile: null,
       placeholderId: asText(placeholderId),
-      // 社会台帳の Action に結ぶ受付。印なしの起動は null。
+      // 社会台帳の Action に結ぶ受付 (docs/society-ledger.md §5)。印なしの起動は null。
       // **操作 ID (Action ID) はここにしか残らない** — 照合はこれを鍵に外側 (Discord の投稿と
       // 実行記録) を探すので、受付の記録と同じ update で書く
       society: societyRef(society),
     };
-    this.write(key, entry);
     return entry;
   }
 
@@ -368,6 +425,23 @@ export class JobRunStore extends JsonStore {
     });
   }
 
+  /**
+   * その job を動かしたハーネスの版 (役割文の本文 + runtime / model / effort の指紋)。
+   * 改訂の前後を比べるための印で、復旧の判断には使わない (src/harness.js)。
+   */
+  noteHarness(id, { rev = null, role = null, files = [], runtime = null, model = null, effort = null } = {}) {
+    return this.patch(id, {
+      harness: {
+        rev: asText(rev),
+        role: asText(role),
+        files: Array.isArray(files) ? files.map((f) => String(f)) : [],
+        runtime: asText(runtime),
+        model: asText(model),
+        effort: asText(effort),
+      },
+    });
+  }
+
   /** ランタイムが返した (成否・中断)。成果の有無はここでは決めない */
   noteModelResult(id, { ok = false, aborted = false, error = null } = {}, { now = Date.now() } = {}) {
     return this.patch(id, {
@@ -416,12 +490,15 @@ export class JobRunStore extends JsonStore {
   /**
    * 終端。理由の分類と「次に動く主体」をここで確定する。
    *
-   * @param {{reason?: string, stopKind?: string|null, handoff?: object|null,
+   * `detail` は reason の一語では足りない終わり方の理由 (verify NG の出口と出力の末尾など)。
+   * reason から読めた detail (`failed(...)` の中身など) があればそちらを採る
+   *
+   * @param {{reason?: string, detail?: string, stopKind?: string|null, handoff?: object|null,
    *          taskState?: string|null, taskSubmitted?: boolean, evidence?: object|null,
    *          now?: number}} p
    */
   finish(id, {
-    reason = '', stopKind = null, handoff = null, taskState = null, taskSubmitted = false,
+    reason = '', detail = '', stopKind = null, handoff = null, taskState = null, taskSubmitted = false,
     evidence = null, now = Date.now(),
   } = {}) {
     const record = this.require(id);
@@ -431,7 +508,7 @@ export class JobRunStore extends JsonStore {
     const next = nextActorFor({ outcome: classified.outcome, handoff, taskState, taskSubmitted });
     return this.patch(id, {
       stage: 'ended',
-      stageDetail: classified.detail,
+      stageDetail: classified.detail || String(detail ?? '').trim().slice(0, 200),
       endedAt: at,
       observedAt: at,
       outcome: classified.outcome,
@@ -464,8 +541,9 @@ export class JobRunStore extends JsonStore {
 
   /**
    * 終了処理が始まった。生きている記録すべてに「止めたのはブリッジの停止」と残す —
-   * 再起動後の照合で、途中で切れた job が**意図的な停止**だったことが分かるように
-   * (自動復活させない根拠)。
+   * 再起動後の照合で、途中で切れた job が**人間の /stop ではなく再起動で切れた**ことが
+   * 分かるように (自動復旧は人間の停止だけを起こさず、再起動で切れたタスクは続きから起こす —
+   * 2026-10-07 まではこれも起こさなかった)。
    * @returns {object[]} 印を付けた記録
    */
   markShutdown({ now = Date.now(), reason = 'shutdown' } = {}) {

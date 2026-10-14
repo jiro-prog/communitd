@@ -268,3 +268,22 @@ test('recoveryRows は in-progress / review の復旧待ちだけを長く待た
   assert.equal(broken[0].status.status, 'reconcile');
   assert.match(broken[0].status.reason, /boom/);
 });
+
+test('解き直しを待つ改訂 (src/replay.js) は replay-wait — レビュー契約が無くても固着と読まず、復旧の一覧にも載せない', () => {
+  const startedAt = iso(T0 - minutes(120));
+  const waiting = task({ state: 'review', replay: { status: 'running', startedAt } });
+  // 改訂を提出した worker の job (次はレビュー担当のはずだが、解き直しが終わるまで呼ばない)
+  const runs = [ended({ next: 'reviewer' })];
+  const status = deriveTaskStatus({ task: waiting, runs, reviewerKey: 'opus2', now: T0 });
+  assert.equal(status.status, 'replay-wait');
+  assert.equal(status.next, 'scheduler');
+  assert.equal(status.since, Date.parse(startedAt));
+  assert.equal(statusLabel('replay-wait'), '解き直し待ち');
+  assert.ok(TASK_STATUS.includes('replay-wait'));
+  assert.equal(RECOVERY_STATUSES.includes('replay-wait'), false);
+  assert.deepEqual(recoveryRows([waiting], (t) => deriveTaskStatus({ task: t, runs, reviewerKey: 'opus2', now: T0 })), []);
+  // 走っている job があればそちらを出す / 解き直しを閉じた後は今までどおり (契約が無ければ復旧待ち)
+  assert.equal(deriveTaskStatus({ task: waiting, runs: [...runs, live()], now: T0 }).status, 'running');
+  const closed = task({ state: 'review', replay: { status: 'done', how: 'settled' } });
+  assert.equal(deriveTaskStatus({ task: closed, runs, reviewerKey: 'opus2', now: T0 }).status, 'recovery-wait');
+});

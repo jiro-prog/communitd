@@ -1,4 +1,4 @@
-// 止まった仕事の検知と再開の実体 (src/index.js から切り出し)。
+// 止まった仕事の検知と再開の実体 (docs/social-engineering.md §11.2〜11.4。src/index.js から切り出し)。
 // 判定は純粋関数 (src/taskstatus.js / src/recovery.js)、順序は src/recovery-wiring.js。
 // ここは実体を結ぶだけ。通知はタスクのスレッドへ 1 通 (同じ問題につき 1 回)。
 import { channelConfigForName, resolveAutonomy } from '../config.js';
@@ -30,7 +30,7 @@ import { snowflakeAt } from './discord.js';
  * @param {string[]} deps.autonomyChannels
  * @param {Map<string, object>} deps.tickStates       スケジューラの勘定 (src/bridge/scheduler.js)
  * @param {(name: string, state: object) => void} deps.saveTickState
- * @param {(threadId: string, text: string) => Promise<boolean>} deps.postToThread
+ * @param {(threadId: string, text: string, opts?: {taskId?: string|number|null}) => Promise<boolean>} deps.postToThread
  * @param {(args: object) => Promise<{ok: boolean, reason: string}>} deps.reissueReview `/review` の実体
  * @param {object|null} deps.recoveryStore  RecoveryStore (data/recovery.json)
  * @param {import('../queue.js').JobQueue} deps.jobs
@@ -42,6 +42,17 @@ export function createRecoveryWiring({
   config, board, jobRuns, contracts, pauseStore, autonomyChannels, tickStates, saveTickState,
   postToThread, reissueReview, recoveryStore, jobs, hops, bots, proposals,
 }) {
+  // その bot の client から見たスレッド (本物の channel)。archive されたスレッドへは投げない
+  const threadOf = async (botKey, threadId) => {
+    const bot = bots.get(botKey);
+    if (!bot?.userId) throw new Error(`${botKey} は起動していません`);
+    const channel = bot.client.channels.cache.get(String(threadId))
+      ?? await bot.client.channels.fetch(String(threadId));
+    if (!channel) throw new Error(`スレッド ${threadId} を取得できません`);
+    if (channel.isThread?.() && channel.archived) throw new Error(`スレッド ${threadId} は archive されています`);
+    return { bot, channel };
+  };
+
   const recovery = board
     ? createRecoveryService({
       board,
@@ -51,7 +62,8 @@ export function createRecoveryWiring({
       channels: autonomyChannels,
       autonomyFor: (name) => resolveAutonomy(channelConfigForName(config, name)),
       backoffUntilFor: (name) => tickStates.get(name)?.backoffUntil ?? 0,
-      notify: ({ task, text }) => postToThread(task.threadId, text),
+      // archive 済みのスレッドなら親チャンネルへ落ちる — 先頭行にタスク番号を出すために渡す
+      notify: ({ task, text }) => postToThread(task.threadId, text, { taskId: task.id }),
       log: (line) => console.log(line),
       recoveryStore,
       jobs,
@@ -61,26 +73,18 @@ export function createRecoveryWiring({
       botUserId: (key) => bots.get(key)?.userId ?? null,
       // 再開メッセージは**担当以外の bot の client** から投げる (自分の多行発言は捨てられる)
       postAs: async ({ botKey, threadId, text, mentionUserIds }) => {
-        const bot = bots.get(botKey);
-        if (!bot?.userId) throw new Error(`${botKey} は起動していません`);
-        const channel = bot.client.channels.cache.get(String(threadId))
-          ?? await bot.client.channels.fetch(String(threadId));
-        if (!channel) throw new Error(`スレッド ${threadId} を取得できません`);
-        if (channel.isThread?.() && channel.archived) throw new Error(`スレッド ${threadId} は archive されています`);
+        const { channel } = await threadOf(botKey, threadId);
         return sendSafe(channel, text, { mentionUserIds });
       },
       reissueReview: (args) => reissueReview(args),
-      // 作業ツリーに前回の変更が残っているか (再開メッセージに書く材料。読めなければ断定しない)
-      gitDirty: ({ task, autonomy }) => {
-        const configured = channelConfigForName(config, task.channel);
-        const canonical = configured ? canonicalCwd(configured.cwd) : null;
-        if (!canonical) return null;
-        const decided = planTaskCwd({ task, autonomy, botKey: null });
-        const cwd = decided.useWorktree ? worktreePathFor(canonical, task.id) : canonical;
-        const snapshot = gitStatusSnapshot(cwd); // 読めなければ null (断定しない)
-        return snapshot === null ? null : snapshot.length > 0;
+      // 自動の経路が reviewer を呼び直すときの投げ手とスレッド (人間の /retry と同じ形で `/review` の実体へ渡す)
+      threadAs: async ({ botKey, threadId }) => {
+        const { bot, channel } = await threadOf(botKey, threadId);
+        return { bot, thread: channel };
       },
-      // 自動復旧の門: チャンネルの日次予算の残と、適用 task (org-apply が担う — 二つの機構から動かさない)。
+      // 作業ツリーに前回の変更が残っているか (再開メッセージに書く材料。実体は下の gitDirtyFor)
+      gitDirty: (args) => gitDirtyFor(config, args),
+      // 自動復旧 (§11.4) の門: チャンネルの日次予算の残と、適用 task (org-apply が担う — 二つの機構から動かさない)。
       // 日次予算は **planTick と同じ勘定 `jobsToday`** を使う (日付の繰越も同じ関数で)
       dayJobsLeftFor: (name) => jobsLeftToday(tickStates.get(name) ?? initialState(), {
         maxJobsPerDay: resolveAutonomy(channelConfigForName(config, name)).maxJobsPerDay,
@@ -98,30 +102,8 @@ export function createRecoveryWiring({
       refundDayJob: (name, { at = Date.now() } = {}) => {
         saveTickState(name, refundJobs(tickStates.get(name) ?? initialState(), { now: at }));
       },
-      // 送達不明の再開要求をスレッドで探す (印 `再開要求 <task>-<世代>` を持つ、自前 bot の投稿)
-      // 要求の作成時刻の少し前から**全件**走査する (最新 N 件だけでは範囲外に落ちる — レビュー指摘 B)。
-      // `complete` は走査が末尾まで届いたか。since が無ければ最新 100 件しか見ないので complete: false
-      findRequestMessage: async ({ threadId, marker, since = null }) => {
-        const bot = [...bots.values()].find((b) => b.userId);
-        if (!bot) throw new Error('起動している bot がありません');
-        const channel = bot.client.channels.cache.get(String(threadId))
-          ?? await bot.client.channels.fetch(String(threadId));
-        if (!channel?.messages?.fetch) throw new Error(`スレッド ${threadId} を取得できません`);
-        const ours = new Set([...bots.values()].map((b) => b.userId).filter(Boolean));
-        let after = Number.isFinite(since) ? snowflakeAt(since - 5 * 60 * 1000) : null;
-        let scanned = 0;
-        for (let page = 0; page < 30; page += 1) {
-          const batch = await channel.messages.fetch(after ? { after, limit: 100 } : { limit: 100 });
-          const messages = [...batch.values()].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
-          scanned += messages.length;
-          const found = messages.find((m) => ours.has(m.author?.id) && String(m.content ?? '').includes(marker));
-          if (found) return { messageId: found.id, complete: true, scanned };
-          if (messages.length < 100) return { messageId: null, complete: after !== null, scanned };
-          if (after === null) return { messageId: null, complete: false, scanned }; // 最新 100 件だけ
-          after = messages[messages.length - 1].id;
-        }
-        return { messageId: null, complete: false, scanned }; // 30 ページで打ち切り = 不完全
-      },
+      // 送達不明の再開要求をスレッドで探す (走査の実体は下の findRequestMessage)
+      findRequestMessage: (args) => findRequestMessage(bots, args),
       isApplyTask: (task) => Boolean(proposals && findApplyProposal(proposals, task.id)),
     })
     : null;
@@ -139,4 +121,55 @@ export function createRecoveryWiring({
   }
 
   return recovery;
+}
+
+/**
+ * 作業ツリーに前回の変更が残っているか (再開メッセージに書く材料)。**担当が走る場所**を見る —
+ * 自律運転ならタスクの作業ツリー (`.worktrees/task-N`)、そうでなければチャンネル本体。
+ * 本体には作者の未 commit の変更があるのが常態なので、見る先を取り違えると常に「残っている」と書く。
+ * 読めなければ断定しない: チャンネルが未登録・作業ツリーが無い・git として読めない → null
+ *
+ * @param {object} config
+ * @param {{task: object, autonomy: object}} args  autonomy は resolveAutonomy 済みの値
+ * @returns {boolean|null}
+ */
+export function gitDirtyFor(config, { task, autonomy }) {
+  const configured = channelConfigForName(config, task.channel);
+  const canonical = configured ? canonicalCwd(configured.cwd) : null;
+  if (!canonical) return null;
+  const decided = planTaskCwd({ task, autonomy, botKey: null });
+  const cwd = decided.useWorktree ? worktreePathFor(canonical, task.id) : canonical;
+  const snapshot = gitStatusSnapshot(cwd); // 読めなければ null (断定しない)
+  return snapshot === null ? null : snapshot.length > 0;
+}
+
+/**
+ * 送達不明の再開要求をスレッドで探す (印 `再開要求 <task>-<世代>` を持つ、自前 bot の投稿)。
+ * 要求の作成時刻の少し前から**全件**走査する (最新 N 件だけでは範囲外に落ちる — レビュー指摘 B)。
+ * `complete` は走査が末尾まで届いたか。since が無ければ最新 100 件しか見ないので complete: false
+ *
+ * @param {Map<string, object>} bots  bot registry (自前 = この中のどれかの userId。再開要求は担当以外の bot が投げる)
+ * @param {{threadId: string, marker: string, since?: number|null}} args  since は要求の作成時刻 (ms)
+ * @returns {Promise<{messageId: string|null, complete: boolean, scanned: number}>}
+ */
+export async function findRequestMessage(bots, { threadId, marker, since = null }) {
+  const bot = [...bots.values()].find((b) => b.userId);
+  if (!bot) throw new Error('起動している bot がありません');
+  const channel = bot.client.channels.cache.get(String(threadId))
+    ?? await bot.client.channels.fetch(String(threadId));
+  if (!channel?.messages?.fetch) throw new Error(`スレッド ${threadId} を取得できません`);
+  const ours = new Set([...bots.values()].map((b) => b.userId).filter(Boolean));
+  let after = Number.isFinite(since) ? snowflakeAt(since - 5 * 60 * 1000) : null;
+  let scanned = 0;
+  for (let page = 0; page < 30; page += 1) {
+    const batch = await channel.messages.fetch(after ? { after, limit: 100 } : { limit: 100 });
+    const messages = [...batch.values()].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
+    scanned += messages.length;
+    const found = messages.find((m) => ours.has(m.author?.id) && String(m.content ?? '').includes(marker));
+    if (found) return { messageId: found.id, complete: true, scanned };
+    if (messages.length < 100) return { messageId: null, complete: after !== null, scanned };
+    if (after === null) return { messageId: null, complete: false, scanned }; // 最新 100 件だけ
+    after = messages[messages.length - 1].id;
+  }
+  return { messageId: null, complete: false, scanned }; // 30 ページで打ち切り = 不完全
 }

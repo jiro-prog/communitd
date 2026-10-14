@@ -308,6 +308,45 @@ test('パス判定は承認候補と touch 集合の変換で同じ規則を使�
   assert.equal(describePathRule('Edit', 'src/index.js', null).ok, false);
 });
 
+test('長い絶対パスは、相対パスと同じく通る (cwd の部分を秘密の判定に入れない)', () => {
+  // 一時フォルダの深さに左右されないよう、区切りを含めて 32 文字を超える英数字の並びと、
+  // 秘密らしい語 (keys) を cwd 側にわざと作る。以前はどちらも「秘密らしい語」で断っていた
+  const base = mkdtempSync(join(tmpdir(), 'communitd-long-'));
+  const deep = join(base, 'aaaaaaaaaa', 'bbbbbbbbbb', 'cccccccccc', 'dddddddddd', 'keys-project');
+  mkdirSync(join(deep, 'src'), { recursive: true });
+  writeFileSync(join(deep, 'src', 'app.js'), '// x');
+  const cwd = canonicalCwd(deep);
+  const expected = { ok: true, rule: 'Edit(./src/app.js)', relative: 'src/app.js' };
+  assert.deepEqual(describePathRule('Edit', 'src/app.js', cwd), expected);
+  assert.deepEqual(describePathRule('Edit', join(cwd, 'src', 'app.js'), cwd), expected);
+  // 区切りを / にそろえた綴りでも同じ (Windows でも resolve が読む)
+  assert.deepEqual(describePathRule('Edit', `${cwd.replaceAll('\\', '/')}/src/app.js`, cwd), expected);
+  assert.equal(suggestPathRule('Edit', { file_path: join(cwd, 'src', 'app.js') }, cwd), expected.rule);
+  // touch 集合の変換 (既存ファイルだけ) も同じ判定
+  assert.equal(describePathRule('Edit', join(cwd, 'src', 'app.js'), cwd, { mustExist: true }).ok, true);
+});
+
+test('秘密らしいパスは、絶対パスで渡しても断る (判定は cwd の中の部分に当てる)', () => {
+  const cwd = workspace();
+  const token = 'Zm9vYmFyYmF6cXV4cXV1eGNvcmdlZ3JhdWx0Z2FycGx5';
+  mkdirSync(join(cwd, 'keys'));
+  for (const p of [
+    '.env', join(cwd, '.env'), 'src/../.env',
+    'keys/api-key.txt', join(cwd, 'keys', 'api-key.txt'),
+    `src/${token}.txt`, join(cwd, 'src', `${token}.txt`),
+    'src/0123456789abcdef0123456789abcdef.bin',
+  ]) {
+    const r = describePathRule('Edit', p, cwd);
+    assert.equal(r.ok, false, `通してはいけない: ${p}`);
+    assert.match(r.reason, /秘密/, p);
+  }
+  // 区切りをまたぐ並びはトークン列と読まない (名前 1 つずつは短い)
+  writeFileSync(join(cwd, 'src', 'index.js'), '// x');
+  mkdirSync(join(cwd, 'src', 'bridge', 'recovery', 'wiring'), { recursive: true });
+  writeFileSync(join(cwd, 'src', 'bridge', 'recovery', 'wiring', 'auto.js'), '// x');
+  assert.equal(describePathRule('Edit', 'src/bridge/recovery/wiring/auto.js', cwd).ok, true);
+});
+
 test('Windows が特別扱いするパスは通さない (git 差分に出ないものを掴ませない)', () => {
   // どれも「通常のリポジトリファイルではないのに書き込めてしまう」経路で、
   // 変更が git 差分に出ないため検収から消える (sol 指摘 2026-08-03: 実測で通っていた)

@@ -1,4 +1,4 @@
-// 止まった仕事の検知と再開。
+// 止まった仕事の検知と再開 (docs/implementation-plan.md P2〜P4 / docs/social-engineering.md §11)。
 //
 // ここは**順序と排他だけ**を持つ層。判断は src/taskstatus.js (状態) と src/recovery.js (再開の
 // 可否) の純粋関数、記録は src/jobruns.js、Discord・Git・子プロセスは注入で受ける。
@@ -8,7 +8,8 @@
 import { DEFAULT_GRACE_MS, deriveTaskStatus, nextOperationFor, recoveryRows, statusLabel } from './taskstatus.js';
 import { elapsed } from './inbox.js';
 import {
-  classifySendError, parseRequestMarker, planRecovery, planRetry, requestMarker, retryMessage,
+  AUTO_RECOVERY_STATUSES, classifySendError, parseRequestMarker, planRecovery, planRetry, requestMarker,
+  retryMessage,
 } from './recovery.js';
 import { remainingJobs } from './board.js';
 import { brokenLedgers } from './store.js';
@@ -26,14 +27,19 @@ export function stallKey({ task, status }) {
   return `${task?.id}:${status?.status}:${status?.run?.id ?? '-'}`;
 }
 
-/** スレッドへ出す停滞の通知 (1 回だけ) */
-export function stallNoticeText({ task, status }, { now = Date.now() } = {}) {
+/**
+ * スレッドへ出す停滞の通知 (1 回だけ)。`again` は自動復旧が起こさない・起こせなかったと分かった後の
+ * 出し直し (判断の種類ごとに 1 回)
+ */
+export function stallNoticeText({ task, status }, { now = Date.now(), again = false } = {}) {
   const op = nextOperationFor(status);
   return [
     `🛟 タスク #${task.id} は**${statusLabel(status.status)}**です (経過 ${elapsed(status.since, now)})`,
     `理由: ${String(status.reason ?? '').replace(/\s+/g, ' ').slice(0, 300)}`,
     op ? `次の操作: ${op}` : null,
-    '— この通知は同じ問題につき 1 回だけ出ます。`/inbox` の「復旧待ち」にも載ります',
+    again
+      ? '— 自動復旧が起こさない・起こせなかったので出し直しました (同じ判断ではもう出ません)。`/inbox` の「復旧待ち」にも載ります'
+      : '— この通知は同じ問題につき 1 回だけ出ます (自動復旧が起こさない・起こせないと分かったら出し直します)。`/inbox` の「復旧待ち」にも載ります',
   ].filter(Boolean).join('\n');
 }
 
@@ -61,6 +67,9 @@ export function stallNoticeText({ task, status }, { now = Date.now() } = {}) {
  *        [deps.postAs] その bot の client からスレッドへ投稿する (担当自身の client からは投げない)
  * @param {(p: {thread: object, id: string|null, bot: object}) => Promise<{ok: boolean, reason: string}>}
  *        [deps.reissueReview] review の出し直し (`/review` と同じ実体)
+ * @param {(p: {botKey: string, threadId: string}) => Promise<{bot: object, thread: object}>}
+ *        [deps.threadAs] その bot と、その client から見たスレッド (本物の channel)。取れなければ throw。
+ *        自動の経路が reviewer を呼び直すときに使う (人間の /retry は slash を受けた bot とスレッドを持っている)
  * @param {(cwd: string) => boolean|null} [deps.gitDirty] 作業ツリーに未コミットの変更があるか (読めなければ null)
  */
 export function createRecoveryService({
@@ -83,8 +92,9 @@ export function createRecoveryService({
   botUserId = () => null,
   postAs = null,
   reissueReview = null,
+  threadAs = null,
   gitDirty = () => null,
-  // 自動復旧の材料: チャンネルの日次予算の残 / 適用 task か (自動復旧の対象外)
+  // 自動復旧 (§11.4) の材料: チャンネルの日次予算の残 / 適用 task か (自動復旧の対象外)
   dayJobsLeftFor = () => null,
   isApplyTask = () => false,
   // 日次予算の予約と払い戻し (通常の着手と同じ勘定 `jobsToday` — レビュー指摘 2026-09-05)。
@@ -105,12 +115,24 @@ export function createRecoveryService({
   const notified = new Map();
   // 自動復旧の判断のログを毎 tick 撒かない (task × 行動 × 理由 で 1 回)
   const observed = new Map();
+  // 自動の起こし直しが断られた理由 (task id → 理由)。子がまだ生きている要照合などは毎 tick
+  // 断られるので、理由が変わったときだけ書く
+  const refused = new Map();
+  // 自動復旧の最新の判断のうち、人間に見せるもの (task id → {key, kind, reason, notify})。
+  // kind は observe (起こさない) / refused (起こせなかった)。key は判断した時点の stallKey で、
+  // 止まり直した (別の job・別の状態) 行には付けない。notify は停滞の通知を出し直してよいか
+  const autoNotes = new Map();
+  // 起動後の最初の見回りか / 自動復旧の判断が 1 度でも下りたか。再起動で notified も autoNotes も消えるので、
+  // 本番の順 (sweep → autoTick) のままだと、自動が諦めたタスク 1 件につき「判断の前の 🛟」と
+  // 「出し直し」の 2 通になる。最初の見回りの 🛟 だけ 1 周待たせて、判断を載せた 1 通にする
+  let firstSweep = true;
+  let autoTicked = false;
   // 再開の進行中 (task id)。**await の前に入れる** — 連打・別 bot 経由・自動復旧が同じ入口を使う
   const inFlight = new Set();
   const recoveryOf = (taskId) => (recoveryStore ? recoveryStore.recoveryOf(taskId) : null);
 
   /**
-   * 自動復旧が根拠にする台帳のうち読めないもの。
+   * 自動復旧が根拠にする台帳のうち読めないもの (§12.3 (1))。
    * 「止まっているか (pause)」「何が仕事か (tasks)」「何回起こしたか (recovery)」
    * 「何が走ったか (job-runs)」のどれが欠けても、起こしてよいかは決められない
    */
@@ -145,29 +167,70 @@ export function createRecoveryService({
     });
   }
 
+  /** 自動復旧の判断を人間に見せる形で覚える (判断そのものには使わない) */
+  function noteAuto(task, status, kind, reason, notify) {
+    autoNotes.set(String(task.id), {
+      key: stallKey({ task, status }), kind, reason: String(reason ?? '').replace(/\s+/g, ' ').trim(), notify,
+    });
+  }
+
+  /** その行に今も当てはまる自動復旧の判断 (止まり直した行には古い判断を付けない) */
+  function noteFor({ task, status }) {
+    const note = autoNotes.get(String(task?.id));
+    return note && note.key === stallKey({ task, status }) ? note : null;
+  }
+
+  /**
+   * 表示用の状態 (/status・/inbox・停滞の通知)。理由の**先頭**に自動復旧の判断を載せる —
+   * `/status` は理由を 60 字で切るので、後ろに付けると切られて見えない。
+   * 判断 (planRecovery / planRetry) には素の `statusOf` を使うこと
+   */
+  function displayStatusOf(task, { at = now() } = {}) {
+    const status = statusOf(task, { at });
+    const note = noteFor({ task, status });
+    return note ? { ...status, reason: `自動復旧: ${note.reason} / ${status.reason ?? ''}` } : status;
+  }
+
   /** 復旧待ちの一覧 (/inbox・/status 用) */
   function rows({ channel = null, at = now(), excludeThreadIds = [] } = {}) {
     const tasks = board.list(channel ? { channel } : {}).filter((t) => WORKING_STATES.includes(t.state));
-    return recoveryRows(tasks, (task) => statusOf(task, { at }), { excludeThreadIds });
+    return recoveryRows(tasks, (task) => displayStatusOf(task, { at }), { excludeThreadIds });
   }
 
   /**
    * tick ごとの見回り。**新しい判断待ちの通知は問題ごとに 1 回**で、毎 tick 撒かない。
+   * 自動復旧が起こさない・起こせなかったと分かったら、判断の**種類**ごとに 1 回だけ出し直す
+   * (理由の文言が tick ごとに変わっても撒かない。最初の通知に判断が載っていれば出し直さない)。
    * 通知の失敗 (スレッド削除・Discord 障害) は記録して次の tick で 1 回だけやり直す。
-   * @returns {Promise<{rows: object[], notified: string[]}>}
+   * 起動後の最初の見回りは、自動復旧の判断がまだ無ければ 🛟 を出さずに返す (`held: true`)。
+   * @returns {Promise<{rows: object[], notified: string[], held?: boolean}>}
    */
   async function sweep({ at = now() } = {}) {
     const all = [];
     for (const channel of channels) all.push(...rows({ channel, at }));
-    const liveKeys = new Set(all.map(stallKey));
+    const liveKeys = new Set(all.flatMap((row) => {
+      const key = stallKey(row);
+      return [key, `${key}:observe`, `${key}:refused`];
+    }));
     for (const key of notified.keys()) {
       if (!liveKeys.has(key)) notified.delete(key); // 解消した問題の記録は捨てる (同じ鍵で止まり直せば出し直す)
+    }
+    // 待たせるのは起動後の 1 周だけ (受付停止中で autoTick が回らなくても、次の見回りでは出す)。
+    // 自動復旧の台帳が無ければ判断は下りないので待たせない
+    const hold = firstSweep && !autoTicked && Boolean(recoveryStore);
+    firstSweep = false;
+    if (hold) {
+      if (all.length > 0) log(`[recovery] 起動直後の見回り: 復旧待ち ${all.length} 件の 🛟 は自動復旧の判断の後 (次の見回り) に出します`);
+      return { rows: all, notified: [], held: true };
     }
     const sent = [];
     for (const row of all) {
       const key = stallKey(row);
-      if (notified.has(key)) continue;
-      const text = stallNoticeText(row, { now: at });
+      const note = noteFor(row);
+      const noteKey = note?.notify ? `${key}:${note.kind}` : null;
+      const again = notified.has(key);
+      if (again && (!noteKey || notified.has(noteKey))) continue;
+      const text = stallNoticeText(row, { now: at, again });
       log(`[recovery] ${text.split('\n').slice(0, 2).join(' / ')}`);
       let ok = true;
       if (typeof notify === 'function') {
@@ -180,7 +243,8 @@ export function createRecoveryService({
       }
       if (ok) {
         notified.set(key, at);
-        sent.push(key);
+        if (noteKey) notified.set(noteKey, at);
+        sent.push(again ? noteKey : key);
       }
     }
     return { rows: all, notified: sent };
@@ -301,7 +365,7 @@ export function createRecoveryService({
   }
 
   /**
-   * 受付側の照合 (レビュー指摘 2026-09-05 A)。bot が投げた起動メッセージが再開要求の印を
+   * 受付側の照合 (§11.3 — レビュー指摘 2026-09-05 A)。bot が投げた起動メッセージが再開要求の印を
    * 持っていたら、その要求が**いま有効か**を台帳で確かめる。期限切れ・受付済み (再配送)・送れなかったと
    * 記録済み・宛先違い・別の投稿なら起動しない。印の無い投稿は判定しない (通常の handoff を断らない)。
    * **hop と予算を消費する前**に呼ぶこと (見送る job で減らさない)。
@@ -347,7 +411,7 @@ export function createRecoveryService({
   }
 
   /**
-   * `/retry` の実体。**手動も自動も同じ入口**。
+   * `/retry` の実体 (§11.3)。**手動も自動も同じ入口**。
    * 順序: 状態の判定 → 子プロセスの照合 → 純粋な可否 → 世代の確保 (排他) → 起こす → 結果を記録。
    *
    * @param {{thread: {id: string}, id?: string|null, bot?: object|null, userId?: string|null,
@@ -425,7 +489,29 @@ export function createRecoveryService({
           settle('failed(reissueReview 未配線)');
           return { ok: false, reason: 'レビューの出し直しが配線されていません', warnings: plan.warnings, sent: false };
         }
-        const sent = await reissueReview({ thread, id: null, bot });
+        // 自動の経路は `{id}` しか持たない。裸の `{id}` は親チャンネルを持たないので `/review` の実体が
+        // チャンネル設定を引けず「未登録」で断る — 人間の /retry と同じ形 (投げ手の bot と、その
+        // client から見た本物のスレッド) にそろえて渡す。投げ手は worker の分岐と同じく担当以外から選ぶ
+        let via = { thread, bot };
+        if (!bot) {
+          if (typeof threadAs !== 'function') {
+            settle('failed(threadAs 未配線)');
+            return { ok: false, reason: 'レビューを呼び直すスレッドの取得が配線されていません', warnings: plan.warnings, sent: false };
+          }
+          const announcerKey = pickAnnouncer(autonomy.reviewer, autonomy, availableBotKeys());
+          if (!announcerKey) {
+            settle('failed(投げ手なし)');
+            return { ok: false, reason: `レビュー担当 ${autonomy.reviewer} を呼べる bot が居ません (担当自身からは起こせません)`, warnings: plan.warnings, sent: false };
+          }
+          try {
+            via = await threadAs({ botKey: announcerKey, threadId: task.threadId });
+          } catch (err) {
+            // 送信の前なので確実に送れていない (日次予算の予約は autoTick が戻す)
+            settle(`failed(${String(err?.message ?? err).slice(0, 120)})`);
+            return { ok: false, reason: `${announcerKey} からスレッドを取得できません: ${err?.message ?? err}`, warnings: plan.warnings, sent: false };
+          }
+        }
+        const sent = await reissueReview({ thread: via.thread, id: null, bot: via.bot });
         // 召喚の制御メンションの ID は取れないので、受付は宛先 bot と時刻で照合する (markAccepted)
         settle(sent?.ok ? 'sent' : `failed(${String(sent?.reason ?? '').slice(0, 120)})`);
         return {
@@ -496,18 +582,19 @@ export function createRecoveryService({
   }
 
   /**
-   * 自動復旧の tick。**観測 mode が既定** — 判断だけして起こさない。
-   * `auto` のチャンネルでも、起こすのは `planRecovery` が `retry` と言ったものだけで、
-   * 実際の起こし方は `/retry` と同じ入口 (`retry({kind:'auto'})`) を通る (連打・二重投入の排他も同じ)。
+   * 自動復旧の tick (§11.4)。**既定は auto** (observe のチャンネルは判断だけして起こさない)。
+   * 起こすのは `planRecovery` が `retry` と言ったものだけで、実際の起こし方は `/retry` と
+   * 同じ入口 (`retry({kind:'auto'})`) を通る (連打・二重投入の排他・子プロセスの照合も同じ)。
    *
    * @returns {Promise<{decisions: Array<{taskId: string, action: string, reason: string}>}>}
    */
   async function autoTick({ at = now() } = {}) {
     const decisions = [];
     if (!recoveryStore) return { decisions };
+    autoTicked = true;
     for (const channel of channels) {
       const autonomy = autonomyFor(channel) ?? {};
-      const config = autonomy.recovery ?? { mode: 'observe' };
+      const config = autonomy.recovery ?? { mode: 'auto' };
       if (config.mode === 'off') continue;
       const tasks = board.list({ channel }).filter((t) => WORKING_STATES.includes(t.state));
       for (const task of tasks) {
@@ -518,7 +605,7 @@ export function createRecoveryService({
           log(`[recovery] #${task.id} の状態を判定できません (自動復旧は見送り): ${err?.message ?? err}`);
           continue;
         }
-        if (status.status !== 'recovery-wait') continue;
+        if (!AUTO_RECOVERY_STATUSES.includes(status.status)) continue;
         const decision = planRecovery({
           task,
           status,
@@ -540,12 +627,20 @@ export function createRecoveryService({
           if (first) log(`[recovery] ⛔ ${decision.reason}`);
           return { decisions, halted: true };
         }
-        if (decision.action === 'none') continue;
+        if (decision.action === 'none') {
+          autoNotes.delete(String(task.id)); // 自動復旧の対象外 (人間の /stop など) — 載せるものが無い
+          continue;
+        }
         if (decision.action === 'observe') {
           if (first) log(`[recovery] #${task.id} (${config.mode}): ${decision.reason}`);
+          // 出し直すのは auto で諦めたときだけ。観測 mode は起こさないのが既定の挙動で、
+          // pause 中は人間が止めている (解除後に同じ判断が残っていれば、そこで出し直す)
+          noteAuto(task, status, 'observe', decision.reason, config.mode === 'auto' && pauseStore?.paused !== true);
           continue;
         }
         if (decision.action === 'schedule') {
+          // 次の試行が決まっている (行は「再開予定」になって復旧待ちに出ない)。前の判断は古くなる
+          autoNotes.delete(String(task.id));
           const current = recoveryStore.recoveryOf(task.id)?.nextAutoAt ?? null;
           if (msOfTime(current) !== decision.nextAt) {
             try {
@@ -562,12 +657,24 @@ export function createRecoveryService({
         // 同じ tick の 2 件目は予約後の残高を見るので、残高 1 で 2 件起こすことはない
         if (typeof reserveDayJob === 'function' && !reserveDayJob(channel, { at })) {
           if (first) log(`[recovery] #${task.id}: 日次予算を予約できないので起こしません`);
+          noteAuto(task, status, 'refused', '日次予算を予約できないので起こさない', true);
           continue;
         }
-        log(`[recovery] #${task.id}: ${decision.reason} — 起こします`);
         const out = await retry({ thread: { id: task.threadId }, kind: 'auto', userId: 'auto', at });
-        log(`[recovery] #${task.id}: ${out.ok ? '起こしました' : `起こせませんでした — ${out.reason}`}`);
+        if (out.ok) {
+          refused.delete(String(task.id));
+          autoNotes.delete(String(task.id));
+          log(`[recovery] #${task.id}: ${decision.reason} — 起こしました`);
+        } else if (refused.get(String(task.id)) !== out.reason) {
+          refused.set(String(task.id), out.reason);
+          log(`[recovery] #${task.id}: ${decision.reason} — 起こせませんでした (${out.reason})`);
+        }
         if (!out.ok) {
+          // retry は要照合の記録を閉じてから断ることがある — 表示の行と合うよう、断られた後の状態に付ける
+          let after = status;
+          try { after = statusOf(task, { at }); } catch { /* 判定前の状態に付ける */ }
+          // 送達不明は「起こせなかった」と言い切らない (理由の文言が送達不明と書いている)
+          noteAuto(task, after, 'refused', out.sent === 'unknown' ? out.reason : `起こせなかった — ${out.reason}`, true);
           // 起こせなかったのに予定だけ残ると「再開予定」のまま止まる。予定を消して復旧待ちへ戻す
           try { recoveryStore.cancelAuto(task.id); } catch { /* 表示の問題だけ */ }
           // 予約は**確実に送れなかったとき**だけ戻す (送達不明で戻すと、届いていた場合に上限を超える)
@@ -578,11 +685,15 @@ export function createRecoveryService({
     // 消えた鍵は捨てる (同じ判断が戻ってきたら 1 回だけ出し直す)
     const live = new Set(decisions.map((d) => `${d.taskId}:${d.action}:${d.reason}`));
     for (const key of observed.keys()) if (!live.has(key)) observed.delete(key);
+    const liveTasks = new Set(decisions.map((d) => String(d.taskId)));
+    for (const id of refused.keys()) if (!liveTasks.has(id)) refused.delete(id);
+    for (const id of autoNotes.keys()) if (!liveTasks.has(id)) autoNotes.delete(id);
     return { decisions };
   }
 
   return {
     statusOf,
+    displayStatusOf,
     rows,
     sweep,
     retry,

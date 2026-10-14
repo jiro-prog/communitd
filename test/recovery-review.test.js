@@ -8,7 +8,7 @@ import { createRecoveryService } from '../src/recovery-wiring.js';
 import { RecoveryStore, classifySendError, planRetry, requestMarker, retryMessage } from '../src/recovery.js';
 import { JobRunStore } from '../src/jobruns.js';
 
-// 復旧まわりの見直しで見つかった Critical 3 件の回帰テスト。
+// docs/reviews/2026-09-05-recovery-review.md の Critical 3 件の回帰テスト。
 // 実ストア (mkdtemp) + 偽の Discord / OS / 日次予算。
 
 const T0 = Date.parse('2026-09-05T09:00:00.000Z');
@@ -331,9 +331,12 @@ test('自動復旧の予約は、確実に送れなかったときだけ戻し�
   assert.equal(unknown.budget.reserved, 1);
   assert.equal(unknown.budget.refunded, 0, '送達不明で残高を戻している');
   assert.equal(unknown.recoveryStore.openRequest('77').result, 'send-unknown');
-  // 次の tick は送達不明の要求が塞ぐので、新たに予約も送信もしない
+  // 間隔 (2 回目は 2 分) は直前の再開要求から数えるので、1 分後の tick は予定を立てるだけで予約しない
   const before = unknown.budget.reserved;
   await unknown.service.autoTick({ at: T0 + minutes(1) });
+  assert.equal(unknown.budget.reserved, before, '間隔の前に予約している');
+  // 間隔の後の tick は送達不明の要求が塞ぐので、新たに送信はしない
+  await unknown.service.autoTick({ at: T0 + minutes(2) });
   assert.equal(unknown.budget.reserved, before + 1, '予約はするが');
   assert.equal(unknown.budget.refunded, 1, 'retry が「送達不明で塞がれている」と確実に分かったので戻す');
 

@@ -1,4 +1,4 @@
-// 設定に書かれた CLI コマンド (`claudeBin` / `codexCmd`) を **spawn できる形**へ解決する。
+// 設定に書かれた CLI コマンド (`claudeBin` / `codexCmd` / `piCmd`) を **spawn できる形**へ解決する。
 //
 // **Windows だけ特別扱いが要る。** npm グローバルの実行ファイルは `.cmd` シムで、
 // Node 20.12 以降の `spawn` は `.bat` / `.cmd` を直接起動できない (EINVAL)。
@@ -57,6 +57,14 @@ export const CODEX_CLI = {
   configKey: 'codexCmd',
   npmEntries: [['node_modules', '@openai', 'codex', 'bin', 'codex.js']],
   example: '["node", "C:/Users/<you>/AppData/Roaming/npm/node_modules/@openai/codex/bin/codex.js"]',
+};
+
+/** pi CLI の在り処 (`@earendil-works/pi-coding-agent` — node で起動する。docs/reference/pi-runtime.md) */
+export const PI_CLI = {
+  name: 'pi',
+  configKey: 'piCmd',
+  npmEntries: [['node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'bundle', 'cli.js']],
+  example: '["node", "C:/Users/<you>/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"]',
 };
 
 /** 注入された exists / readFile は投げてよい (doctor の fs は throw する) */
@@ -176,7 +184,7 @@ export function resolveCliCommand({
  *   ここを素通しにすると `codexCmd: ["codex"]` と書いただけで spawn が ENOENT になる
  * - 未設定・空 … 既定の名前 (`spec.name`) を PATH から引く
  *
- * @param {string|string[]|null|undefined} configured 設定値
+ * @param {string|string[]|undefined} configured 設定値
  * @param {object} spec CLI の在り処 (CLAUDE_CLI / CODEX_CLI)
  * @param {object} [deps] 注入 (platform / env / exists / readFile / nodeBin)
  * @returns {string[]|null}
@@ -203,7 +211,7 @@ export function cliCmdHint({ configKey, example } = {}) {
  * 解決できなかった理由。**PATH のせいにしない** — 設定に絶対パスを書いた人には PATH は
  * 無関係で、「PATH に見つかりません」と言われると直す場所を探せない (Opus2 指摘 2026-09-10)。
  *
- * @param {string|string[]|null|undefined} configured 設定値 (どこを直せばよいかはこれで決まる)
+ * @param {string|string[]|undefined} configured 設定値 (どこを直せばよいかはこれで決まる)
  * @param {object} spec CLI の在り処 (CLAUDE_CLI / CODEX_CLI)
  */
 export function cliCmdReason(configured, spec) {

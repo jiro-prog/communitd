@@ -1,4 +1,4 @@
-// touch を持たない既存タスクへ宣言を後付けする移行 CLI。
+// touch を持たない既存タスクへ宣言を後付けする移行 CLI (docs/social-engineering.md §3.9)。
 //
 //   node scripts/migrate-task-touch.mjs                        # 現状を出すだけ (何も書かない)
 //   node scripts/migrate-task-touch.mjs --apply 9=src/a.ts,src/b.ts 31=src/c.ts
@@ -9,7 +9,7 @@
 // いるとそのボードでは組織提案が全件拒否される。移行はそれを解くための一度きりの操作。
 //
 // **触るのは終端でないタスクだけ**で、既に touch を持つタスクは断る (src/board.js の
-// `setTouch`)。走っている最中に範囲を広げる口にしないため、上書きはここからはできない。
+// `setTouchMany`)。走っている最中に範囲を広げる口にしないため、上書きはここからはできない。
 
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -87,7 +87,9 @@ function main(argv) {
     console.log('(--apply が無いので書いていません)');
     return 0;
   }
-  for (const { id, touch } of planned.plan) board.setTouch(id, touch);
+  // **書くのは 1 回だけ。** 件数ぶん保存すると、途中の I/O 失敗で一部だけ移行された
+  // 台帳が残る (`setTouchMany` の注記)
+  board.setTouchMany(planned.plan.map(({ id, touch }) => [id, touch]));
   console.log('');
   console.log(`${planned.plan.length} 件へ touch を入れました`);
   const rest = tasksMissingTouch(board.list());

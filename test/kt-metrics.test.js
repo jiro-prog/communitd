@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -235,4 +235,34 @@ test('parseArgs: --file と --channel だけを受け、知らないものは断
   for (const argv of [['--bogus'], ['kumamikan-tools'], ['--file'], ['--channel', '--file']]) {
     assert.throws(() => parseArgs(argv), /知らないオプション|値が渡されていません/, JSON.stringify(argv));
   }
+});
+
+test('readBoard: 隣の archive/ に移したタスクも読み、同じ id はボードの方を採る', () => {
+  const dir = tempDir();
+  const file = join(dir, 'tasks.json');
+  const archive = join(dir, 'archive');
+  mkdirSync(archive);
+  writeFileSync(file, JSON.stringify({
+    3: { id: '3', state: 'merged', title: 'ボード' },
+    5: { id: '5', state: 'approved' },
+  }), 'utf8');
+  writeFileSync(join(archive, 'tasks-2026-08.json'), JSON.stringify({
+    1: { id: '1', state: 'merged' },
+    3: { id: '3', state: 'merged', title: '移す途中で落ちた回の写し' },
+  }), 'utf8');
+  writeFileSync(join(archive, 'tasks-2026-09.json'), JSON.stringify({ 2: { id: '2', state: 'dropped' } }), 'utf8');
+  writeFileSync(join(archive, 'notes.json'), '{', 'utf8'); // 名前の合わないファイルは読まない
+
+  const tasks = readBoard(file);
+  assert.deepEqual(tasks.map((task) => task.id), ['1', '2', '3', '5']);
+  assert.equal(tasks.find((task) => task.id === '3').title, 'ボード');
+  assert.deepEqual(readBoard(file, { archiveDir: null }).map((task) => task.id), ['3', '5']);
+
+  // 壊れたアーカイブも 0 件にせず落ちる (どのファイルかを言う)。何も書き換えない
+  writeFileSync(join(archive, 'tasks-2026-09.json'), '{', 'utf8');
+  assert.throws(() => readBoard(file), (err) => {
+    assert.match(err.message, /tasks-2026-09\.json が JSON として読めません/);
+    return true;
+  });
+  assert.deepEqual(readdirSync(archive).sort(), ['notes.json', 'tasks-2026-08.json', 'tasks-2026-09.json']);
 });

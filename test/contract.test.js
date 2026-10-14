@@ -32,8 +32,10 @@ import {
   resolveContractKind,
   resolveJobContractKind,
   readContractNonce,
+  renderContract,
   renderForKind,
   requiresContract,
+  reviewRemarks,
   validateContract,
 } from '../src/contract.js';
 import { canonicalCwd } from '../src/grants.js';
@@ -271,7 +273,7 @@ test('touch 集合は対象パスへの Edit だけになる (書込み経路を
   // 実測に基づく 5 点セット。どれか 1 つでも欠けると絞り込みが素通りする
   assert.equal(n.permissionMode, 'default', 'acceptEdits のままだと Edit(パス) が迂回される');
   assert.equal(n.strictMcp, true);
-  // user settings の permissions.allow が --allowedTools に勝って権限を付与する。
+  // user settings の permissions.allow が --allowedTools に勝って権限を付与する (T0 §2.4)。
   // 実測 2026-08-03: `permissions.allow: ["Edit"]` を 1 行足すだけで touch 制限が破れた
   assert.equal(n.settingSources, '', '外部 settings を読ませたままにしている');
   for (const denied of NARROWED_DENY_TOOLS) {
@@ -464,12 +466,15 @@ test('touch 制限つきの委譲は codex ランタイムへ渡さない (Fable
   // claude 宛は従来どおり
   assert.deepEqual(canDelegateTo('delegation', DELEGATION, 'claude'), { ok: true });
   assert.deepEqual(canDelegateTo('delegation', DELEGATION, undefined), { ok: true });
+  // **知らない綴りは拒否のまま** (fail-closed)。能力表 (src/runtime.js) 経由にしたときに
+  // 「不明なら既定 = claude 扱い」へ揃えると、ここが黙って許可側へ倒れる (Opus2 指摘 2026-09-18)
+  assert.equal(canDelegateTo('delegation', DELEGATION, 'gemini').ok, false);
   // 報告は権限を持たないのでどの担当へでも渡せる (検収の照合材料)
   assert.deepEqual(canDelegateTo('report', REPORT, 'codex'), { ok: true });
 });
 
 test('契約を本体の cwd で束縛すれば、作業ツリーで走る相手との間でも通る', () => {
-  // worktree 分離で、worker は .worktrees/task-N・reviewer は本体、と cwd が
+  // §8-2 の worktree 分離で、worker は .worktrees/task-N・reviewer は本体、と cwd が
   // 分かれた。ブリッジは契約を本体へ寄せて保存する (index.js の contractCwd) —
   // 寄せないと worker が保存した契約を reviewer が取り出せず、レビュー job が起動しない
   // ままタスクが review に残る (Sol 指摘 2026-08-28)
@@ -549,6 +554,98 @@ test('絞り込めなかった指定は契約ブロックにも出す (黙って
   const text = renderForKind('delegation', DELEGATION, n);
   assert.match(text, /src\/\*\.js/);
   assert.match(text, /パターン文字/);
+});
+
+test('touch 制限が有効で絞り込みが無いときは「適用されていない」と書く (制限の説明を黙って落とさない)', () => {
+  const NOT_APPLIED = '**touch 制限が有効だが、絞り込みは適用されていない。** 集合の外は触らないこと。';
+  const HEADING = '## ファイル権限 (上の実行文脈より、この job ではこちらが正確)';
+  // 絞り込めずに ok:false で返った結果 (rules を持たない) も同じ扱い
+  const failed = narrowForTouchSet({ touchSet: ['src/*.js'], allowedTools: FULL, cwd: CWD });
+  assert.equal(failed.ok, false);
+  // plan は ok:true でも rules が空 (書込みを足さない) — 同じ分岐に入る
+  const plan = narrowForTouchSet({ touchSet: ['src/a.js'], allowedTools: FULL, cwd: CWD, permissionMode: 'plan' });
+  assert.deepEqual(plan.rules, []);
+
+  const cases = [
+    ['省略', renderContract(DELEGATION)],
+    ['null', renderContract(DELEGATION, null)],
+    ['{}', renderContract(DELEGATION, {})],
+    ['rules: []', renderContract(DELEGATION, { rules: [] })],
+    ['rules: null', renderContract(DELEGATION, { rules: null })],
+    ['touch_restricted: true', renderContract({ ...DELEGATION, touch_restricted: true }, null)],
+    ['絞り込み失敗', renderContract(DELEGATION, failed)],
+    ['plan', renderContract(DELEGATION, plan)],
+  ];
+  for (const [label, text] of cases) {
+    const lines = text.split('\n');
+    assert.ok(lines.includes(HEADING), `${label}: ファイル権限の見出しが無い`);
+    assert.ok(lines.includes(NOT_APPLIED), `${label}: 「絞り込みは適用されていない」が出ていない`);
+    assert.ok(lines.indexOf(HEADING) < lines.indexOf(NOT_APPLIED), `${label}: 見出しより前に出ている`);
+    // 絞り込みがある側の文面 (ルールの一覧) は出さない
+    assert.equal(text.includes('書込みは次の'), false, `${label}: ルールが無いのに一覧の前置きを出している`);
+    assert.equal(text.includes('Edit('), false, `${label}: 無いルールを出している`);
+    assert.equal(text.includes('touch 制限は解除されている'), false, `${label}: 解除と取り違えている`);
+  }
+});
+
+test('絞り込みの警告は 1 件ずつ ⚠️ 行で出す', () => {
+  const lines = renderContract(DELEGATION, {
+    rules: ['Edit(./src/a.js)'], warnings: ['一つ目の警告', '二つ目の警告'],
+  }).split('\n');
+  assert.deepEqual(lines.filter((l) => l.includes('⚠️')), ['- ⚠️ 一つ目の警告', '- ⚠️ 二つ目の警告']);
+  assert.ok(lines.includes('- `Edit(./src/a.js)`'), 'ルールの行が無い');
+
+  // 警告が無い (キーが無い・空) なら ⚠️ 行は 1 本も出ない
+  for (const narrowed of [{ rules: ['Edit(./src/a.js)'] }, { rules: ['Edit(./src/a.js)'], warnings: [] }]) {
+    assert.equal(renderContract(DELEGATION, narrowed).includes('⚠️'), false, JSON.stringify(narrowed));
+  }
+
+  // 実際の絞り込みの警告 (参照ディレクトリを開かない など) は全部そのまま出る
+  const n = narrowForTouchSet({ touchSet: ['src/a.js'], allowedTools: FULL, cwd: CWD });
+  assert.ok(n.warnings.length > 0);
+  const text = renderContract(DELEGATION, n);
+  for (const w of n.warnings) assert.ok(text.includes(`- ⚠️ ${w}`), `警告を落としている: ${w}`);
+});
+
+test('絞り込めなかった指定はパスと理由を 1 件 1 行で出す', () => {
+  const HEADER = '- ⚠️ 次の指定は 1 ファイルに絞り込めなかったため編集できない:';
+  const lines = renderContract(DELEGATION, {
+    rules: ['Edit(./src/a.js)'],
+    rejected: [
+      { path: 'src/*.js', reason: 'パターン文字を含む' },
+      { path: 'src/new.js', reason: '新規作成はできない' },
+    ],
+  }).split('\n');
+  const at = lines.indexOf(HEADER);
+  assert.notEqual(at, -1, '見出しの行が無い');
+  assert.deepEqual(
+    lines.slice(at + 1, at + 3),
+    ['  - src/*.js — パターン文字を含む', '  - src/new.js — 新規作成はできない'],
+  );
+
+  // 落としたものが無い (キーが無い・空) なら見出しも出さない
+  for (const narrowed of [{ rules: ['Edit(./src/a.js)'] }, { rules: ['Edit(./src/a.js)'], rejected: [] }]) {
+    assert.equal(
+      renderContract(DELEGATION, narrowed).includes('絞り込めなかった'), false, JSON.stringify(narrowed),
+    );
+  }
+
+  // 実際の絞り込みで落ちた指定 (パターン・新規ファイル) も 1 件ずつ出る
+  const n = narrowForTouchSet({ touchSet: ['src/a.js', 'src/*.js', 'src/new.js'], allowedTools: FULL, cwd: CWD });
+  assert.equal(n.rejected.length, 2);
+  const real = renderContract(DELEGATION, n).split('\n');
+  assert.ok(real.includes(HEADER));
+  for (const r of n.rejected) {
+    assert.ok(real.includes(`  - ${r.path} — ${r.reason}`), `落とした指定を出していない: ${r.path}`);
+  }
+});
+
+test('契約がプレーンオブジェクトでなければ契約ブロックは空文字 (絞り込みがあっても)', () => {
+  const n = narrowForTouchSet({ touchSet: ['src/a.js'], allowedTools: FULL, cwd: CWD });
+  for (const contract of [undefined, null, [], [DELEGATION], 'src/a.js', '', 0, 1, true, false]) {
+    assert.equal(renderContract(contract), '', `空にしていない: ${String(contract)}`);
+    assert.equal(renderContract(contract, n), '', `絞り込みつきで空にしていない: ${String(contract)}`);
+  }
 });
 
 // ---- 本文の配送 (制御フッターが従来どおり発火すること) ----
@@ -792,11 +889,19 @@ test('resolveContractKind: チャンネルが切っていれば宣言があっ�
   );
 });
 
-test('resolveContractKind: codex は宣言があっても null (--json-schema を持たない)', () => {
-  assert.equal(resolveContractKind({ roleText: DECLARED, runtime: 'codex' }), null);
+// **P-3 (2026-09-18) で反転した。** codex に `--output-schema` を配線したので、
+// 宣言のある codex bot は claude と同じく種別を持つ。ランタイムの門そのものは残っていて
+// (能力表の `schema`)、いまは表の全ランタイムが true — 3 つ目の CLI が載った日に効く
+test('resolveContractKind: codex も宣言があれば宣言どおり (--output-schema を配線済み)', () => {
+  assert.equal(resolveContractKind({ roleText: DECLARED, runtime: 'codex' }), 'report');
   // 切っていない codex でも同じ
   assert.equal(
     resolveContractKind({ roleText: DECLARED, runtime: 'codex', structuredOutput: true }),
+    'report',
+  );
+  // チャンネル側の口は引き続き効く (ランタイムと独立)
+  assert.equal(
+    resolveContractKind({ roleText: DECLARED, runtime: 'codex', structuredOutput: false }),
     null,
   );
 });
@@ -811,8 +916,8 @@ test('task-proposal: 役割文が宣言すればその種別になる (既存の
   const role = '<!-- communitd-protocol: 2 -->\n<!-- communitd-schema: task-proposal -->\n# Opus — スカウト';
   assert.equal(readContractKind(role), 'task-proposal');
   assert.equal(resolveContractKind({ roleText: role }), 'task-proposal');
-  // codex・structuredOutput: false で切れるのは他の種別と同じ
-  assert.equal(resolveContractKind({ roleText: role, runtime: 'codex' }), null);
+  // codex でも同じ種別になり (P-3)、structuredOutput: false で切れるのも他の種別と同じ
+  assert.equal(resolveContractKind({ roleText: role, runtime: 'codex' }), 'task-proposal');
   assert.equal(resolveContractKind({ roleText: role, structuredOutput: false }), null);
   // ハイフンを許しても知らない綴りは通さない
   for (const bad of ['task-proposals', 'task-', '-', 'proposal']) {
@@ -820,6 +925,19 @@ test('task-proposal: 役割文が宣言すればその種別になる (既存の
   }
   // 既存の宣言は従来どおり
   assert.equal(readContractKind('<!-- communitd-schema:report-->'), 'report');
+});
+
+test('task-proposal: 申し送り (carry) は省いてよく、3 件までの文字列だけ通す', () => {
+  const none = validateContract('task-proposal', { body: '今回は起票なし', tasks: [] });
+  assert.equal(Object.hasOwn(none.contract, 'carry'), false, '省いた申し送りを埋めている');
+  const three = validateContract('task-proposal', { body: '0 件', tasks: [], carry: ['上限で 4 時間止まった', '#89 は /retry 待ち', 'c'] });
+  assert.equal(three.ok, true);
+  assert.deepEqual(three.contract.carry, ['上限で 4 時間止まった', '#89 は /retry 待ち', 'c']);
+  assert.match(validateContract('task-proposal', { body: 'x', tasks: [], carry: ['a', 'b', 'c', 'd'] }).reason, /申し送り の要素が多すぎます \(4 件 \/ 上限 3 件\)/);
+  assert.match(validateContract('task-proposal', { body: 'x', tasks: [], carry: [1] }).reason, /申し送り の要素は文字列で書きます/);
+  assert.match(validateContract('task-proposal', { body: 'x', tasks: [], carry: 'a' }).reason, /申し送り は配列で書きます/);
+  assert.equal(SCHEMAS['task-proposal'].properties.carry.maxItems, 3);
+  assert.ok(!SCHEMAS['task-proposal'].required.includes('carry'), '申し送りを必須にしている');
 });
 
 test('task-proposal: 正常系 (0 件・複数件・job_budget の省略と指定)', () => {
@@ -856,7 +974,7 @@ test('task-proposal: 異常系は不適合にして、何件目が悪いかを�
     [{ body: 'x', tasks: [task(), task({ rationale: '   ' })] }, /2 件目: 理由 が空です/],
     [{ body: 'x', tasks: [{ rationale: '理由', touch: ['src/a.ts'] }] }, /1 件目: タイトル がありません/],
     [{ body: 'x', tasks: [{ title: 'タイトル', touch: ['src/a.ts'] }] }, /1 件目: 理由 がありません/],
-    // touch は必須で、空配列も通さない (宣言の無いタスクが発議を全件止める)
+    // touch は必須で、空配列も通さない (§3.9 — 宣言の無いタスクが発議を全件止める)
     [{ body: 'x', tasks: [{ title: 'タイトル', rationale: '理由' }] }, /1 件目: touch集合 がありません/],
     [{ body: 'x', tasks: [task({ touch: [] })] }, /1 件目: touch集合 は 1 件以上書きます/],
     [{ body: 'x', tasks: [task({ touch: 'src/a.ts' })] }, /1 件目: touch集合 は配列で書きます/],
@@ -999,7 +1117,7 @@ test('task-approval: 異常系は不適合にして、どこが悪いかを返�
     [{ ...PENDING, pending: [{ id: '3' }] }, /1 件目: タイトル がありません/],
     [{ ...PENDING, pending: [{ id: '3', title: 'A', job_budget: 0 }] }, /job予算/],
     [{ ...PENDING, pending: [{ id: '3', title: 'A', touch: 'src/a.ts' }] }, /配列/],
-    // 参考欄も提示用の形が決まっている — 余分なキーや欠けは落とす
+    // 参考欄 (§9.3) も提示用の形が決まっている — 余分なキーや欠けは落とす
     [{ ...PENDING, board: [{ id: '1', title: 'A' }] }, /1 件目: 状態 がありません/],
     [{ ...PENDING, board: [{ id: '1', state: 'review' }] }, /1 件目: タイトル がありません/],
     [{ ...PENDING, board: [{ id: '1', state: 'review', title: 'A', note: 'x' }] }, /契約に無いキー/],
@@ -1038,7 +1156,7 @@ test('task-approval: 承認する側のプロンプトに id つきの一覧が�
   assert.equal(renderForKind('task-approval', null), '');
 });
 
-test('task-approval: 重複を見つける材料 (touch と参考欄と見る点) が出る', () => {
+test('task-approval: 重複を見つける材料 (touch と参考欄と見る点) が出る — §9.3', () => {
   const block = renderForKind('task-approval', PENDING);
   // 承認待ちの touch (宣言が無ければそう書く — 空欄だと見落としと区別できない)
   assert.match(block, /touch: src\/render\/table\.ts \/ src\/style\.css/);
@@ -1053,6 +1171,8 @@ test('task-approval: 重複を見つける材料 (touch と参考欄と見る点
   assert.match(block, /③粒度/);
   assert.match(block, /touch ≤ 5/);
   assert.match(block, /job 予算は判断材料にしない/);
+  // 着手する人への注意は本文に書く — 本文は承認の記録に残り、着手とレビューに渡る
+  assert.match(block, /着手する人への注意 \(触る範囲・設計の穴\) は\*\*本文に書く\*\*/);
 
   // 参考欄が空でも落ちない (「見ていない」と「無い」を区別する)
   const alone = renderForKind('task-approval', { ...PENDING, board: [] });
@@ -1137,12 +1257,12 @@ const REVIEW_TARGET = {
 };
 
 test('task-review: 判定は 4 値だけ / 応答もブリッジの提示も通る', () => {
-  // drop は後から足した「対象が不要」— 増やすときは設計の裁定を経ること
+  // drop は §9.4 で足した「対象が不要」— 増やすときは設計の裁定を経ること
   assert.deepEqual(REVIEW_VERDICTS, ['merge', 'send-back', 'block', 'drop']);
   assert.equal(validateContract('task-review', REVIEW).ok, true);
   assert.equal(validateContract('task-review', REVIEW_TARGET).ok, true);
   for (const verdict of REVIEW_VERDICTS) {
-    // merge だけはマージコミットが要る (ブリッジが git で照合する)
+    // merge だけはマージコミットが要る (§12.3 (2) — ブリッジが git で照合する)
     const r = validateContract('task-review', {
       body: 'x', verdict, reason: '理由', ...(verdict === 'merge' ? { merge_commit: 'a1b2c3d' } : {}),
     });
@@ -1160,7 +1280,7 @@ test('task-review: 判定は 4 値だけ / 応答もブリッジの提示も通�
   );
 });
 
-test('task-review: merge はマージコミットの SHA が要る', () => {
+test('task-review: merge はマージコミットの SHA が要る (§12.3 (2))', () => {
   assert.equal(validateContract('task-review', { body: 'x', verdict: 'merge', merge_commit: 'a1b2c3d' }).ok, true);
   // 完全 OID も短縮 OID (7 桁) も通る
   assert.equal(validateContract('task-review', { body: 'x', verdict: 'merge', merge_commit: 'f'.repeat(40) }).ok, true);
@@ -1218,6 +1338,47 @@ test('task-review: 提示欄の型違い・余分なキーは落とす', () => {
   }
 });
 
+test('task-review: 指摘 (remarks) は任意の文字列の配列で、2 件なら通る', () => {
+  const r = validateContract('task-review', { ...REVIEW, remarks: ['命名を揃えられる', 'コメントが古い'] });
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(r.contract.remarks, ['命名を揃えられる', 'コメントが古い']);
+  // 任意の欄 — 書かなくても今までどおり通る (必須にすると既存の reviewer の出力が全部落ちる)
+  assert.equal(SCHEMAS['task-review'].required.includes('remarks'), false);
+  assert.equal(validateContract('task-review', REVIEW).ok, true);
+  // merge 以外に付いていても弾かない (数えないだけ — src/bridge/board.js)
+  assert.equal(validateContract('task-review', { body: 'x', verdict: 'send-back', reason: '理由', remarks: ['a'] }).ok, true);
+});
+
+test('task-review: 指摘 (remarks) が 11 件・文字列でない要素は様式エラー', () => {
+  const ten = Array.from({ length: 10 }, (_, i) => `指摘 ${i + 1}`);
+  assert.equal(validateContract('task-review', { ...REVIEW, remarks: ten }).ok, true, '上限ちょうど (10 件) を落としている');
+  const eleven = validateContract('task-review', { ...REVIEW, remarks: [...ten, '指摘 11'] });
+  assert.equal(eleven.ok, false, '11 件を通している');
+  assert.match(eleven.reason, /指摘 の要素が多すぎます \(11 件 \/ 上限 10 件\)/);
+  for (const remarks of [['a', 3], [null], [{ text: 'a' }], 'a']) {
+    const r = validateContract('task-review', { ...REVIEW, remarks });
+    assert.equal(r.ok, false, `${JSON.stringify(remarks)} を通している`);
+    assert.match(r.reason, /^指摘 /);
+  }
+});
+
+test('task-review: 指摘を数えるときは空白の要素を捨てる (reviewRemarks)', () => {
+  // 様式の検査は空白の要素を通すので、数と中身はここで揃える
+  const r = validateContract('task-review', { ...REVIEW, remarks: ['  命名  ', '', '   ', 'コメント'] });
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(reviewRemarks(r.contract), ['命名', 'コメント']);
+  // 鍵が無い・null・配列でない → 空 (merge のときは 0 件として記録される)
+  for (const contract of [REVIEW, { ...REVIEW, remarks: null }, { ...REVIEW, remarks: 'a' }, null, undefined]) {
+    assert.deepEqual(reviewRemarks(contract), [], JSON.stringify(contract));
+  }
+});
+
+test('task-review: レビューする側のプロンプトに指摘 (remarks) の書き方が出る', () => {
+  const block = renderForKind('task-review', REVIEW_TARGET);
+  assert.match(block, /merge で通すときも直せる点があれば `remarks` に 1 件 1 文で書く/);
+  assert.match(block, /差し戻しの条件は変わらない/);
+});
+
 test('task-review: レビューする側のプロンプトに対象と手順が出る', () => {
   const block = renderForKind('task-review', REVIEW_TARGET);
   assert.match(block, /id `3` — 状態バッジを足す \/ job 予算 20/);
@@ -1226,11 +1387,11 @@ test('task-review: レビューする側のプロンプトに対象と手順が�
   assert.match(block, /実ファイル/);
   assert.match(block, /テストを回す/);
   assert.match(block, /差し戻しは 2 回まで/);
-  // merge の申告は git で照合され、適用 task だけ書くものが違う
+  // §12.3 (2) — merge の申告は git で照合され、適用 task だけ書くものが違う
   assert.match(block, /`merge_commit` は必須/);
   assert.match(block, /適用 task \(org-apply\) だけは例外/);
   assert.match(block, /検収した commit/);
-  // 不要と分かったときの逃げ道と、そのとき何をしないか
+  // §9.4 — 不要と分かったときの逃げ道と、そのとき何をしないか
   assert.match(block, /verdict: "drop"/);
   assert.match(block, /ブランチは消さない/);
   assert.equal(block.includes(REVIEW_TARGET.body), false, '本文は Discord へ出す面なので混ぜない');
@@ -1255,9 +1416,11 @@ test('resolveContractKind: override はその job だけ種別を差し替える
     resolveContractKind({ roleText: DECLARED, override: 'task-proposal', structuredOutput: false }),
     null,
   );
+  // codex は P-3 で構造化する側に入ったので、上書きも乗る (乗らないのは宣言なしと
+  // structuredOutput: false — 「もともと構造化しない job」の条件はランタイムではない)
   assert.equal(
     resolveContractKind({ roleText: DECLARED, override: 'task-proposal', runtime: 'codex' }),
-    null,
+    'task-proposal',
   );
 });
 
@@ -1268,7 +1431,7 @@ test('resolveContractKind: 既定は「有効・claude」(呼び出し漏れで�
   assert.equal(resolveContractKind({ roleText: DECLARED, structuredOutput: 'false' }), 'report');
 });
 
-// ---- 組織提案の裁定 ----
+// ---- 組織提案の裁定 (§3.9) ----
 
 const ADJUDICATION = { proposal_id: '12', decision: 'accepted', rationale: '職務の重なりが実測で出ている' };
 
@@ -1342,9 +1505,10 @@ test('resolveJobContractKind: 目印があるときは共有枠を取り出さ�
   );
   assert.equal(claimed, 2);
 
-  // 宣言の無い bot・codex・構造化を切ったチャンネルでは目印があっても null
+  // 宣言の無い bot・構造化を切ったチャンネルでは目印があっても null
   assert.equal(resolveJobContractKind({ roleText: '# 宣言なし', triggerContent: formatSchemaTag('report'), claimSlot }), null);
-  assert.equal(resolveJobContractKind({ roleText: DECLARED, runtime: 'codex', triggerContent: formatSchemaTag('report') }), null);
+  // codex は P-3 で構造化する側へ (目印も従来どおり効く)
+  assert.equal(resolveJobContractKind({ roleText: DECLARED, runtime: 'codex', triggerContent: formatSchemaTag('report') }), 'report');
   assert.equal(
     resolveJobContractKind({ roleText: DECLARED, structuredOutput: false, triggerContent: formatSchemaTag('report') }),
     null,
@@ -1353,7 +1517,7 @@ test('resolveJobContractKind: 目印があるときは共有枠を取り出さ�
   assert.equal(resolveJobContractKind({ roleText: DECLARED }), 'report');
 });
 
-// ---- 発議 (3 経路のうち (1)) ----
+// ---- 発議 (§3.9 の 3 経路のうち (1)) ----
 
 const INITIATIVE = {
   kind: 'duty-edit',
@@ -1450,7 +1614,7 @@ test('発議: スキーマのキーは proposals.js の入力側と綴りまで�
   assert.ok(spec.properties.change.properties.diff.maxLength > MAX_TEXT_CHARS);
 });
 
-// ---- 案件の 1 ターン ----
+// ---- 案件の 1 ターン (docs/society-ledger.md・S2-3a) ----
 
 const CASE_TURN = {
   body: '調べました',
@@ -1462,7 +1626,7 @@ test('case-turn: 本文と次の一手が必須で、成果と気づきは任意
   assert.equal(validateContract('case-turn', CASE_TURN).ok, true);
   // result も finding も無くてよい (待つだけのターンがある)
   assert.equal(validateContract('case-turn', { body: 'x', next: CASE_TURN.next }).ok, true);
-  // **次の一手は必ず要る** — 案件は次の契機を 1 つ持つ (不変条件)
+  // **次の一手は必ず要る** — 案件は次の契機を 1 つ持つ (§3 の不変条件)
   assert.match(validateContract('case-turn', { body: 'x' }).reason, /次の一手/);
   assert.match(validateContract('case-turn', { next: CASE_TURN.next }).reason, /本文/);
 });

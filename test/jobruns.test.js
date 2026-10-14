@@ -44,7 +44,7 @@ test('classifyReason は runJob の全 return を outcome へ写す', () => {
   assert.deepEqual(classifyReason('deliver-failed'), { outcome: 'deliver-failed', detail: '', stopKind: null });
   assert.deepEqual(classifyReason('stopped-before-start'), { outcome: 'stopped', detail: '', stopKind: 'human' });
   assert.deepEqual(classifyReason('internal-error'), { outcome: 'internal-error', detail: '', stopKind: null });
-  for (const reason of ['protocol-mismatch', 'role-unreadable', 'contract-unenforceable']) {
+  for (const reason of ['protocol-mismatch', 'role-unreadable', 'contract-unenforceable', 'worktree-unavailable']) {
     assert.deepEqual(classifyReason(reason), { outcome: 'not-started', detail: reason, stopKind: null });
   }
   // 失敗の中身は detail に残す (ログの識別子と同じ文字列)
@@ -81,6 +81,32 @@ test('nextActorFor: 成功なら次の担当、止まったなら復旧、中断
   }
   assert.equal(nextActorFor({ outcome: 'unknown' }), 'unknown');
   assert.equal(nextActorFor({}), 'unknown');
+});
+
+test('nextActorFor: verify NG でも次の担当が決まっていれば復旧待ちにしない (§12.3 (3))', () => {
+  // 板タスクはレビューへ回り ((ii))、それ以外は投げ手へ戻すか人間を呼ぶ ((i))。
+  // 一律 recovery だと受信箱と /status が「誰も動いていない」と嘘をつく (P-2、2026-09-18)
+  assert.equal(nextActorFor({ outcome: 'verify-failed', taskSubmitted: true }), 'reviewer');
+  assert.equal(nextActorFor({ outcome: 'verify-failed', taskState: 'review' }), 'reviewer');
+  assert.equal(
+    nextActorFor({ outcome: 'verify-failed', handoff: { toBotKey: 'opus', kind: 'handoff' } }),
+    'bot',
+    '投げ手へ戻したのに復旧待ちにしている',
+  );
+  assert.equal(nextActorFor({ outcome: 'verify-failed', handoff: { kind: 'notify' } }), 'human');
+  // **呼んだ相手が先** ('ok' と同じ順序)。review のタスクでレビュー担当自身の job が
+  // NG になった場合、行き先は投げ手への戻しなので板の状態で 'reviewer' と答えない
+  assert.equal(
+    nextActorFor({
+      outcome: 'verify-failed', handoff: { toBotKey: 'fable', kind: 'handoff' }, taskState: 'review',
+    }),
+    'bot',
+    '板の状態だけを見て次の担当を取り違えている',
+  );
+  // 戻す相手も居ない NG は従来どおり復旧待ち
+  assert.equal(nextActorFor({ outcome: 'verify-failed' }), 'recovery');
+  // 呼べなかった handoff (toBotKey が無い) も同じ
+  assert.equal(nextActorFor({ outcome: 'verify-failed', handoff: { kind: 'handoff' } }), 'recovery');
 });
 
 // ---- 受付 → 束縛 → 段階 → 終端 ----
@@ -150,6 +176,13 @@ test('start → setStage → noteSpawn → noteModelResult → finish の順で�
   assert.equal(started.stage, 'starting');
   assert.equal(started.startedAt, new Date(T0 + minutes(1)).toISOString());
 
+  assert.equal(started.harness, null, '役割文を読む前からハーネスの版が付いている');
+  const stamped = s.noteHarness('j1', { rev: 'abcdef012345', role: 'worker', files: ['roles/_common.md', 'roles/worker.md'], runtime: 'claude', model: 'opus', effort: 'high' });
+  assert.deepEqual(stamped.harness, {
+    rev: 'abcdef012345', role: 'worker', files: ['roles/_common.md', 'roles/worker.md'], runtime: 'claude', model: 'opus', effort: 'high',
+  });
+  assert.equal(stamped.stage, 'starting', 'ハーネスの版を書いたら段階が動いた');
+
   const spawned = s.noteSpawn('j1', { pid: 4242, at: T0 + minutes(2), runtime: 'claude' });
   assert.equal(spawned.stage, 'model');
   assert.deepEqual(spawned.spawn, { pid: 4242, at: new Date(T0 + minutes(2)).toISOString(), runtime: 'claude' });
@@ -217,6 +250,70 @@ test('起動前の失敗 (role を読めない等) は not-started で、spawn �
   assert.equal(done.spawn, null);
   assert.equal(done.modelResult, null);
   assert.equal(done.next, 'recovery');
+});
+
+const refused = (s, over = {}, p = {}) => s.refuse({
+  id: 'r1',
+  taskId: '77',
+  threadId: 'T77',
+  botKey: 'opus',
+  channelName: 'kt',
+  cwd: 'C:/w/repo',
+  trigger: { messageId: 'M2', byBotKey: 'opus2' },
+  ...over,
+}, { reason: 'worktree-unavailable', detail: 'タスク 77 の作業ツリーを用意できません: fatal: x', now: T0, ...p });
+
+test('refuse: 受付前に断った job は 1 回の保存で not-started の終端になり、理由が stageDetail に残る', () => {
+  const path = storePath();
+  const s = new JobRunStore(path);
+  let commits = 0;
+  const commit = s.commit.bind(s);
+  s.commit = (next) => { commits += 1; return commit(next); };
+  const done = refused(s);
+  assert.equal(commits, 1, 'open → finish の 2 回に分けている (間で落ちると queued が残る)');
+  assert.equal(done.stage, 'ended');
+  assert.equal(done.outcome, 'not-started');
+  assert.equal(done.reason, 'worktree-unavailable');
+  assert.equal(done.stageDetail, 'タスク 77 の作業ツリーを用意できません: fatal: x');
+  assert.equal(done.next, 'recovery');
+  assert.equal(done.acceptedAt, new Date(T0).toISOString());
+  assert.equal(done.endedAt, done.acceptedAt);
+  assert.equal(done.startedAt, null);
+  assert.equal(done.spawn, null);
+  assert.equal(done.modelResult, null);
+  assert.equal(done.stopKind, null);
+  assert.equal(done.placeholderId, null);
+  assert.equal(done.contractState, 'none');
+  assert.deepEqual(done.trigger, { messageId: 'M2', byBotKey: 'opus2', kind: 'bot' });
+  assert.equal(isLive(done), false);
+  // 保存されている (読み直しても同じ)・タスクの最新の記録になる
+  assert.deepEqual(new JobRunStore(path).get('r1'), done);
+  assert.equal(s.latestForTask('77').id, 'r1');
+  assert.deepEqual(s.liveList(), []);
+});
+
+test('refuse: 長い理由は 200 字で切り、空なら識別子を残す。attempt は open と同じく数える', () => {
+  const s = store();
+  accepted(s);
+  s.finish('j1', { reason: 'ok', now: T0 + 1 });
+  const long = refused(s, {}, { detail: `  ${'x'.repeat(500)}  `, now: T0 + 2 });
+  assert.equal(long.stageDetail, 'x'.repeat(200));
+  assert.equal(long.attempt, 2);
+  const blank = refused(s, { id: 'r2' }, { detail: '', now: T0 + 3 });
+  assert.equal(blank.stageDetail, 'worktree-unavailable');
+});
+
+test('refuse: not-started に分類されない理由・重複 id・必須欄の欠けは保存せずに投げる', () => {
+  const s = store();
+  for (const reason of ['ok', 'failed(x)', 'something-new', '', undefined]) {
+    assert.throws(() => refused(s, {}, { reason }), /not-started に分類されません/, String(reason));
+  }
+  assert.throws(() => refused(s, { threadId: '' }), /threadId が必要/);
+  assert.throws(() => refused(s, { botKey: null }), /botKey が必要/);
+  assert.deepEqual(s.list(), []);
+  refused(s);
+  assert.throws(() => refused(s), /既にあります/);
+  assert.equal(s.list().length, 1);
 });
 
 test('配送失敗: モデルは成功したのに配送で落ちた job は deliver-failed で、どの step が落ちたか残る', () => {
@@ -327,7 +424,7 @@ test('壊れたファイルは broken に理由が残り、「記録が無い」
   assert.match(s.broken, /JSON として読めません/);
   assert.equal(s.healthy, false);
   assert.equal(s.list().length, 0);
-  // **退避しない**。書き込みも断るので、証拠が上書きされない
+  // **退避しない** (§12.3 (1))。書き込みも断るので、証拠が上書きされない
   assert.equal(readFileSync(path, 'utf8'), '{ broken json');
   assert.throws(() => accepted(s), /台帳を直すか手で退避してから/);
   assert.equal(readFileSync(path, 'utf8'), '{ broken json');
@@ -406,7 +503,7 @@ test('ディスクにも同じ形で落ち、読み直せる', () => {
   assert.equal(new JobRunStore(path).get('j1').stage, 'starting');
 });
 
-// ---- 社会台帳への参照 ----
+// ---- 社会台帳への参照 (docs/society-ledger.md §5・S2-2) ----
 
 test('open: 案件の参照を保存し、操作 ID で引ける', () => {
   const runs = store();

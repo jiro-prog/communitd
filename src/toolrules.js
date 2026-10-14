@@ -75,6 +75,15 @@ const SECRET_WORD =
   /(\.env\b|\btokens?\b|\bsecrets?\b|\bpass(word|wd)?\b|\bcredentials?\b|api[_-]?key|private[_-]?key|\bkeys?\b|id_[rd]sa)/i;
 const SECRET_BLOB = /([A-Za-z0-9+/]{32,}={0,2}|[0-9a-f]{32,})/;
 
+/**
+ * パス (cwd 基準の相対パス) が秘密らしいか。語は全体で見るが、トークン列は**名前 1 つずつ**で見る —
+ * `/` はパスでは区切りなので、`src/bridge/recovery/wiring` のような並びをトークン列と読まない
+ */
+function isSecretLikePath(rel) {
+  if (SECRET_WORD.test(rel)) return true;
+  return rel.split(/[\\/]+/).some((name) => SECRET_BLOB.test(name));
+}
+
 /** 表示から落とす制御文字 (承認カードの体裁を壊させない) */
 const CONTROL_CHARS = new RegExp(String.raw`[\u0000-\u001f\u007f]`, 'g');
 
@@ -82,7 +91,7 @@ const CONTROL_CHARS = new RegExp(String.raw`[\u0000-\u001f\u007f]`, 'g');
  * 拒否 1 件を grant 候補へ変える。
  *
  * @param {{tool_name?: string, toolName?: string, tool_input?: object, toolInput?: object}} denial
- * @param {{cwd?: string|null}} ctx canonical cwd (grant に焼き込む)
+ * @param {{cwd?: string}} ctx canonical cwd (grant に焼き込む)
  * @returns {{ok: true, grant: object, rule: string}
  *          |{ok: false, tool: string, reason: string, suggestion?: string}}
  *          suggestion = 自動承認はできないが人間が config.json へ貼れる候補
@@ -218,15 +227,19 @@ export function describePathRule(tool, rawPath, cwd, { mustExist = false } = {})
   if (GLOB_META_INPUT.test(raw)) {
     return { ok: false, reason: 'パターン文字 (* ? [ ] { } ! #) を含むパスは 1 ファイルに絞れません' };
   }
-  if (SECRET_WORD.test(raw) || SECRET_BLOB.test(raw)) {
-    return { ok: false, reason: '秘密らしい語を含むパスは対象にしません' };
-  }
 
   const abs = resolve(cwd, raw);
   const rel = relative(cwd, abs);
   if (rel === '') return { ok: false, reason: '作業ディレクトリ自身は指定できません' };
   if (rel.startsWith('..') || isAbsolute(rel)) {
     return { ok: false, reason: '作業ディレクトリの外を指しています' };
+  }
+  // **秘密の判定は作業ディレクトリの中の部分 (rel) だけに当てる。** 以前は生の入力に当てていたので、
+  // 絶対パスで渡されると cwd の部分まで見て、区切りの `/` を含む長い英数字の並びがトークン列
+  // (SECRET_BLOB) に当たり、ふつうのファイルを秘密扱いで断っていた (同じファイルを相対パスで
+  // 渡すと通る — 2026-10-08 指摘)。cwd は作者が設定した場所なので、その名前は判定に入れない
+  if (isSecretLikePath(rel)) {
+    return { ok: false, reason: '秘密らしい語を含むパスは対象にしません' };
   }
   // **実体を見る前に**弾く。予約デバイス名は existsSync / realpathSync が通ってしまう。
   // 生の入力も見るのは、`resolve()` が末尾の空白・ドットを黙って落とすため —
@@ -297,8 +310,9 @@ export function describePathRule(tool, rawPath, cwd, { mustExist = false } = {})
 /**
  * Windows が特別扱いするパスの理由 (無ければ null)。
  * セグメントごとに見る — 途中のディレクトリ名でも同じ問題が起きる。
+ * pi ランタイムの権限判定 (src/pi-policy.js) も、書込み・読取のたびに同じ基準で使う
  */
-function windowsPathIssue(pathString) {
+export function windowsPathIssue(pathString) {
   const segments = String(pathString ?? '').split(/[\\/]/);
   // 先頭のドライブレター (`C:`) は正当な絶対パスの一部。cwd の外なら手前で落ちている
   if (/^[A-Za-z]:$/.test(segments[0])) segments.shift();

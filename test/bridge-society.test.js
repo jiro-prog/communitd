@@ -1523,9 +1523,8 @@ test('society 配送: 取り消した相談の申し出は同じ update で decl
 
 test('society 受諾: 実効権限の再検証に落ちたら declined + 理由', async () => {
   // **相談を出したときは通っていて、受諾の時点で落ちる**形にする —
-  // 「申し出たときに通ったこと」は受諾の根拠にならない、が要点
+  // 「申し出たときに通ったこと」は受諾の根拠にならない、が要点 (§3・C05)
   const breaks = {
-    codex: (h) => { h.state.botFacts.opus = { runtime: 'codex', online: true }; },
     '未起動': (h) => { h.state.botFacts.opus = { runtime: 'claude', online: false }; },
     'channels 外': (h) => h.store.update(h.store.revision, (s) => {
       s.mandates['M-1'].channels = ['ほかのチャンネル'];
@@ -1550,6 +1549,22 @@ test('society 受諾: 実効権限の再検証に落ちたら declined + 理由'
       assert.deepEqual(validateSnapshot(h.store.snapshot), [], label);
     });
   }
+
+  // **P-3 (2026-09-18) で反転**: codex は `--output-schema` で引受けを構造化して返せるので、
+  // 受諾の時点で runtime を理由に落とさない (かつては breaks の 1 件だった)
+  await withHarness({ seed: false }, async (h) => {
+    const offered = await consulted(h);
+    h.state.botFacts.opus = { runtime: 'codex', online: true };
+    const applied = h.wiring.applyTurn(offered.actionId, {
+      body: 'やります', claim: { decision: 'accept' },
+      next: { plan: { kind: 'investigate', summary: 'a' } },
+    }, { at: T0 + MIN });
+
+    assert.equal(applied.ok, true, applied.notes?.join(' | '));
+    assert.equal(h.store.snapshot.claims[offered.claimId].state, 'accepted');
+    assert.equal(h.store.snapshot.cases['C-1'].owner, offered.claimId, '案件の担当が付いていない');
+    assert.deepEqual(validateSnapshot(h.store.snapshot), []);
+  });
 });
 
 test('society 相談: claim を書かない戻りは Claim を offered のまま残す', async () => {
@@ -1586,7 +1601,6 @@ test('society 相談: 相談でない job の claim は無視して警告する'
 
 test('society 配送: 構造化の戻りを返せない宛先へは送らず、予約を返す', async () => {
   const cases = [
-    ['codex', { botFacts: { fable: { runtime: 'claude', online: true }, sol: { runtime: 'codex', online: true } }, botKeys: ['fable', 'sol'] }, 'sol'],
     ['未起動', { botFacts: { fable: { runtime: 'claude', online: true }, opus: { runtime: 'claude', online: false } } }, 'opus'],
     ['structuredOutput false', { structuredOutput: false }, 'opus'],
   ];
@@ -1601,6 +1615,18 @@ test('society 配送: 構造化の戻りを返せない宛先へは送らず、�
       assert.deepEqual(validateSnapshot(h.store.snapshot), [], label);
     });
   }
+
+  // **P-3 で反転**: codex の宛先へは送れるようになった (かつては cases の 1 件だった)
+  await withHarness({
+    seed: { allocated: 3, targetBotKey: 'sol' },
+    botFacts: { fable: { runtime: 'claude', online: true }, sol: { runtime: 'codex', online: true } },
+    botKeys: ['fable', 'sol'],
+  }, async (h) => {
+    const tick = await h.wiring.societyTick(T0);
+    assert.equal(tick.dispatched, 1, 'codex の宛先へ送れていない');
+    assert.equal(h.posts.length, 1);
+    assert.deepEqual(validateSnapshot(h.store.snapshot), []);
+  });
 });
 
 test('society 配送: 宛先スレッドが決まっていない相談は送らず、予約を返す', async () => {
@@ -1623,7 +1649,7 @@ test('society 配送: 宛先スレッドが決まっていない相談は送ら�
   });
 });
 
-// ---- Mandate の写しの同期 ----
+// ---- Mandate の写しの同期 (§2) ----
 
 const MANDATES = {
   quality: { key: 'quality', version: 1, goal: 'verify を緑に保つ', channels: ['society-trial'], state: 'active', authority: 'fable' },
@@ -1689,7 +1715,7 @@ test('society 写し: ready 後の最初の tick で 1 回だけ走る', async (
   });
 });
 
-// ---- 相談の期限 ----
+// ---- 相談の期限 (§4) ----
 
 test('society 期限: 相談が終わって 5 分たった申し出は expired になる', async () => {
   await withHarness({ seed: false }, async (h) => {
@@ -1943,7 +1969,7 @@ test('society: 既に settled の Action への noteSettled はエラーにし�
   });
 });
 
-// ---- 停止と再開 ----
+// ---- 停止と再開 (S2-4b・§12.2 (g)) ----
 
 test('society 停止: 止めた job の案件は、スレッドの外でも 1 回の update で止まる', async () => {
   await withHarness({ seed: { allocated: 4 } }, async (h) => {

@@ -141,6 +141,111 @@ test('新側の座標が旧側と整合しない diff は落ちる', () => {
   assert.deepEqual(applyDiffFile(consistent.files[0], 'a\nb\nc\n'), { ok: true, after: 'A\nextra\nb\nC\n' });
 });
 
+test('順序が逆か重なったハンクの diff は解析で落ち、隣接するハンクは通る', () => {
+  const reversed = parseUnifiedDiff(edit('x.md', '@@ -3,1 +3,1 @@\n-c\n+C\n@@ -1,1 +1,1 @@\n-a\n+A\n'));
+  assert.deepEqual(reversed, { ok: false, reason: 'ハンクの順序が逆か重なっています: x.md' });
+
+  // 2 つ目のハンクが 1 つ目の覆った旧側 (1〜2 行目) の中から始まる
+  const overlapping = parseUnifiedDiff(edit('x.md', '@@ -1,2 +1,2 @@\n-a\n-b\n+A\n+B\n@@ -2,1 +2,1 @@\n-b\n+B\n'));
+  assert.deepEqual(overlapping, { ok: false, reason: 'ハンクの順序が逆か重なっています: x.md' });
+
+  // 直前のハンクの終わりから始まるのは重なりではない
+  const adjacent = parseUnifiedDiff(edit('x.md', '@@ -1,1 +1,1 @@\n-a\n+A\n@@ -2,1 +2,1 @@\n-b\n+B\n'));
+  assert.equal(adjacent.ok, true, adjacent.reason);
+  assert.deepEqual(applyDiffFile(adjacent.files[0], 'a\nb\nc\n'), { ok: true, after: 'A\nB\nc\n' });
+});
+
+test('順序の正しい複数ハンクは、挿入・削除の増減を積みながら当たる', () => {
+  // 1 行増やす → 隣接して置き換える → 2 行消す (行数 0 の新側) → 末尾の後ろへ挿入 (行数 0 の旧側)
+  const parsed = parseUnifiedDiff(edit(
+    'x.md',
+    '@@ -1,1 +1,2 @@\n-a\n+A\n+A2\n'
+    + '@@ -2,1 +3,1 @@\n-b\n+B\n'
+    + '@@ -4,2 +4,0 @@\n-d\n-e\n'
+    + '@@ -6,0 +6,1 @@\n+g\n',
+  ));
+  assert.equal(parsed.ok, true, parsed.reason);
+  assert.deepEqual(applyDiffFile(parsed.files[0], 'a\nb\nc\nd\ne\nf\n'), { ok: true, after: 'A\nA2\nB\nc\nf\ng\n' });
+});
+
+test('ファイル末尾を超えるハンクは当てず、途中まで当てた中身も返さない', () => {
+  // 置き換え・挿入のどちらでも、開始位置が原本の行数を超えたら当てない
+  const beyond = parseUnifiedDiff(edit('x.md', '@@ -5,1 +5,1 @@\n-e\n+E\n'));
+  assert.equal(beyond.ok, true, beyond.reason);
+  assert.deepEqual(
+    applyDiffFile(beyond.files[0], 'a\nb\n'),
+    { ok: false, reason: 'ハンクの位置がファイル末尾を超えています: x.md' },
+  );
+  const insertBeyond = parseUnifiedDiff(edit('x.md', '@@ -3,0 +4,1 @@\n+new\n'));
+  assert.equal(insertBeyond.ok, true, insertBeyond.reason);
+  assert.deepEqual(
+    applyDiffFile(insertBeyond.files[0], 'a\nb\n'),
+    { ok: false, reason: 'ハンクの位置がファイル末尾を超えています: x.md' },
+  );
+
+  // 1 つ目のハンクは当たっても、2 つ目が末尾を超えたら結果ごと返さない (after を持たない)
+  const partly = parseUnifiedDiff(edit('x.md', '@@ -1,1 +1,1 @@\n-a\n+A\n@@ -5,1 +5,1 @@\n-e\n+E\n'));
+  assert.equal(partly.ok, true, partly.reason);
+  assert.deepEqual(
+    applyDiffFile(partly.files[0], 'a\nb\n'),
+    { ok: false, reason: 'ハンクの位置がファイル末尾を超えています: x.md' },
+  );
+
+  // 境界: 最終行の後ろへの挿入は当たる。最終行の次の行を置き換える diff は
+  // 末尾超えではなく「内容が前提と違う」で落ちる (開始位置 = 行数はこの検査を通る)
+  const append = parseUnifiedDiff(edit('x.md', '@@ -2,0 +3,1 @@\n+c\n'));
+  assert.deepEqual(applyDiffFile(append.files[0], 'a\nb\n'), { ok: true, after: 'a\nb\nc\n' });
+  const nextLine = parseUnifiedDiff(edit('x.md', '@@ -3,1 +3,1 @@\n-c\n+C\n'));
+  assert.deepEqual(
+    applyDiffFile(nextLine.files[0], 'a\nb\n'),
+    { ok: false, reason: 'x.md:3 の内容が diff の前提と違います' },
+  );
+});
+
+// 以下 2 件は parseUnifiedDiff を通った file では到達しない (解析時の座標検査が同じ量を先に見る)。
+// applyDiffFile は file を直接受け取るので、手で組んだ file に対する二重の門として固定する
+
+test('順序が逆・重なったハンクを持つ file は当てない (parse を通った file では解析時に落ちるので到達しない)', () => {
+  const two = parseUnifiedDiff(edit('x.md', '@@ -1,1 +1,1 @@\n-a\n+A\n@@ -3,1 +3,1 @@\n-c\n+C\n'));
+  assert.equal(two.ok, true, two.reason);
+  const [first, second] = two.files[0].hunks;
+  const reversed = { ...two.files[0], hunks: [second, first] };
+  // 同じ並びを diff の文字列で書くと、解析の段で落ちる
+  assert.equal(parseUnifiedDiff(edit('x.md', '@@ -3,1 +3,1 @@\n-c\n+C\n@@ -1,1 +1,1 @@\n-a\n+A\n')).ok, false);
+  // 1 つ目 (3 行目) は当たるが、2 つ目が戻るので結果ごと返さない
+  assert.deepEqual(applyDiffFile(reversed, 'a\nb\nc\n'), { ok: false, reason: 'ハンクが重なっています: x.md' });
+
+  const wide = parseUnifiedDiff(edit('x.md', '@@ -1,2 +1,2 @@\n-a\n-b\n+A\n+B\n'));
+  const inner = parseUnifiedDiff(edit('x.md', '@@ -2,1 +2,1 @@\n-b\n+B\n'));
+  const overlapping = { ...wide.files[0], hunks: [wide.files[0].hunks[0], inner.files[0].hunks[0]] };
+  assert.deepEqual(applyDiffFile(overlapping, 'a\nb\nc\n'), { ok: false, reason: 'ハンクが重なっています: x.md' });
+});
+
+test('新側開始位置が実際の出力位置と合わない file は当てない (parse を通った file では解析時に落ちるので到達しない)', () => {
+  const two = parseUnifiedDiff(edit('x.md', '@@ -1,1 +1,2 @@\n-a\n+A\n+extra\n@@ -3,1 +4,1 @@\n-c\n+C\n'));
+  assert.equal(two.ok, true, two.reason);
+  const [first, second] = two.files[0].hunks;
+  // 1 つ目の増分を織り込まずに 2 つ目の新側を書いた形。diff の文字列なら解析の段で落ちる
+  assert.deepEqual(
+    parseUnifiedDiff(edit('x.md', '@@ -1,1 +1,2 @@\n-a\n+A\n+extra\n@@ -3,1 +3,1 @@\n-c\n+C\n')),
+    { ok: false, reason: 'ハンクの新側開始位置が旧側と整合しません: x.md (@@ -3 +3 @@)' },
+  );
+  const shifted = { ...two.files[0], hunks: [first, { ...second, newStart: 3 }] };
+  assert.deepEqual(
+    applyDiffFile(shifted, 'a\nb\nc\n'),
+    { ok: false, reason: 'ハンクの新側開始位置が実際の位置と合いません: x.md' },
+  );
+
+  // 1 つ目のハンクで既に合わないとき (何も当てる前に断る)
+  const lying = { ...two.files[0], hunks: [{ ...first, newStart: 99 }, second] };
+  assert.deepEqual(
+    applyDiffFile(lying, 'a\nb\nc\n'),
+    { ok: false, reason: 'ハンクの新側開始位置が実際の位置と合いません: x.md' },
+  );
+  // 元の file は書き換えていない (正しい座標のままなら当たる)
+  assert.deepEqual(applyDiffFile(two.files[0], 'a\nb\nc\n'), { ok: true, after: 'A\nextra\nb\nC\n' });
+});
+
 test('行数 0 のハンクは「その行の後ろへ挿入」として扱う', () => {
   // 空ファイルへの追記 (git が実際に出す形)
   const appended = parseUnifiedDiff(edit('x.md', '@@ -0,0 +1,2 @@\n+a\n+b\n'));

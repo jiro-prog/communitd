@@ -12,6 +12,7 @@ import {
   runVerify,
   runVerifyHook,
   tailText,
+  VERIFY_KILL_GRACE_MS,
 } from '../src/verify.js';
 
 function nodeCommand(source) {
@@ -141,6 +142,166 @@ test('停止済み handle では verify を spawn しない', async () => {
   });
   assert.equal(result.ran, false);
   assert.equal(result.aborted, true);
+});
+
+// ---- 走っている検証の止め方 (停止の指示・タイムアウト・close が来ないときの保険) ----
+// verify はループの門で、ここが返らないと job が終わらず、同時枠を塞いだまま止まる。
+// 保険の待ち (8 秒) を実時間で待たないよう、偽タイマー (setTimeout / Date) で進める。
+// **偽タイマーの下で setTimeout の sleep を使わない** (進めない限り返らない)。待つのは setImmediate
+
+const KILL_GRACE_MS = VERIFY_KILL_GRACE_MS;
+
+/**
+ * 自分からは閉じない偽の子プロセス (test/runtime-stop.test.js の hangingChild と同じ形)。
+ * kill() は signal を控えるだけで close は出さない — 殺された子の close はテストが
+ * `closeAsKilled()` で手で出す。**pid を持たせない**: pid があると killTree が本物の
+ * taskkill (win32) や process.kill(-pid) を撃つ (src/proc.js)。
+ */
+function hangingChild() {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdout.setEncoding = () => {};
+  child.stderr.setEncoding = () => {};
+  child.kills = [];
+  child.kill = (signal) => {
+    child.kills.push(signal);
+    return true;
+  };
+  child.closeAsKilled = () => child.emit('close', null, 'SIGKILL');
+  return child;
+}
+
+/** 閉じない子で runVerify を起こす。起こした子は `child` に残る */
+function startHanging(t, opts) {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const ctl = { child: null };
+  ctl.pending = runVerify({
+    command: 'npm test',
+    cwd: process.cwd(),
+    spawnImpl: () => { ctl.child = hangingChild(); return ctl.child; },
+    ...opts,
+  });
+  ctl.state = { settled: false };
+  ctl.pending.then(() => { ctl.state.settled = true; });
+  return ctl;
+}
+
+const flush = () => new Promise((r) => { setImmediate(r); });
+
+test('走っている検証は停止の指示で子を kill し、close を待って aborted で終わる', async (t) => {
+  const handle = {};
+  const ctl = startHanging(t, { handle, timeoutMs: 1500 });
+  ctl.child.stdout.emit('data', '途中まで');
+  t.mock.timers.tick(200);
+  handle.abort();
+  // **await の前に見る。** kill しない回帰でも、タイムアウトが代わりに kill して結果自体は返る
+  assert.equal(handle.stopRequested, true);
+  assert.deepEqual(ctl.child.kills, ['SIGKILL'], '停止の指示で kill していない');
+  await flush();
+  assert.equal(ctl.state.settled, false, 'close を待たずに終わっている');
+  ctl.child.closeAsKilled();
+  const res = await ctl.pending;
+  assert.equal(res.ran, true);
+  assert.equal(res.ok, false);
+  assert.equal(res.aborted, true);
+  assert.equal(res.timedOut, undefined, '停止をタイムアウトと取り違えている');
+  assert.equal(res.error, '停止指示により検証を中断');
+  assert.equal(res.output, '途中まで');
+  assert.equal(res.durationMs, 200);
+  assert.match(formatVerifyResult(res), /^❌ verify 失敗 \(aborted \/ 0\.2s\)/);
+  // 終わった後はタイムアウトも保険も撃たない (finish がタイマーを消す)。本物なら終わった子
+  // (再利用された pid) への taskkill になる
+  t.mock.timers.tick(1500 + KILL_GRACE_MS);
+  assert.deepEqual(ctl.child.kills, ['SIGKILL'], '終わった後に kill を撃った');
+  // 終わった後の停止の指示 (/stop の二度押し) も撃たない
+  handle.abort();
+  assert.deepEqual(ctl.child.kills, ['SIGKILL']);
+});
+
+test('停止の指示の後に close が来なくても、保険の待ちで aborted として終わる', async (t) => {
+  // 孫が stdout を握ったまま生き残ると close は来ない。タイムアウト (job からは 10 分) まで
+  // 待たせず、停止として返す — 呼び手 (job / 適用回路) は aborted を見て「止めた」と言い分ける
+  const handle = {};
+  const ctl = startHanging(t, { handle, timeoutMs: 60_000 });
+  handle.abort();
+  assert.deepEqual(ctl.child.kills, ['SIGKILL']);
+  t.mock.timers.tick(KILL_GRACE_MS - 1);
+  await flush();
+  assert.equal(ctl.state.settled, false, '保険の待ちより早く終わっている');
+  t.mock.timers.tick(1);
+  // await の前に見る (返らない回帰で、後続のテストまで巻き込んで止まらないように)
+  await flush();
+  assert.equal(ctl.state.settled, true, '停止の後、保険の待ちを過ぎても終わらない');
+  const res = await ctl.pending;
+  assert.equal(res.ok, false);
+  assert.equal(res.aborted, true);
+  assert.equal(res.timedOut, undefined, '停止をタイムアウトと取り違えている');
+  assert.equal(res.error, '停止指示により検証を中断');
+  assert.equal(res.durationMs, KILL_GRACE_MS);
+  // 遅れて来た close も、その後のタイムアウトも何も変えない
+  ctl.child.closeAsKilled();
+  t.mock.timers.tick(60_000);
+  assert.deepEqual(ctl.child.kills, ['SIGKILL'], '終わった後にタイムアウトが kill を撃った');
+});
+
+test('停止の指示の後にタイムアウトが来ても、停止として終わる', async (t) => {
+  // 止めた後に close を待っている間にタイムアウトを迎えても、呼び手には「止めた」と返す
+  const handle = {};
+  const ctl = startHanging(t, { handle, timeoutMs: 1500 });
+  handle.abort();
+  t.mock.timers.tick(1500); // close を待っている間にタイムアウトを迎える
+  t.mock.timers.tick(KILL_GRACE_MS - 1500); // 停止の保険の待ちが明ける
+  await flush();
+  assert.equal(ctl.state.settled, true, '停止の後、保険の待ちを過ぎても終わらない');
+  const res = await ctl.pending;
+  assert.equal(res.aborted, true);
+  assert.equal(res.error, '停止指示により検証を中断');
+});
+
+test('タイムアウトは子を kill し、close を待って timedOut で終わる', async (t) => {
+  const ctl = startHanging(t, { timeoutMs: 1500 });
+  ctl.child.stderr.emit('data', '応答待ち');
+  t.mock.timers.tick(1499);
+  assert.deepEqual(ctl.child.kills, [], 'タイムアウトより早く kill した');
+  t.mock.timers.tick(1);
+  assert.deepEqual(ctl.child.kills, ['SIGKILL'], 'タイムアウトで kill していない');
+  await flush();
+  assert.equal(ctl.state.settled, false, 'close を待たずに終わっている');
+  ctl.child.closeAsKilled();
+  const res = await ctl.pending;
+  assert.equal(res.ran, true);
+  assert.equal(res.ok, false);
+  assert.equal(res.timedOut, true);
+  assert.equal(res.aborted, undefined, 'タイムアウトを停止の指示と取り違えている');
+  assert.equal(res.error, 'timeout after 1.5s');
+  assert.equal(res.output, '応答待ち');
+  assert.equal(res.durationMs, 1500);
+  assert.match(formatVerifyResult(res), /^❌ verify 失敗 \(timeout \/ 1\.5s\)/);
+  assert.match(formatVerifyFailureReason(res), /\(timeout \/ 1\.5s\)/);
+  t.mock.timers.tick(KILL_GRACE_MS);
+  assert.deepEqual(ctl.child.kills, ['SIGKILL'], '終わった後に kill を撃った');
+});
+
+test('タイムアウトで kill した子が close を返さなくても、保険の待ちで timedOut として終わる', async (t) => {
+  const ctl = startHanging(t, { timeoutMs: 1500 });
+  t.mock.timers.tick(1500);
+  assert.deepEqual(ctl.child.kills, ['SIGKILL']);
+  t.mock.timers.tick(KILL_GRACE_MS - 1);
+  await flush();
+  assert.equal(ctl.state.settled, false, '保険の待ちより早く終わっている');
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(ctl.state.settled, true, 'タイムアウトの後、保険の待ちを過ぎても終わらない');
+  const res = await ctl.pending;
+  assert.equal(res.ok, false);
+  assert.equal(res.timedOut, true);
+  assert.equal(res.aborted, undefined);
+  assert.equal(res.error, 'timeout after 1.5s');
+  assert.equal(res.durationMs, 1500 + KILL_GRACE_MS);
+  // 遅れて来た close は結果を変えない (多重 resolve は settled で防ぐ)
+  ctl.child.closeAsKilled();
+  assert.deepEqual(ctl.child.kills, ['SIGKILL']);
 });
 
 test('出力は末尾 N 行・最大文字数に切り詰め、コードフェンスを無害化する', () => {

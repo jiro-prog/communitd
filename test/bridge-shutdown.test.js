@@ -47,7 +47,7 @@ function fakeChannel(id) {
 }
 
 function harness(t, {
-  bots = new Map(), jobRuns = null, jobs = new JobQueue(), drained = [], abortOrgApply = null,
+  bots = new Map(), jobRuns = null, jobs = new JobQueue(), drained = [], abortOrgApply = null, abortIntake = null,
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'communitd-shutdown-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -61,6 +61,7 @@ function harness(t, {
     jobRuns: jobRuns ?? { markShutdown: () => null },
     waitForJobsDrained: async (ms, label) => { drained.push([ms, label]); },
     abortOrgApply,
+    abortIntake,
     exit: (code) => exits.push(code),
   });
   return { root, lifecycle, exits, drained, ...wiring };
@@ -175,6 +176,20 @@ test('shutdown は適用回路の verify も撃つ (job ではないのでキュ
   await broken.shutdown(143);
   assert.deepEqual(broken.exits, [143]);
   assert.ok(errors.some((e) => e.includes('[org-apply] 停止を伝えられませんでした: もう居ません')), errors.join('\n'));
+});
+
+test('shutdown は受付も撃つ (レーンの外で走るのでキューからは撃てない)。撃てなくても止まる', async (t) => {
+  const { errors } = captureConsole(t);
+  const aborted = [];
+  const h = harness(t, { abortOrgApply: () => aborted.push('org-apply'), abortIntake: () => aborted.push('intake') });
+  await h.shutdown(130);
+  assert.deepEqual(aborted, ['org-apply', 'intake']);
+  assert.deepEqual(h.exits, [130]);
+
+  const broken = harness(t, { abortIntake: () => { throw new Error('もう居ません'); } });
+  await broken.shutdown(143);
+  assert.deepEqual(broken.exits, [143]);
+  assert.ok(errors.some((e) => e.includes('[intake] 停止を伝えられませんでした: もう居ません')), errors.join('\n'));
 });
 
 test('drained (呼び出し元が待ち切った) なら drain を待ち直さず、印の失敗でも止まらない', async (t) => {

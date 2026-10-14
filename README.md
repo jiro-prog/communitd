@@ -45,6 +45,10 @@ Discord のメンションで、ローカルの Claude Code エージェント�
 3. 成果はファイルと、スレッドの `📋 git status 差分` / `🔧 ツール軌跡` / verify の行で確かめる。接続できただけでは一周ではない。
 4. 自律運転 (エージェントが自分で起票・実装・レビュー・merge) と独立 reviewer は、その後に `autonomy` を書いて始める (SETUP.md の「高度な運用」)。
 
+**実験的・非対応の機能:** bot が役割文・設定・手順書の変更を提案し、裁定を経てブリッジ自身が当てる
+**発議と組織提案** (`initiative` / `/proposals`) は公開版ではサポートしない (既定で無効)。ブリッジが自分の
+権限設定を書き換えられる経路なので、使うなら先に [セキュリティモデル](docs/reference/security-model.md#発議と組織提案-実験的非対応) を読むこと。
+
 ## 仕組み
 
 ```
@@ -85,6 +89,13 @@ Discord のメンションで、ローカルの Claude Code エージェント�
   `cwd` 配下でファイルを読み書きし、許可されたシェルコマンドを走らせられる
 - **`guildId` と `allowedUserIds` は必須。** どちらかが空なら起動時に終了する (設定漏れを「制限なし」と
   解釈しない)
+- **サーバーロールでも許可できる (任意)。** `allowedRoleIds` に書いたロールを持つ人は `allowedUserIds`
+  に載っていなくても呼べる = **ロールを配ることが上の権限を配ること**。`@everyone` (= `guildId`) は
+  書けない。作者判定 (`ownerUserId`) はロールでは広がらない
+- **メンテ用の bot を 1 つだけ通せる (任意)。** 他所の bot の発言は無視するが、`maintenanceBotIds` に書いた
+  bot (作者の手元のエージェントが Discord の MCP などで書き込む用) は作者の代理として job を起こせる =
+  **その bot のトークンを持つものは許可ユーザーと同じ重み**。スレッド内では bot 同士と同じく往復の上限を
+  消費し、人間の発言のようにリセットはしない
 - **既定は最小権限。** `tools` を書かなければ `readonly`、`permissionMode` を書かなければ `default`。
   書込みやシェルを伴う設定は明示したチャンネルだけで有効
 - **権限が増えるのは人間がボタンを押したときだけ。** エージェントは申請しかできず、恒久承認に向かない
@@ -110,7 +121,7 @@ state はプロセス共有なので、どの bot のコマンドを選んでも
 | `/roster` | このスレッドで呼べる bot を絞る (省略すると現在の編成を表示) |
 | `/pause` | 自律運転を止める (人間のメンションは通る・実行中の job も止めない) |
 | `/resume` | 自律運転を再開する |
-| `/proposals` | 組織提案の一覧を出す (id を指定すると裁定カードを出し直す) |
+| `/proposals` | 組織提案の一覧を出す (id を指定すると裁定カードを出し直す)。**実験的** — `initiative` を有効にしたときだけ意味を持つ |
 | `/inbox` | 作者を待っているもの (停止・質問 / 稟議 / 要人間) を一覧する |
 | `/review` | review のまま止まったタスクのレビューを出し直す (タスクのスレッドで打つ) |
 | `/status` | このチャンネルの状況 (過去 24h の完了 / 進行中 / 復旧待ち / 判断待ち / 運転) を出す |
@@ -128,8 +139,8 @@ npm start
 ```
 
 設定は 2 ファイルに分かれている: **git 管理する** `config.policy.json` (bot・channel・権限・予算などの
-非秘密設定) と、**gitignore する** `config.secrets.json` (`guildId` / `allowedUserIds` / `ownerUserId` /
-`ownerNames`)。起動時に 1 枚の config へ合成し、secrets 側に allowlist 外のキーがある・両方に同じキーが
+非秘密設定) と、**gitignore する** `config.secrets.json` (`guildId` / `allowedUserIds` /
+`allowedRoleIds` / `ownerUserId` / `ownerNames` / `maintenanceBotIds`)。起動時に 1 枚の config へ合成し、secrets 側に allowlist 外のキーがある・両方に同じキーが
 ある・どちらかが読めない場合は起動しない。分けてあるのは、採択された組織提案の diff をブリッジが policy へ
 当てる回路があるため — policy が追跡可能でないと差分も巻き戻しも作れず、裁定権者 (`ownerUserId` /
 `ownerNames`) を secrets 側に固定しておかないとその回路から書き換えられてしまう。
@@ -142,6 +153,13 @@ npm start
 の `channels` に追記して起動時と同じ検証まで通す。Discord のテキストチャンネルも同時に作る (同名があれば
 再利用。作成担当は `config.bots` の先頭の bot で、その bot のロールに「チャンネルの管理」が要る)。
 **`config.policy.json` 全体が 2 スペース整形で書き直される**点に注意 (値は変わらない)。
+
+自律運転のプロジェクトを丸ごと立ち上げるときは `npm run new-project -- --name <名前> --direction <direction.md> --verify "<検証コマンド>"`
+— 問い合わせなしで、フォルダ作成・`git init`・方向性ドキュメントと `.gitignore` (タスクの作業ツリー `.worktrees/` を無視) の初回 commit・`autonomy` 付きの追記・チャンネル作成までを行い、
+最後に**再起動の依頼** (`data/restart-request.json`) を置く。ブリッジは job が 1 件も無いときにそれを拾って `/restart` と同じ手順で
+再起動する (30 秒ごとに確認・中断はしない)。担当の bot は既存の自律運転チャンネル (最後に足したもの) に揃え、
+まだ 1 つも無いときは `--scout <bot> --worker <bot> --reviewer <bot>` で指定する (設定例なら `--scout worker --worker worker --reviewer manager`)。
+ほかの既定値は `src/newproject.js` の `NEW_PROJECT_DEFAULTS`、`--dry-run` で作らずに確かめられる。
 
 テストは `npm test` (node:test・追加依存なし)。push / PR では Node 20・22 で CI が回る。
 

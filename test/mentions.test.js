@@ -1,28 +1,40 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  MAX_REVIEW_APPROVAL_CHARS,
+  MAX_SCOUT_TITLE_CHARS,
   MAX_TASK_START_CHARS,
   MAX_THREAD_NAME_CHARS,
   adjudicationRequestMessage,
+  approvalNoteMessages,
   adjudicationThreadName,
+  carryMessages,
   allowedMentionsFor,
   detectLegacyMentions,
+  harnessStartMessage,
+  harnessThreadName,
   initiativeStartMessage,
   initiativeThreadName,
   neutralizeRawMentions,
   parseAttachMarkers,
   normalizeNewlines,
+  planStartMessage,
+  planThreadName,
   resolveOutgoingText,
+  reviewApprovalSection,
   safePayload,
+  scoutReportMessages,
   scoutStartMessage,
   scoutThreadName,
   sendBackMessage,
   sendBody,
   sendControlMention,
+  stripFooterControls,
   stripMarkerLines,
   taskStartMessage,
   taskThreadName,
 } from '../src/mentions.js';
+import { INFRA_PREFIXES } from '../src/bridge/prompt.js';
 import { shouldIgnoreOwnMessage } from '../src/trigger.js';
 
 /** 3 bot + owner の標準的な文脈 (送信元は opus) */
@@ -319,6 +331,35 @@ test('コードブロック内の attach は送信対象にしない', () => {
   assert.equal(stripMarkerLines(text).includes('[[attach: out/a.png]]'), true);
 });
 
+test('stripFooterControls は末尾フッターの呼び出し行だけを外す (attach・本文中・コード内は残す)', () => {
+  const text = [
+    '本文です。',
+    '[[handoff:mid]]',
+    '```',
+    '[[handoff:code]]',
+    '```',
+    '',
+    '[[attach: out/a.png]]',
+    '[[handoff:x]]\r',
+    '[[notify:owner]]',
+  ].join('\n');
+  const out = stripFooterControls(text);
+  assert.deepEqual(out.removed, ['[[handoff:x]]', '[[notify:owner]]']);
+  // 外した後の本文は resolveOutgoingText で何も呼ばない (本文中の行は従来どおり不発の警告だけ)
+  const ctx = { bots: [{ key: 'mid', userId: '2' }, { key: 'x', userId: '3' }], owner: { userId: '1' } };
+  const resolved = resolveOutgoingText(out.text, ctx);
+  assert.equal(resolved.mention, null);
+  assert.ok(resolved.warnings.some((w) => w.includes('本文中の `[[handoff:mid]]` は実行していません')));
+  assert.deepEqual(resolved.attachMarkers, ['out/a.png']);
+  assert.match(out.text, /^\[\[handoff:mid\]\]$/m);
+  assert.match(out.text, /^\[\[handoff:code\]\]$/m);
+
+  // 呼び出しが無ければ何も外さない。不可視文字入りは実行されないので触らない
+  assert.deepEqual(stripFooterControls('本文\n[[attach: a.png]]').removed, []);
+  assert.deepEqual(stripFooterControls('本文\n[[handoff:o​pus]]').removed, []);
+  assert.deepEqual(stripFooterControls(null), { text: '', removed: [] });
+});
+
 // ---- 送信ペイロード ----
 
 test('allowedMentionsFor は挙げた ID だけを許可し parse を空にする', () => {
@@ -498,7 +539,7 @@ test('文脈が空でも落ちない (ready 前)', () => {
   assert.match(out.warnings[0], /未知の宛先/);
 });
 
-// ---- 自律運転のタスクスレッド ----
+// ---- 自律運転のタスクスレッド (docs/social-engineering.md §3.1) ----
 
 const TASK = {
   id: '3',
@@ -594,6 +635,48 @@ test('差し戻しメッセージは指摘が無くても・長すぎても 1 �
   assert.match(long, /報告様式/, '約束まで削っている');
 });
 
+test('承認時の備考は運用の接頭辞で始めず (文脈から外されない)、生メンションを潰す', () => {
+  assert.deepEqual(approvalNoteMessages({ note: '' }), [], '備考が無ければ出さない');
+  assert.deepEqual(approvalNoteMessages({ note: '  \n ' }), []);
+
+  const [text, ...rest] = approvalNoteMessages({ note: '承認します。\n- <@123456789> を呼ばない\n- touch の外は触らない', approver: 'Reviewer' });
+  assert.deepEqual(rest, [], '短い備考は 1 通');
+  assert.ok(text.startsWith('### 承認時の備考 (Reviewer)\n'), text);
+  assert.equal(INFRA_PREFIXES.some((p) => text.startsWith(p)), false, '運用メッセージとして文脈から外される');
+  assert.match(text, /\n\n承認します。\n- \[mention:123456789\] を呼ばない\n- touch の外は触らない$/);
+  assert.equal(/<@\d+>/.test(text), false, '生メンションが残っている (受信側が起動と読む)');
+  assert.ok(approvalNoteMessages({ note: 'x' })[0].startsWith('### 承認時の備考\n'), '承認した bot が分からなければ括弧を付けない');
+});
+
+test('長い承認時の備考は切らずに分ける (注意は本文の末尾に来る) — どの通も 1 通の上限内で、接頭辞で始めない', () => {
+  const tail = '着手する人への注意: ⚠️ 作業ツリーの src を戻している途中で落ちると差分が残る';
+  const note = `${'①重複: なし。\n'.repeat(500)}${tail}`;
+  const parts = approvalNoteMessages({ note, approver: 'Reviewer' });
+  assert.ok(parts.length >= 3, `分けていない (${parts.length} 通)`);
+  for (const [i, part] of parts.entries()) {
+    assert.ok(part.length <= MAX_TASK_START_CHARS, `${i + 1} 通目が上限を超える (${part.length} 字)`);
+    assert.equal(INFRA_PREFIXES.some((p) => part.startsWith(p)), false, `${i + 1} 通目が文脈から外される`);
+  }
+  assert.ok(parts[0].startsWith('### 承認時の備考 (Reviewer)\n'));
+  for (const part of parts.slice(1)) assert.ok(part.startsWith('### 承認時の備考 (続き)\n'), part.slice(0, 40));
+  assert.ok(parts.at(-1).endsWith(tail), '末尾の注意が消えている');
+  // 見出しを外してつなげると元の本文に戻る (途中を落としていない)
+  const body = parts.map((p, i) => (i === 0 ? p : p.slice('### 承認時の備考 (続き)\n'.length))).join('');
+  assert.ok(body.endsWith(note), '途中が欠けている');
+});
+
+test('レビューの依頼に載せる承認時の備考は、無ければ空・長ければ上限で切る', () => {
+  assert.equal(reviewApprovalSection(''), '');
+  assert.equal(reviewApprovalSection(null), '');
+  assert.equal(
+    reviewApprovalSection(' 触る範囲は a.js だけ \n'),
+    '\n\n承認時の備考 (承認した側が着手する人へ残した注意を含む — 守られているかも見る):\n触る範囲は a.js だけ',
+  );
+  const long = reviewApprovalSection('い'.repeat(MAX_REVIEW_APPROVAL_CHARS + 10));
+  assert.ok(long.endsWith(`${'い'.repeat(MAX_REVIEW_APPROVAL_CHARS)}…`));
+  assert.equal(long.includes('い'.repeat(MAX_REVIEW_APPROVAL_CHARS + 1)), false);
+});
+
 test('スカウトのスレッド名は JST で刻む (日次予算の区切りと同じ暦)', () => {
   const at = Date.parse('2026-08-27T09:15:30.000Z');
   assert.equal(scoutThreadName(at), 'scout/2026-08-27 18:15 JST');
@@ -603,6 +686,219 @@ test('スカウトのスレッド名は JST で刻む (日次予算の区切り�
   for (const bad of ['いま', undefined, null, NaN]) {
     assert.equal(scoutThreadName(bad), 'scout', JSON.stringify(bad));
   }
+});
+
+test('ハーネスの改訂: スレッド名は JST で刻み、起動文は成績と改訂の範囲と 0 件の許可を 1 通に載せる', () => {
+  const at = Date.parse('2026-10-12T09:15:30.000Z');
+  assert.equal(harnessThreadName(at), 'harness/2026-10-12 18:15 JST');
+  assert.equal(harnessThreadName('いま'), 'harness');
+
+  const text = harnessStartMessage({
+    botUserId: 'F1',
+    verdictLines: ['opus (worker): 今 `aaaaaaaaaaaa` 25 本・問題 8% ← 前 記録前 70 本・13% → 同等 (z -0.70)'],
+    gateReason: '計測済み',
+    editable: ['roles/_common.md', 'roles/worker.md'],
+  });
+  assert.ok(text.startsWith('<@F1>\n'));
+  assert.match(text, /### 成績 \(bot ごとに 今の版 ← 前の版 \/ 計測済み\)\n- opus \(worker\): 今 `aaaaaaaaaaaa` 25 本/);
+  assert.match(text, /直してよいのは `roles\/_common\.md` \/ `roles\/worker\.md` だけ/);
+  assert.match(text, /起票は 0 件か 1 件/);
+  assert.match(text, /communitd-protocol/);
+  assert.match(text, /scripts\/harness-report\.mjs/);
+  assert.match(text, /task-proposal 様式/);
+  assert.ok(text.length <= MAX_TASK_START_CHARS);
+
+  // 成績の行が多ければそちらを削り、規律は残す
+  const many = harnessStartMessage({ botUserId: 'F1', verdictLines: Array.from({ length: 40 }, (_, i) => `bot${i}: ${'x'.repeat(80)}`), editable: ['roles/worker.md'] });
+  assert.ok(many.length <= MAX_TASK_START_CHARS, `1 通に収まっていない (${many.length} 字)`);
+  assert.match(many, /- …ほか \d+ 体/);
+  assert.match(many, /0 件も正しい報告/);
+  // 直してよい役割文が無ければ起票しないよう言う
+  assert.match(harnessStartMessage({ botUserId: 'F1' }), /直してよい役割文が無い — 起票しないこと/);
+  // model / effort の変更: 申し送りが企画の巡回へ届くならそこへ (作者を直接呼ばない)、届かなければ従来どおり
+  assert.match(text, /model \/ effort の変更は起票せず `\[\[notify:owner\]\]` で上げる/);
+  const carried = harnessStartMessage({ botUserId: 'F1', editable: ['roles/worker.md'], carry: true });
+  assert.match(carried, /model \/ effort の変更は起票せず `carry` \(申し送り\) に書く \(次の企画の巡回がまとめて作者に上げる\)/);
+  assert.doesNotMatch(carried, /notify:owner/);
+  // 台帳が無ければ節も「当たったか」の手順も出さない
+  assert.doesNotMatch(text, /前の改訂/);
+  assert.match(text, /--trace <job id>/);
+
+  // 前の改訂の台帳は成績の後・進め方の前に置き、当たったかを本文の頭に書かせる
+  const withLedger = harnessStartMessage({
+    botUserId: 'F1',
+    verdictLines: ['opus (worker): 今 `bbbbbbbbbbbb` 25 本・問題 4%'],
+    editable: ['roles/worker.md'],
+    ledgerLines: ['#135 10-12 13:27 merge (roles/worker.md): 1 項 — 狙い: 差し戻しを減らす', 'opus: `aaaa` 26 本・8% → `bbbb` 25 本・問題 1 (4%) — #148 sent-back'],
+  });
+  assert.match(withLedger, /### 成績[^]*### 前の改訂 \(台帳\)\n- #135 10-12 13:27 merge \(roles\/worker\.md\): 1 項 — 狙い: 差し戻しを減らす\n- opus: `aaaa`[^]*### 進め方/);
+  assert.match(withLedger, /前の改訂の狙いが当たったか.*本文 \(body\) の頭に 1 行書く \(0 件でも\)/);
+  assert.ok(withLedger.length <= MAX_TASK_START_CHARS);
+});
+
+test('企画の巡回: スレッド名は JST で刻み、起動文は主題の現状と考え抜く手順と柵を 1 通に載せる', () => {
+  const at = Date.parse('2026-10-12T09:15:30.000Z');
+  assert.equal(planThreadName(at), 'plan/2026-10-12 18:15 JST');
+  assert.equal(planThreadName('いま'), 'plan');
+
+  const text = planStartMessage({
+    botUserId: 'F1',
+    themesFile: 'docs/themes.md',
+    directionFile: 'docs/direction.md',
+    mode: 'add',
+    reason: '進行中の主題 1 / 上限 2',
+    themeLines: ['[active] pi-worker — Sol を worker に (タスク merged 2 / 進行中 1 / 捨てた 0)', 'これまで: 完了 1 / 取り下げ 0 (結果はファイルに)'],
+  });
+  assert.ok(text.startsWith('<@F1>\n'));
+  assert.match(text, /### 主題 \(`docs\/themes\.md` \/ 進行中の主題 1 \/ 上限 2\)\n- \[active\] pi-worker — Sol を worker に/);
+  assert.match(text, /`docs\/direction\.md` \(範囲と柵の正本\)/);
+  assert.match(text, /scripts\/harness-report\.mjs/);
+  // 回し方の成績は loop-report を読ませ、node -e で数え直させない (チャンネル名は字面のまま — 引数を増やさない)
+  const loopReportRead = /`node scripts\/harness-report\.mjs` \(成績と問題の抜粋\)・`node scripts\/loop-report\.mjs --channel <チャンネル名>` \(回し方の成績\)・/;
+  const loopReportCite = /\*\*回し方も振り返る\*\*: 空回りの巡回・日次上限で止まった時間 \(loop-report の数字を引く。`node -e` で数え直さない\)。/;
+  assert.match(text, loopReportRead);
+  assert.match(text, loopReportCite);
+  // 考え抜く手順: 振り返り → 候補 3 つ以上 → 反論 → 0〜1 件
+  assert.match(text, /1\. \*\*振り返り\*\*/);
+  assert.match(text, /2\. \*\*候補を 3 つ以上\*\*/);
+  assert.match(text, /3\. \*\*反論\*\*/);
+  assert.match(text, /4\. \*\*起票は 0 件か 1 件。\*\* touch は `docs\/themes\.md` だけ/);
+  assert.match(text, /易しい仕事 \(テストを足すだけなど\) で数を稼ぐ主題は選ばない/);
+  // 柵
+  assert.match(text, /役割文 \(ハーネスの改訂の領分\)・設定・台帳・作者の返事待ちの設計は主題にしない/);
+  assert.match(text, /方向性ドキュメントは書き換えない/);
+  assert.match(text, /0 件も正しい報告/);
+  assert.match(text, /task-proposal 様式/);
+  assert.ok(text.length <= MAX_TASK_START_CHARS, `1 通に収まっていない (${text.length} 字)`);
+
+  // 配備待ちの主題は [waiting] にさせる (枠に数えず、スカウトも割らない)
+  assert.match(text, /残りが配備 \(`\/restart`\) や時間の経過を待つ確認だけなら `\[waiting\]` にする \(枠に数えず、スカウトも割らない/);
+  // 回し方も振り返り、設定と作者にしかできないものは主題にせず 1 通にまとめて上げる (同じ用件を重ねない)
+  assert.match(text, /\*\*回し方も振り返る\*\*.*主題にせず数字を添えて\*\*まとめて 1 通\*\*で上げる \(本文の最後に `\[\[notify:owner\]\]`。無ければ呼ばない/);
+  assert.match(text, /開いている同じ用件は重ねない/);
+  assert.doesNotMatch(text, /### 回し方/, '数字を渡していないのに見出しを出している');
+  assert.doesNotMatch(text, /\*\*申し送り\*\*/, '申し送りが無いのにさばかせている');
+  // 申し送りを出したなら、1 件ずつさばかせる
+  const carried = planStartMessage({ botUserId: 'F1', themesFile: 'docs/themes.md', carryCount: 2 });
+  assert.match(carried, /- \*\*申し送り\*\* \(この上の投稿、2 件\) を 1 件ずつさばき、本文に 1 行ずつ書く: 主題で扱う \/ 捨てる \(理由\) \/ 作者にしかできない/);
+  assert.ok(carried.indexOf('**申し送り**') < carried.indexOf('**回し方も振り返る**'));
+
+  // 上限なら振り返りが先 — 枠を空けたら同じ 1 件で足してよい (段の番号は詰める)
+  const review = planStartMessage({ botUserId: 'F1', themesFile: 'docs/themes.md', mode: 'review' });
+  assert.match(review, /2\. \*\*主題は上限\*\* — 振り返りで枠を空けない限り新しい主題は足さない。空けたら同じ 1 件で足してよい \(候補 3 つ以上 → 反論 → 1 つ/);
+  assert.doesNotMatch(review, /2\. \*\*候補を 3 つ以上\*\*/);
+  assert.match(review, /3\. \*\*起票は 0 件か 1 件。\*\*/);
+  // 回し方の数字 (ブリッジの勘定) は主題の後・進め方の前に載る
+  const loop = planStartMessage({
+    botUserId: 'F1', themesFile: 'docs/themes.md', mode: 'review',
+    themeLines: ['[waiting] job-cost — 重さ (タスク merged 3 / 進行中 0 / 捨てた 0)'],
+    loopLines: ['スカウト: 続けて提案 0 件 2 回 — 間隔 240 分 (設定 60 分)', '自律起動: 今日 23 / 40 job'],
+  });
+  assert.match(loop, /- \[waiting\] job-cost[^]*\n\n### 回し方 \(ブリッジの勘定\)\n- スカウト: 続けて提案 0 件 2 回 — 間隔 240 分 \(設定 60 分\)\n- 自律起動: 今日 23 \/ 40 job\n\n### 進め方/);
+  assert.match(loop, loopReportRead);
+  assert.match(loop, loopReportCite);
+  assert.ok(loop.length <= MAX_TASK_START_CHARS);
+  // 主題がまだ無い
+  assert.match(planStartMessage({ botUserId: 'F1', themesFile: 'docs/themes.md' }), /- \(まだ無い — 最初の主題を考える\)/);
+  // 主題の行が多ければそちらを削り、手順と柵は残す
+  const many = planStartMessage({
+    botUserId: 'F1', themesFile: 'docs/themes.md', themeLines: Array.from({ length: 40 }, (_, i) => `[active] t${i} — ${'x'.repeat(80)}`),
+    loopLines: [
+      'スカウト: 続けて提案 0 件 9 回 — 間隔 240 分 (設定 60 分。0 件が続くと伸び、merge で戻る)',
+      '自律起動: 今日 40 / 40 job (着手・巡回・自動復旧の数。レビュー・承認は数えない)',
+    ],
+  });
+  assert.match(many, /### 回し方[^]*回し方も振り返る/, '主題の行より先に回し方を削っている');
+  assert.ok(many.length <= MAX_TASK_START_CHARS, `1 通に収まっていない (${many.length} 字)`);
+  assert.match(many, /- …ほか \d+ 行/);
+  assert.match(many, /0 件も正しい報告/);
+  // 1 通に収めるために削られるのは主題の行で、loop-report を読ませる 2 か所は残る
+  assert.match(many, loopReportRead);
+  assert.match(many, loopReportCite);
+});
+
+test('スカウトの起動文: 企画の巡回を置いたチャンネルでは進行中の主題を優先させ、題に [slug] を付けさせる', () => {
+  const text = scoutStartMessage({
+    botUserId: 'O1',
+    directionFile: 'docs/direction.md',
+    themes: { file: 'docs/themes.md', active: [{ slug: 'pi-worker', title: 'Sol を worker に' }, { slug: 'owner-view', title: '見るべきものを束ねる' }] },
+  });
+  assert.match(text, /進行中の主題 \(`docs\/themes\.md`\) の次の 1 歩を優先する:\*\* `pi-worker` Sol を worker に \/ `owner-view` 見るべきものを束ねる/);
+  assert.match(text, /題の頭に `\[slug\]` を付ける/);
+  assert.match(text, /主題ファイル自体は触らない/);
+  // 主題が無い / 企画の巡回を置いていない
+  assert.match(scoutStartMessage({ botUserId: 'O1', directionFile: 'd.md', themes: { file: 'docs/themes.md', active: [] } }), /進行中の主題は無い/);
+  assert.doesNotMatch(scoutStartMessage({ botUserId: 'O1', directionFile: 'd.md' }), /主題/);
+});
+
+test('スカウトの起動文: 企画の巡回があるチャンネルだけ、気づきと作者の手が要るものを申し送りに書かせる', () => {
+  const withPlanner = scoutStartMessage({ botUserId: 'O1', directionFile: 'd.md', themes: { file: 'docs/themes.md', active: [] } });
+  assert.match(withPlanner, /作者の手が要るもの \(配備・`\/retry`・設定\) は `carry` \(申し送り\) に書く — 次の企画の巡回がまとめてさばく。`\[\[notify:owner\]\]` で作者を直接呼ばない/);
+  // 企画の巡回が無ければ申し送りは届かないので言わない
+  assert.doesNotMatch(scoutStartMessage({ botUserId: 'O1', directionFile: 'd.md' }), /carry/);
+  // 一覧が長くても規律は残る (一覧の方を削る)
+  const many = scoutStartMessage({
+    botUserId: 'O1', directionFile: 'd.md', themes: { file: 'docs/themes.md', active: [] },
+    openTasks: Array.from({ length: 60 }, (_, i) => ({ id: String(i), state: 'merged', title: 'x'.repeat(120) })),
+  });
+  assert.ok(many.length <= MAX_TASK_START_CHARS);
+  assert.match(many, /`carry` \(申し送り\)/);
+});
+
+test('carryMessages: 申し送りを時刻と書き手つきで並べ、生メンションと制御フッターを潰し、長ければ分ける', () => {
+  assert.deepEqual(carryMessages({ items: [] }), []);
+  assert.deepEqual(carryMessages(), []);
+  const at = Date.parse('2026-10-14T06:30:00.000Z'); // 15:30 JST
+  const [only] = carryMessages({
+    items: [
+      { at, from: 'opus', text: '日次上限 40 に 19:58 で達して 4 時間止まった\n(巡回 20・着手 20) <@123456789012> [[notify:owner]]' },
+      { at, from: '', text: '#89 は /retry 待ち' },
+      { at, from: 'opus', text: '   ' },
+    ],
+  });
+  assert.ok(only.startsWith('### 申し送り (前の企画の巡回の後 2 件)\n'), only);
+  assert.match(only, /\n- 10-14 15:30 opus: 日次上限 40 に 19:58 で達して 4 時間止まった \(巡回 20・着手 20\) /);
+  assert.match(only, /\n- 10-14 15:30 \?: #89 は \/retry 待ち$/);
+  assert.doesNotMatch(only, /<@123456789012>/, '生メンションが残っている');
+  assert.doesNotMatch(only, /\[\[notify/, '制御フッターの表記が残っている');
+  // 長ければ切らずに分け、2 通目以降は (続き) の見出しで始める
+  const long = carryMessages({ items: Array.from({ length: 12 }, (_, i) => ({ at, from: 'opus', text: `${i} ${'x'.repeat(290)}` })) });
+  assert.ok(long.length >= 2);
+  for (const text of long) assert.ok(text.length <= MAX_TASK_START_CHARS);
+  assert.ok(long[1].startsWith('### 申し送り (続き)\n'));
+  assert.equal(long.join('\n').match(/x{290}/g).length, 12, '分けるときに申し送りを落としている');
+});
+
+test('scoutReportMessages: 前回の巡回の報告を時刻と件数つきで出し、生メンションと制御フッターの行を外し、長ければ分ける', () => {
+  assert.deepEqual(scoutReportMessages({ report: null }), [], '前回が無ければ出さない');
+  assert.deepEqual(scoutReportMessages(), []);
+  const at = Date.parse('2026-10-13T21:12:00.000Z'); // 10-14 06:12 JST
+  const [only, ...rest] = scoutReportMessages({
+    report: { at, proposed: 0, body: '起票なし。\r\n次の巡回への申し送り: <@123456789012> の件は #164 待ち\n\n[[notify:owner]]\n' },
+  });
+  assert.deepEqual(rest, []);
+  assert.equal(
+    only,
+    '### 前回の巡回 (10-14 06:12 JST) の報告 — 提案 0 件\n参考。判断は今回の巡回で\n\n'
+      + '起票なし。\n次の巡回への申し送り: [mention:123456789012] の件は #164 待ち',
+  );
+  assert.ok(!INFRA_PREFIXES.some((p) => only.startsWith(p)), '運用の接頭辞で始まると文脈から外される');
+  // 本文が空でも件数は材料になる (見出しと参考の行だけ)
+  assert.deepEqual(
+    scoutReportMessages({ report: { at, proposed: 2, body: '' } }),
+    ['### 前回の巡回 (10-14 06:12 JST) の報告 — 提案 2 件\n参考。判断は今回の巡回で'],
+  );
+
+  // 本文の上限 (契約の 6000 字) いっぱいでも切らずに分け、どの通も 1 通の上限内・2 通目以降は (続き) で始める
+  const body = Array.from({ length: 60 }, (_, i) => `${String(i).padStart(2, '0')} ${'y'.repeat(96)}`).join('\n').padEnd(6000, '。');
+  assert.equal(body.length, 6000);
+  const parts = scoutReportMessages({ report: { at, proposed: 3, body } });
+  assert.ok(parts.length >= 4, `分けていない (${parts.length} 通)`);
+  for (const part of parts) assert.ok(part.length <= MAX_TASK_START_CHARS, `${part.length} 字`);
+  assert.ok(parts[0].startsWith('### 前回の巡回 (10-14 06:12 JST) の報告 — 提案 3 件\n'));
+  for (const part of parts.slice(1)) assert.ok(part.startsWith('### 前回の巡回の報告 (続き)\n'), part.slice(0, 40));
+  const joined = parts.map((p, i) => (i === 0 ? p : p.slice('### 前回の巡回の報告 (続き)\n'.length))).join('');
+  assert.ok(joined.endsWith(body), '分けるときに本文を落としている');
 });
 
 test('スカウトの起動文はボードの現状と様式の指示を載せる', () => {
@@ -619,7 +915,7 @@ test('スカウトの起動文はボードの現状と様式の指示を載せ�
     ],
   });
   assert.equal(text.split('\n')[0], '<@O1>', '1 行目が制御メッセージの形になっていない');
-  // 着手前だけでなく、進行中と直近に着地したものも見せる
+  // §9.1 — 着手前だけでなく、進行中と直近に着地したものも見せる
   assert.match(text, /### いまボードにあるもの \(進行中・直近に着地したものを含む\)/);
   assert.match(text, /- \[proposed\] 3: 状態バッジを足す/);
   assert.match(text, /- \[approved\] 4: タイムラインを足す/);
@@ -653,6 +949,71 @@ test('一覧が長ければ一覧の方を削る (様式と 0 件の許可は残
   assert.match(text, /task-proposal 様式/, '規律まで削っている');
   assert.match(text, /0 件も正しい報告/);
   assert.equal(text.split('\n')[0], '<@O1>');
+});
+
+test('スカウトの一覧は題を「 — 」の前に縮める (題 200〜600 字の merged 12 件がすべて載る)', () => {
+  // 主題 50〜100 字・題全体 200〜600 字。題のまま並べると 1 通に 4 行ほどしか入らなかった
+  const merged = Array.from({ length: 12 }, (_, i) => {
+    const subject = `主題${i}を直す`.padEnd(50 + Math.round((i * 50) / 11), 'あ');
+    const total = 200 + i * 36;
+    return {
+      id: String(118 + i),
+      state: 'merged',
+      subject,
+      title: `${subject} — ${'い'.repeat(total - subject.length - 3)}`,
+    };
+  });
+  assert.equal(merged[11].title.length, 596);
+  assert.equal(merged[11].subject.length, 100);
+  const text = scoutStartMessage({
+    botUserId: 'O1', directionFile: 'docs/direction.md', openTasks: merged,
+  });
+  assert.ok(text.length <= MAX_TASK_START_CHARS, `1 通に収まっていない (${text.length} 字)`);
+  // 行の形 `- [state] id: 題` は保ち、題の部分だけが主題になる
+  for (const task of merged) {
+    assert.ok(text.includes(`\n- [merged] ${task.id}: ${task.subject}\n`), `${task.id} が主題で載っていない`);
+  }
+  assert.doesNotMatch(text, /…ほか/);
+});
+
+test('主題が 100 字を超えたら 100 字 + … で切る (「 — 」が無い題は全体を切る)', () => {
+  assert.equal(MAX_SCOUT_TITLE_CHARS, 100);
+  const text = scoutStartMessage({
+    botUserId: 'O1',
+    directionFile: 'docs/direction.md',
+    openTasks: [
+      { id: '1', state: 'proposed', title: `${'う'.repeat(130)} — ${'え'.repeat(200)}` },
+      { id: '2', state: 'approved', title: 'お'.repeat(300) },
+      { id: '3', state: 'review', title: '短い主題 — 詳細' },
+      { id: '4', state: 'blocked', title: 'か'.repeat(100) }, // ちょうど 100 字は切らない
+      { id: '5', state: 'in-progress', title: '改行を\n含む  主題 — 詳細' },
+    ],
+  });
+  assert.ok(text.includes(`\n- [proposed] 1: ${'う'.repeat(100)}…\n`));
+  assert.ok(text.includes(`\n- [approved] 2: ${'お'.repeat(100)}…\n`));
+  assert.ok(text.includes('\n- [review] 3: 短い主題\n'));
+  assert.ok(text.includes(`\n- [blocked] 4: ${'か'.repeat(100)}\n`));
+  assert.ok(text.includes('\n- [in-progress] 5: 改行を 含む 主題\n'));
+});
+
+test('主題に縮めても溢れる件数なら「…ほか n 件」を残して末尾から削る (規律は残す)', () => {
+  const many = Array.from({ length: 40 }, (_, i) => ({
+    id: String(100 + i), state: 'merged', title: `${'あ'.repeat(90)}${i} — ${'い'.repeat(400)}`,
+  }));
+  const text = scoutStartMessage({
+    botUserId: 'O1', directionFile: 'docs/direction.md', openTasks: many,
+  });
+  assert.ok(text.length <= MAX_TASK_START_CHARS, `1 通に収まっていない (${text.length} 字)`);
+  const shown = text.split('\n').filter((line) => line.startsWith('- [merged] '));
+  assert.ok(shown.length >= 10, `主題に縮めても ${shown.length} 行しか載っていない`);
+  // 削るのは末尾から — 先頭 (scoutBoardView が新しい merged を置く側) が残る
+  assert.deepEqual(
+    shown.map((line) => line.split(' ')[2]),
+    many.slice(0, shown.length).map((task) => `${task.id}:`),
+  );
+  assert.ok(text.includes(`\n- …ほか ${many.length - shown.length} 件\n`), '削ったことが分からない');
+  assert.match(text, /task-proposal 様式/, '規律まで削っている');
+  assert.match(text, /0 件も正しい報告/);
 });
 
 test('裁定依頼は提案の中身と返し方を載せる (work / process が滞留しないように)', () => {

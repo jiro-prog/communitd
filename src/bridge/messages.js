@@ -3,15 +3,18 @@
 // 作業ディレクトリの固定 → 再開要求の照合 → bot 起点のループガード → スレッド確保 → 受付 (admitJob)。
 // 判断は src/trigger.js / src/authz.js / src/hops.js / src/interactions.js が持ち、ここは順序と結線だけ。
 import { randomUUID } from 'node:crypto';
-import { isAuthorizedSender } from '../authz.js';
-import { channelNameOf, resolveAutonomy, unregisteredChannelNotice } from '../config.js';
+import { isAuthorizedSender, roleIdsOf, senderKindOf } from '../authz.js';
+import {
+  channelNameOf, intakeBotKeyOf, isIntakeChannel, resolveAutonomy, unregisteredChannelNotice,
+} from '../config.js';
 import { readContractNonce, requiresContract } from '../contract.js';
+import { allowsDirectTrigger, isIntakePost } from '../intake.js';
 import { admitJob } from '../interactions.js';
 import { editSafe, replySafe, sendSafe } from '../mentions.js';
 import { laneKeyFor } from '../queue.js';
 import { isInitiativeTrigger, planTaskCwd } from '../scheduler.js';
 import { canonicalCwd } from '../toolstore.js';
-import { replyAuthorId, resolveTrigger, shouldIgnoreOwnMessage } from '../trigger.js';
+import { mentionsBot, replyAuthorId, resolveTrigger, shouldIgnoreOwnMessage } from '../trigger.js';
 import { prepareWorktree, prepareWorktreeOnce } from '../worktree.js';
 
 /**
@@ -43,18 +46,20 @@ import { prepareWorktree, prepareWorktreeOnce } from '../worktree.js';
  * @param {((p: {threadId: string, channelName: string|null, botKey: string, reason: string,
  *   messageId: string|null}) => void)|null} [deps.noteHopLimit]
  *   見送りを `/inbox` へ残す口 (無い配備では何もしない)
+ * @param {{handlePost: (bot: object, msg: object, p: {configured: object}) => Promise<void>}|null} [deps.intake]
+ *   受付 (src/bridge/intake.js)。無い配備では受付 bot が居ても何もしない
  */
 export function createMessageWiring({
   config, bots, hops, jobs, board, jobRuns, recovery, society = null, lifecycle, limits, runRecorder,
   enqueue, runJob, claimContract, discardContractFor, noteJobSpent, closeInboxForThread,
   channelConfigFor, botKeyOf, botRoleFor, otherBotMentionIds,
-  ownerTargets = [], noteHopLimit = null,
+  ownerTargets = [], noteHopLimit = null, intake = null,
 }) {
   const MAX_HOPS = limits.maxHops;
   const MAX_SELF_HOPS = limits.maxSelfHops;
 
   /**
-   * タスクのスレッドで走る job の作業ディレクトリ。
+   * タスクのスレッドで走る job の作業ディレクトリ (docs/social-engineering.md §8-2)。
    * どこで走るかの判断は `planTaskCwd` (scheduler.js) が持ち、ここは git を叩く側。
    *
    * @returns {Promise<{cwd?: string, error?: string}>} cwd 無し = チャンネル本体のまま走る
@@ -95,6 +100,17 @@ export function createMessageWiring({
     }
   }
 
+  /**
+   * 本文で明示メンションされた自前 bot のユーザー ID (受付が受けるかの判定 — src/intake.js の isIntakePost)。
+   * **ロールのピルも数える** — 入力補完で bot と同名の管理ロールが選ばれることがあり (src/trigger.js の
+   * mentionsBot)、数えないと「@Opus と書いたのに受付が拾う」になる
+   */
+  function mentionedBotUserIds(msg) {
+    return [...bots.values()]
+      .filter((b) => b.userId && mentionsBot(msg.content, { userId: b.userId, roleId: botRoleFor(msg.guild, b.userId) }))
+      .map((b) => b.userId);
+  }
+
   async function onMessage(bot, msg) {
     if (!bot.userId) return; // ready 前
     // 自分の発言は原則ここで捨てる。**通すのは自己呼び出しの制御メッセージだけ** —
@@ -114,21 +130,56 @@ export function createMessageWiring({
     if (!msg.inGuild()) return; // DM は対象外
 
     // 入口の identity 境界: チャンネル「名」でなく ID で縛る (sol レビュー知見)。
-    // guildId / allowedUserIds は起動時検証で非空が保証されている (fail-closed)
+    // guildId / allowedUserIds は起動時検証で非空が保証されている (fail-closed)。
+    // member が取れなければロール ID は空 = allowedUserIds だけで判定する
+    const ourBotIds = [...bots.values()].map((b) => b.userId);
     if (
       !isAuthorizedSender({
         config,
         guildId: msg.guildId,
         authorId: msg.author.id,
         isBot: msg.author.bot,
-        ourBotIds: [...bots.values()].map((b) => b.userId),
+        ourBotIds,
+        roleIds: roleIdsOf(msg.member),
       })
     ) return;
+    // 受付 bot (docs/notes/2026-10-11-intake.md)。ready 前は userId が無い = 中継もまだ無い
+    const intakeKey = intakeBotKeyOf(config);
+    const intakeUserId = intakeKey ? bots.get(intakeKey)?.userId ?? null : null;
+    const senderKind = senderKindOf({
+      config, authorId: msg.author.id, isBot: msg.author.bot, ourBotIds,
+      relayBotIds: intakeUserId ? [intakeUserId] : [],
+    });
+    // メンテ用の bot (作者の手元の Claude Code が MCP で書き込む) は作者の代理。
+    // 新しい仕事はチャンネル直下から起こせるが、往復の上限は bot と同じく消費し、
+    // 人間の発言のようにリセットはしない (src/authz.js の senderKindOf)
+    const maintenance = senderKind === 'maintenance';
+    // 受付の中継は**人間の重み**で通す — 人がチャンネル直下に書いたものを受付が運んだだけ
+    // (src/authz.js の senderKindOf)。hop を戻す・受信箱を閉じる・bot 起点の門 (再開要求と社会の照合・
+    // ループガード・タスクの job 予算) を通さない、の全部を**この 1 つの印で**分ける — 1 か所でも
+    // bot 扱いが残ると、「返信待ちに作者が直下から答えた → 中継」で受信箱が閉じない・予算が減る
+    const relay = senderKind === 'relay';
+    const humanWeight = !msg.author.bot || relay;
 
-    // 人間の発言はホップカウンタをリセット
-    if (!msg.author.bot && msg.channel.isThread()) {
+    // 受付 bot は通常の job を走らせない。受けるのはチャンネル直下の人間の投稿だけで
+    // (src/intake.js の isIntakePost)、それ以外 (スレッドの中で呼ばれた・bot の発言) は何もしない
+    if (intakeKey && bot.key === intakeKey) {
+      const configured = channelConfigFor(msg.channel);
+      const accepted = intake && isIntakePost({
+        intakeEnabled: isIntakeChannel(configured),
+        isThread: msg.channel.isThread(),
+        senderKind,
+        mentionedBotUserIds: mentionedBotUserIds(msg),
+        intakeBotUserId: bot.userId,
+      });
+      if (accepted) await intake.handlePost(bot, msg, { configured });
+      return;
+    }
+
+    // 人間の発言 (と受付の中継) はホップカウンタをリセット
+    if (humanWeight && msg.channel.isThread()) {
       hops.reset(msg.channel.id);
-      // 受信箱もここで閉じる。**新しい検知は要らない** — 会話の主導権が
+      // 受信箱もここで閉じる (§10.3)。**新しい検知は要らない** — 会話の主導権が
       // 人間へ戻った瞬間 = 質問に何か返した瞬間、とみなす。作者に既読ボタンを
       // 押させると、押し忘れで受信箱が腐り、腐った受信箱は見られなくなる
       closeInboxForThread(msg.channel.id);
@@ -140,18 +191,28 @@ export function createMessageWiring({
 
     // 自分宛か (生 content を正とする)。メンションのほか、人間が
     // 自分の発言へ返信した場合もトリガーになる (判定は src/trigger.js)。
-    // 返信先の取得は本文で宛先が決まらなかったときだけ走る (lookupReply は遅延評価)
+    // 返信先の取得は本文で宛先が決まらなかったときだけ走る (lookupReply は遅延評価)。
+    // 受付が有効なチャンネルの直下では返信で起動しない (下の allowsDirectTrigger) ので、取りにも行かない
+    const configured = channelConfigFor(msg.channel);
+    const intakeHere = isIntakeChannel(configured) && !msg.channel.isThread();
     const trigger = await resolveTrigger({
       content: msg.content,
       botUserId: bot.userId,
       botRoleId: botRoleFor(msg.guild, bot.userId),
       authorIsBot: msg.author.bot,
       otherBots: otherBotMentionIds(bot, msg.guild),
-      lookupReply: () => replyAuthorId(msg),
+      lookupReply: intakeHere ? null : () => replyAuthorId(msg),
     });
     if (!trigger.triggered) return;
+    // 受付が有効なチャンネルの直下は受付の持ち場 — 起動してよいのは明示メンション (逃げ道) だけ。
+    // 中継は直下では何も起こさない (src/intake.js の allowsDirectTrigger)
+    if (!allowsDirectTrigger({
+      intakeEnabled: isIntakeChannel(configured),
+      isThread: msg.channel.isThread(),
+      via: trigger.via,
+      senderKind,
+    })) return;
 
-    const configured = channelConfigFor(msg.channel);
     if (!configured) {
       discardContractFor(bot, msg, 'チャンネル未登録');
       await replySafe(msg, unregisteredChannelNotice(config, channelNameOf(msg.channel))).catch(() => {});
@@ -172,11 +233,29 @@ export function createMessageWiring({
       ).catch(() => {});
       return;
     }
-    // タスクのスレッドなら、そのタスク専用の作業ツリーで走らせる。**cc を組む前に
+    // タスクのスレッドなら、そのタスク専用の作業ツリーで走らせる (§8-2)。**cc を組む前に
     // 決める** — レーン鍵・セッション記録・承認の照合・verify はすべて cc.cwd を見るので、
     // 後から差し替えると上のコメントと同じ食い違いが起きる
     const worktree = await taskWorktreeFor({ configured, canonical, bot, channel: msg.channel });
     if (worktree.error) {
+      // 断ったことを実行記録に not-started で残す。残さないと、このスレッドの最後の記録が
+      // 前の job のままで、/status が止まりを「返信待ち」などに見せる。起こし直しても同じ
+      // 結果なので自動復旧は拾わない (src/recovery.js の classifySideEffects → config)。
+      // **書けなくても断り方は変えない** — 記録は見えるようにするためのもので、門ではない
+      try {
+        const fromBotKey = botKeyOf(msg.author?.id);
+        jobRuns.refuse({
+          id: randomUUID().slice(0, 8),
+          taskId: board?.findByThread(msg.channel.id)?.id ?? null,
+          threadId: msg.channel.id,
+          botKey: bot.key,
+          channelName: configured.channelName,
+          cwd: canonical,
+          trigger: { messageId: msg.id, byBotKey: fromBotKey, self: fromBotKey === bot.key, maintenance, relay },
+        }, { reason: 'worktree-unavailable', detail: worktree.error });
+      } catch (err) {
+        console.error(`[jobruns] 作業ツリーを用意できず断った job を記録できませんでした: ${err.message}`);
+      }
       discardContractFor(bot, msg, '作業ツリーを用意できない');
       await replySafe(msg, `⚠️ ${worktree.error}`).catch(() => {});
       return;
@@ -185,10 +264,10 @@ export function createMessageWiring({
     // worktree で走る worker と本体で走る reviewer が同じ契約を見られるように
     const cc = { ...configured, cwd: worktree.cwd ?? canonical, repoRoot: canonical };
 
-    // 再開要求の受付側の照合 (レビュー指摘 2026-09-05 A)。期限切れ・受付済み・送れなかったと
+    // 再開要求の受付側の照合 (§11.3 — レビュー指摘 2026-09-05 A)。期限切れ・受付済み・送れなかったと
     // 記録された要求の投稿が遅れて届いても起動しない。**hop と予算を消費する前**に見る
     // (見送る job でタスクの予算を減らさない)。印の無い投稿はそのまま通る
-    if (msg.author.bot && msg.channel.isThread() && recovery) {
+    if (!humanWeight && !maintenance && msg.channel.isThread() && recovery) {
       const screened = recovery.screenTrigger({
         threadId: msg.channel.id, content: msg.content, botKey: bot.key, messageId: msg.id,
       });
@@ -200,11 +279,11 @@ export function createMessageWiring({
       }
     }
 
-    // 社会 (自律社会) の起動の照合。**本文の印だけでは実行しない** —
+    // 社会 (自律社会) の起動の照合 (docs/society-ledger.md §5)。**本文の印だけでは実行しない** —
     // 保存済みの Action と突き合わせて、送っていない・宛先違い・再配送・終端の案件を断る。
     // `screenTrigger` と同じく **hop と予算を消費する前**に見る (見送る job で減らさない)
     let societyAction = null;
-    if (msg.author.bot && msg.channel.isThread() && society) {
+    if (!humanWeight && !maintenance && msg.channel.isThread() && society) {
       const screened = society.screenAction({
         content: msg.content, messageId: msg.id, botKey: bot.key, threadId: msg.channel.id,
       });
@@ -218,7 +297,9 @@ export function createMessageWiring({
     }
 
     // bot 発言起点のループガード (bot 同士の無限往復を封じる)
-    if (msg.author.bot) {
+    // メンテ用の bot がチャンネル直下から起こすのは新しい仕事 (新しいスレッド) なので、
+    // ここは通さずスレッド確保へ進む。スレッド内の発言は bot と同じ門を通る
+    if (!humanWeight && !(maintenance && !msg.channel.isThread())) {
       if (!msg.channel.isThread()) return; // bot 起点はスレッド内のみ想定
       // **社会の印が付いた起動は bot 間ホップを消費しない** — 投げたのは bridge であって
       // bot ではない (再開要求と同じ立場)。ホップは「bot 同士の往復」を止めるための門なので、
@@ -304,7 +385,12 @@ export function createMessageWiring({
     const { admitted, placeholder: admittedPlaceholder } = await admitJob({
       lifecycle,
       sendPlaceholder: () =>
-        sendSafe(thread, `⏳ ${bot.cfg.displayName} が受け付けました${queued ? ' (キュー待ち)' : ''}`),
+        sendSafe(
+          thread,
+          `⏳ ${bot.cfg.displayName} が受け付けました${queued ? ' (キュー待ち)' : ''}`
+            + `${maintenance ? ' — 🔧 メンテ bot 経由の依頼' : ''}`
+            + `${relay ? ' — 📥 受付経由の依頼' : ''}`,
+        ),
       accept: (placeholder) => {
         // 計測ログと実行記録で同じ ID を使う — 並走した job のログが混ざっても 1 本を追える
         const jobId = randomUUID().slice(0, 8);
@@ -322,10 +408,10 @@ export function createMessageWiring({
             botKey: bot.key,
             channelName: cc.channelName,
             cwd: cc.cwd,
-            trigger: { messageId: msg.id, byBotKey: fromBotKey, self: fromBotKey === bot.key },
+            trigger: { messageId: msg.id, byBotKey: fromBotKey, self: fromBotKey === bot.key, maintenance, relay },
             intent: { contractExpected: requiresContract(msg.content), nonce: readContractNonce(msg.content) },
             placeholderId: placeholder?.id ?? null,
-            // 社会の起動なら操作 ID を受付の記録に残す — 照合はこれを鍵に外側を探す
+            // 社会の起動なら操作 ID を受付の記録に残す — 照合はこれを鍵に外側を探す (§7)
             society: societyAction,
           });
         } catch (err) {
@@ -333,13 +419,13 @@ export function createMessageWiring({
           console.error(`[jobruns] ${jobId}: 受付を記録できないため起動しません: ${err.message}`);
           return;
         }
-        // この job を起こした投稿が再開要求なら、受付した時点で要求を閉じる —
+        // この job を起こした投稿が再開要求 (§11.3) なら、受付した時点で要求を閉じる —
         // 送信完了から受付までの窓で同じ task をもう一度起こさないための照合点
         if (taskId && recovery) {
           const accepted = recovery.noteAccepted({ taskId, triggerMessageId: msg.id, botKey: bot.key, runId: jobId });
           if (accepted) console.log(`[recovery] #${taskId} の再開要求 ${taskId}-${accepted.generation} を受付済みにしました (job ${jobId})`);
         }
-        // 社会の受付: **受付記録と消費の確定が保存できるまで実行キューへ渡さない。**
+        // 社会の受付 (§5): **受付記録と消費の確定が保存できるまで実行キューへ渡さない。**
         // ここで書けないまま走らせると、外では job が動いているのに台帳は「送っただけ」に
         // 見え、照合が同じ Action をもう一度起こしうる
         if (societyAction) {
@@ -382,9 +468,9 @@ export function createMessageWiring({
           laneKey,
           threadId: thread.id,
           botKey: bot.key,
-          // 自律運転の勘定はチャンネル単位 (バックオフ) — job の成否をそこへ返す
+          // 自律運転の勘定はチャンネル単位 (§3.7 のバックオフ) — job の成否をそこへ返す
           channelName: cc.channelName,
-          // 発議機構が起こした job は**バックオフの証拠に数えない**。
+          // 発議機構が起こした job は**バックオフの証拠に数えない** (§3.7)。
           // 起こした 1 通で決めるので、通常のタスクスレッドへ出た裁定依頼も取り違えない
           initiativeJob: isInitiativeTrigger(msg.content),
           placeholder,

@@ -35,13 +35,21 @@ const BOTS = [
 ];
 const BOT_KEY = { F: 'fable', O: 'opus', S: 'sol' };
 
-function harness(t, { submitted = false, ownerTargets = [{ userId: 'U1', displayName: 'So' }] } = {}) {
+function harness(t, {
+  submitted = false,
+  // レビュー担当を実際に呼べたか (false = 呼び出し側が人間へ倒す)
+  summoned = true,
+  // 板タスクの verify NG の行き先 ('review' を返すと戻しではなくレビューへ回る)
+  taskRoute = null,
+  ownerTargets = [{ userId: 'U1', displayName: 'So' }],
+} = {}) {
   const io = captureConsole(t);
   const dir = mkdtempSync(join(tmpdir(), 'communitd-turn-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const contracts = new ContractStore(join(dir, 'contracts.json'));
   const inbox = new InboxStore(join(dir, 'inbox.json'));
   const completions = [];
+  const routeCalls = [];
   const approvals = [];
   const wiring = createTurnWiring({
     config: { bots: { fable: { runtime: 'claude' }, opus: { runtime: 'claude' }, sol: { runtime: 'codex' } } },
@@ -52,7 +60,8 @@ function harness(t, { submitted = false, ownerTargets = [{ userId: 'U1', display
     botKeyOf: (id) => BOT_KEY[id] ?? null,
     botEntries: () => BOTS,
     contractCwd: (cc) => cc.repoRoot ?? cc.cwd,
-    noteTaskCompletion: async (p) => { completions.push(p); return submitted; },
+    noteTaskCompletion: async (p) => { completions.push(p); return { submitted, summoned }; },
+    taskVerifyRoute: (p) => { routeCalls.push(p); return taskRoute; },
     postApprovalRequests: async (...args) => { approvals.push(args); },
   });
   const thread = {
@@ -70,7 +79,10 @@ function harness(t, { submitted = false, ownerTargets = [{ userId: 'U1', display
   const cc = { channelName: 'kt', cwd: dir, repoRoot: dir };
   const deliveries = [];
   const run = { delivery: (label, status) => deliveries.push([label, status]) };
-  return { ...io, dir, contracts, inbox, completions, approvals, thread, placeholder, bot, cc, deliveries, run, ...wiring };
+  return {
+    ...io, dir, contracts, inbox, completions, routeCalls, approvals,
+    thread, placeholder, bot, cc, deliveries, run, ...wiring,
+  };
 }
 
 const contents = (thread) => thread.sent.map((p) => p.content ?? '(files)');
@@ -96,7 +108,7 @@ test('本文 → 制御メンション の順に届け、handoff の宛先を実
 
 const VERIFY_NG = { ok: false, code: 1, command: 'npm test', output: 'FAIL a.test.js', durationMs: 1200 };
 
-test('verify NG は結果まで配送したうえで元の handoff を止め、投げ手へ戻す', async (t) => {
+test('verify NG は結果まで配送したうえで元の handoff を止め、投げ手へ戻す (§12.3 (3))', async (t) => {
   const h = harness(t);
   const contract = {
     body: '直しました\n\n[[handoff:sol]]', background: '背景', purpose: '目的', touch_set: ['a.js'],
@@ -123,6 +135,7 @@ test('verify NG は結果まで配送したうえで元の handoff を止め、�
   assert.equal(h.contracts.list('T1', 'opus').length, 0, '戻し先に身に覚えのない契約を積んでいる');
   assert.equal(readContractNonce(sent.at(-1)), null, '契約タグを載せている');
   assert.equal(h.completions[0].verifyResult, VERIFY_NG, '完了の検知に verify の結果を渡していない');
+  assert.equal(h.completions[0].route, null, '投げ手へ戻したのにレビューへも回そうとしている');
   assert.equal(h.inbox.openList().length, 0, '戻し先が bot なのに受信箱へ載せている');
 });
 
@@ -332,6 +345,80 @@ test('完了の検知は配信できたときだけ、レビューへ進めた�
   assert.equal(out.handoff, null);
 });
 
+test('job の停止の口 (handle) を完了の検知へ同じ参照で渡す (レビューの証拠の測定が /stop・/restart で戻してから終わる)', async (t) => {
+  const h = harness(t, { submitted: true });
+  const handle = { stopRequested: false, abort() { this.stopRequested = true; } };
+  await h.postTurn(h.thread, h.bot, h.cc, { result: '完了しました' }, null, h.placeholder, null, { run: h.run, handle });
+  assert.equal(h.completions.length, 1);
+  assert.equal(h.completions[0].handle, handle, '停止の口が完了の検知へ届いていない');
+});
+
+// ---- 板タスクの verify NG はレビューへ回す (§12.3 (3) の (ii)、So 裁定 2026-09-18) ----
+
+test('板の経路では戻さず、レビューへ回す (制御メンションを出さない)', async (t) => {
+  const h = harness(t, { taskRoute: 'review', submitted: true, summoned: true });
+  const out = await h.postTurn(h.thread, h.bot, h.cc, { result: '直しました' }, null, h.placeholder, null, {
+    verifyResult: VERIFY_NG, issuerBotKey: 'opus', contractOut: { kind: 'report' }, run: h.run,
+  });
+
+  assert.equal(out.delivered, true);
+  assert.equal(out.handedOff, false, '戻しの制御メンションを出している');
+  assert.equal(out.handoff, null);
+  assert.equal(out.taskSubmitted, true, 'レビューへ進めたことを実行記録へ写していない');
+  const sent = contents(h.thread);
+  assert.match(sent[1], /^❌ verify 失敗 \(exit 1/, 'verify の結果は従来どおり配送する');
+  assert.equal(sent.some((c) => /verify NG のため .+ へ戻します/.test(c)), false, '戻しの 1 行が出ている');
+  assert.equal(sent.some((c) => c.startsWith('<@O>')), false, '投げ手を呼んでいる');
+  // 行き先の判断は配送前に 1 回だけ、レビューへ進めるのは配送後の完了検知が行う
+  assert.equal(h.routeCalls.length, 1);
+  assert.equal(h.completions.length, 1);
+  assert.equal(h.completions[0].verifyResult, VERIFY_NG, '完了の検知に verify の結果を渡していない');
+  assert.equal(h.completions[0].route, 'review', '決めた行き先を完了検知へ渡していない (二度判断させない)');
+  assert.equal(h.inbox.openList().length, 0, 'レビューへ回せたのに人間を呼んでいる');
+});
+
+test('レビューを召喚できなければ人間を呼ぶ (戻しを止めたまま黙って終わらない)', async (t) => {
+  const h = harness(t, { taskRoute: 'review', submitted: true, summoned: false });
+  const res = { result: '直しました\n\n[[handoff:sol]]' };
+  const out = await h.postTurn(h.thread, h.bot, h.cc, res, null, h.placeholder, null, {
+    verifyResult: VERIFY_NG, issuerBotKey: 'opus', contractOut: { kind: 'report' }, run: h.run,
+  });
+
+  assert.equal(out.delivered, true);
+  const sent = contents(h.thread);
+  assert.equal(sent.at(-1).startsWith('<@U1>'), true, `人間を呼んでいない: ${sent.at(-1)}`);
+  assert.match(sent.at(-1), /レビューを召喚できませんでした/);
+  assert.match(sent.at(-1), /元の宛先: Sol/, '呼ばれるはずだった相手が消えている');
+  assert.match(sent.at(-1), /\/review/, '出し直し方を書いていない');
+  assert.deepEqual(h.thread.sent.at(-1).allowedMentions.users, ['U1']);
+  // 受信箱にも残す (人間を待たせる呼び出しなので §10.3 の対象)
+  assert.equal(h.inbox.openList().length, 1);
+});
+
+test('owner が居なければ従来どおり黙って止まる (呼ぶ相手が居ない)', async (t) => {
+  const h = harness(t, {
+    taskRoute: 'review', submitted: true, summoned: false, ownerTargets: [],
+  });
+  const out = await h.postTurn(h.thread, h.bot, h.cc, { result: '直しました' }, null, h.placeholder, null, {
+    verifyResult: VERIFY_NG, contractOut: { kind: 'report' }, run: h.run,
+  });
+  assert.equal(out.delivered, true);
+  assert.equal(contents(h.thread).some((c) => c.startsWith('<@')), false, '呼ぶ相手が居ないのに誰かを呼んでいる');
+  assert.equal(h.inbox.openList().length, 0);
+});
+
+test('板の経路でも [[notify:owner]] は差し替えない (人間への質問は残す)', async (t) => {
+  const h = harness(t, { taskRoute: 'review', submitted: true, summoned: true });
+  const res = { result: '判断がつきません\n\n[[notify:owner]]' };
+  const out = await h.postTurn(h.thread, h.bot, h.cc, res, null, h.placeholder, null, {
+    verifyResult: VERIFY_NG, issuerBotKey: 'opus', contractOut: { kind: 'report' }, run: h.run,
+  });
+  assert.equal(out.handedOff, true);
+  assert.equal(out.handoff.kind, 'notify');
+  assert.equal(h.routeCalls.length, 0, 'notify を板の経路へ倒している');
+  assert.equal(h.inbox.openList().length, 1);
+});
+
 test('outgoingContext は編成を反映した bot 一覧と owner を返す', (t) => {
   const h = harness(t);
   const ctx = h.outgoingContext(h.bot, ['fable', 'opus']);
@@ -341,7 +428,7 @@ test('outgoingContext は編成を反映した bot 一覧と owner を返す', (
   assert.notEqual(ctx.bots.find((b) => b.key === 'opus').inRoster, false);
 });
 
-// ---- 案件に結ばれた job の配送 ----
+// ---- 案件に結ばれた job の配送 (docs/society-ledger.md §5・S2-3a) ----
 
 const CASE_ACTION = { caseId: 'C-1', actionId: 'A-1', claimGeneration: 1 };
 

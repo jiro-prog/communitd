@@ -1,4 +1,3 @@
-// @ts-check
 // Discord で承認したツール権限を「構造化 grant」として持つ層。
 //
 // ルール文字列 (`WebFetch(domain:x)`) をそのまま保存すると、記法が変わった日に移行できず、
@@ -30,12 +29,6 @@ const TOOLS_FOR_KIND = {
 };
 
 /** grant が持ってよいキー (余分なキーがあれば壊れた入力として捨てる) */
-/**
- * 承認済みのツール許可 1 件 (data/tools-extra.json の要素)。
- * @typedef {{kind: string, tool: string, value: string, cwd: string, approvedBy?: string,
- *   approvedAt?: string, botKey?: string, threadId?: string}} Grant
- */
-
 const GRANT_KEYS = ['kind', 'tool', 'value', 'cwd', 'approvedBy', 'approvedAt', 'botKey', 'threadId'];
 const REQUIRED_KEYS = ['kind', 'tool', 'value', 'cwd'];
 
@@ -75,7 +68,7 @@ export function canonicalCwd(cwd) {
  * grant として妥当か。**生成・登録・保存・読込・job 開始のすべてがここを通る。**
  * 「保存したときは正しかったが今は不正」なものを黙って使わないため。
  *
- * @returns {{ok: true, grant: Grant} | {ok: false, reason: string}}
+ * @returns {{ok: true, grant: object} | {ok: false, reason: string}}
  */
 export function validateGrant(raw) {
   if (!isPlainObject(raw)) return { ok: false, reason: 'grant がオブジェクトではありません' };
@@ -107,7 +100,7 @@ export function validateGrant(raw) {
   if (renderRule(raw).length > MAX_RULE_LENGTH) {
     return { ok: false, reason: `ルールが長すぎます (> ${MAX_RULE_LENGTH} 字)` };
   }
-  return { ok: true, grant: /** @type {Grant} */ (raw) };
+  return { ok: true, grant: raw };
 }
 
 /** ドメイン限定として承認してよいか */
@@ -154,7 +147,6 @@ export function makeGrant({ kind, tool, value, cwd }) {
   return validateGrant({ kind, tool, value, cwd });
 }
 
-/** @param {unknown} v @returns {v is Record<string, any>} */
 function isPlainObject(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }

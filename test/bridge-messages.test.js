@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -13,8 +14,10 @@ import { canonicalCwd } from '../src/grants.js';
 import { HopTracker } from '../src/hops.js';
 import { createLifecycle } from '../src/interactions.js';
 import { JobRunStore } from '../src/jobruns.js';
-import { JobQueue } from '../src/queue.js';
+import { JobQueue, laneKeyFor } from '../src/queue.js';
+import { planRecovery } from '../src/recovery.js';
 import { ContractStore } from '../src/store.js';
+import { deriveTaskStatus } from '../src/taskstatus.js';
 
 // src/bridge/messages.js — Discord のメッセージが job になるまでの入口 (onMessage)。
 // hops・キュー・実行記録・契約は本物、Discord のメッセージとスレッドだけ偽物。
@@ -52,12 +55,14 @@ function fakeThread(id = 'T1', { parentName = 'kt' } = {}) {
 
 function fakeMessage({
   authorId = 'U1', bot = false, content = '<@F> こんにちは', channel = fakeThread(), id = 'M1',
+  member = null, // ロールで許可するときだけ渡す (メンション経路は GuildMember 形)
 } = {}) {
   const msg = {
     id,
     content,
     cleanContent: content.replace(/<@\w+>\s*/g, ''),
     author: { id: authorId, bot, displayName: authorId, username: authorId },
+    member,
     guildId: 'G',
     guild: { roles: { botRoleFor: () => null } },
     inGuild: () => true,
@@ -74,15 +79,30 @@ function fakeMessage({
 function harness(t, {
   maxHops = 12, maxSelfHops = 3, jobRuns = null, recovery = null, society = null,
   ownerTargets = [{ userId: 'SO', displayName: 'そう' }], withInbox = true,
+  allowedRoleIds = null, // 書くと「このロールを持つ人」も通る (secrets の任意キー)
+  maintenanceBotIds = null, // 書くと「作者がメンテ用に登録した bot」も通る (secrets の任意キー)
+  board = null, // タスクのボード (findByThread だけ使う)。null = タスクを持たない配備
+  channel = {}, // チャンネル kt の設定へ上書きする分 (autonomy・cwd の差し替え)
+  intakeBot = false, // 受付 bot (manager / userId M) を足す
+  intake = null, // 受付の配線 (handlePost を受けるだけの偽物)
 } = {}) {
   const io = captureConsole(t);
   const dir = mkdtempSync(join(tmpdir(), 'communitd-messages-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const cwd = canonicalCwd(dir);
-  const config = { guildId: 'G', allowedUserIds: ['U1'], channels: { kt: { cwd: dir, verify: 'npm test' } }, bots: {} };
+  const config = {
+    guildId: 'G',
+    allowedUserIds: ['U1'],
+    ...(allowedRoleIds ? { allowedRoleIds } : {}),
+    ...(maintenanceBotIds ? { maintenanceBotIds } : {}),
+    channels: { kt: { cwd: dir, verify: 'npm test', ...channel } },
+    // 受付 bot の判定 (intakeBotKeyOf) は config.bots を、userId は registry を見る — 両方に置く
+    bots: intakeBot ? { manager: { displayName: 'Manager', intake: true } } : {},
+  };
   const bots = new Map([
     ['fable', { key: 'fable', userId: 'F', client: {}, cfg: { displayName: 'Fable' } }],
     ['opus', { key: 'opus', userId: 'O', client: {}, cfg: { displayName: 'Opus' } }],
+    ...(intakeBot ? [['manager', { key: 'manager', userId: 'M', client: {}, cfg: { displayName: 'Manager', intake: true } }]] : []),
   ]);
   const discord = createDiscordWiring({ config, bots });
   const hops = new HopTracker(maxHops, maxSelfHops);
@@ -101,7 +121,7 @@ function harness(t, {
     bots,
     hops,
     jobs,
-    board: null,
+    board,
     jobRuns: runs,
     recovery,
     society,
@@ -120,6 +140,7 @@ function harness(t, {
     otherBotMentionIds: discord.otherBotMentionIds,
     ownerTargets,
     noteHopLimit: withInbox ? (p) => hopLimits.push(p) : null,
+    intake,
   });
   const fable = bots.get('fable');
   return { ...io, dir, cwd, bots, fable, hops, jobs, jobRuns: runs, contracts, lifecycle, enqueued, jobCalls, spent, closed, hopLimits, ...messages };
@@ -182,6 +203,74 @@ test('チャンネルでのメンションは起点メッセージからスレ�
   assert.equal(msg.threadName, '新しい話題 2 行目');
   assert.equal(thread.sent[0].content, '⏳ Fable が受け付けました');
   assert.equal(h.enqueued[0].threadId, 'T-new');
+});
+
+test('チャンネルでのメンションでスレッドを立てられなければ、起点メッセージと同じ ID のスレッドを取って続ける', async (t) => {
+  // 両 bot 同時メンションの race: 相手の client が先に立てていると startThread が落ちる (160004)。
+  // メッセージ起点のスレッドの ID は元メッセージの ID と同じ
+  const h = harness(t);
+  const thread = fakeThread('M1');
+  const fetched = [];
+  const channel = { id: 'C1', name: 'kt', isThread: () => false, threads: { fetch: async (id) => { fetched.push(id); return thread; } } };
+  const msg = fakeMessage({ channel });
+  msg.startThread = async () => { throw new Error('A thread has already been created for this message'); };
+  await h.onMessage(h.fable, msg);
+  assert.deepEqual(fetched, ['M1']);
+  assert.equal(thread.sent[0].content, '⏳ Fable が受け付けました');
+  assert.equal(h.enqueued.length, 1);
+  assert.equal(h.enqueued[0].threadId, 'M1');
+  assert.deepEqual(h.errors, []);
+});
+
+test('スレッドを立てられず取りにも行けなければ、⏳ も job も出さずにログ 1 行で終える', async (t) => {
+  const h = harness(t);
+  const cases = [
+    ['M1', async () => { throw new Error('Unknown Channel'); }], // 取得が reject
+    ['M2', async () => null], // 取得は通ったがスレッドが無い
+  ];
+  for (const [id, fetch] of cases) {
+    const sent = [];
+    const channel = { id: 'C1', name: 'kt', isThread: () => false, send: async (p) => { sent.push(p); }, threads: { fetch } };
+    const msg = fakeMessage({ channel, id });
+    msg.startThread = async () => { throw new Error('Missing Permissions'); };
+    await h.onMessage(h.fable, msg);
+    assert.deepEqual(sent, [], `${id}: チャンネルへ何か出している`);
+    assert.deepEqual(msg.replies, [], `${id}: 返信で何か出している`);
+  }
+  assert.equal(h.enqueued.length, 0);
+  assert.deepEqual(h.jobRuns.list(), [], 'スレッドの無い受付を記録している');
+  assert.deepEqual(h.errors, ['[fable] スレッド作成/取得に失敗 (msg M1)', '[fable] スレッド作成/取得に失敗 (msg M2)']);
+});
+
+test('スレッドが既に生えている起点メッセージでは新しく立てず、そのスレッドで受け付ける', async (t) => {
+  const h = harness(t);
+  const thread = fakeThread('T-existing');
+  const calls = [];
+  const channel = { id: 'C1', name: 'kt', isThread: () => false, threads: { fetch: async (id) => { calls.push(`fetch:${id}`); return null; } } };
+  const msg = fakeMessage({ channel });
+  msg.hasThread = true;
+  msg.thread = thread;
+  msg.startThread = async () => { calls.push('startThread'); return fakeThread('T-new'); };
+  await h.onMessage(h.fable, msg);
+  assert.deepEqual(calls, [], '既にあるスレッドを使わずに立て直している');
+  assert.equal(thread.sent[0].content, '⏳ Fable が受け付けました');
+  assert.equal(h.enqueued[0].threadId, 'T-existing');
+});
+
+test('許可ロールを持つ人のメンションは通る (roleIds の配線)', async (t) => {
+  // 純関数のテストだけでは呼び出し元での `roleIds:` 渡し忘れを検出できない。
+  // メンション経路の member はキャッシュ済みの GuildMember 形 (roles.cache は Collection)
+  const h = harness(t, { allowedRoleIds: ['R1'] });
+  const withRole = { roles: { cache: new Map([['R1', {}]]) } };
+  await h.onMessage(h.fable, fakeMessage({ authorId: 'U9', member: withRole }));
+  assert.equal(h.enqueued.length, 1, 'ロールを持つ人が通っていない');
+
+  // 別のロールしか持っていない / member が取れないなら今までどおり黙って落ちる
+  await h.onMessage(h.fable, fakeMessage({
+    authorId: 'U9', id: 'M2', channel: fakeThread('T2'), member: { roles: { cache: new Map([['R2', {}]]) } },
+  }));
+  await h.onMessage(h.fable, fakeMessage({ authorId: 'U9', id: 'M3', channel: fakeThread('T3') }));
+  assert.equal(h.enqueued.length, 1);
 });
 
 test('入口で捨てるもの: 自分の発言・DM・認可外・受付停止中・未登録チャンネル', async (t) => {
@@ -268,6 +357,56 @@ test('bot 起点はスレッド内だけで、hop 上限に達したら見送る
   assert.equal(warnings.length, 2, '見送るたびに知らせていない (見送りは契約を捨てるので黙らない)');
   assert.match(warnings[0].content, /Fable の起動を見送りました/);
   assert.match(warnings[0].content, /続けるには人間が発言してください/);
+});
+
+// ---- メンテ用の bot (maintenanceBotIds) ----
+
+test('メンテ bot: チャンネル直下のメンションで新しいスレッドを生やして job を積み、メンテ経由と記録する', async (t) => {
+  const h = harness(t, { maintenanceBotIds: ['MB'] });
+  const thread = fakeThread('T-maint');
+  const channel = { id: 'C1', name: 'kt', isThread: () => false };
+  const msg = fakeMessage({ authorId: 'MB', bot: true, channel, content: '<@F> 3 行を撮って' });
+  msg.startThread = async () => thread;
+  await h.onMessage(h.fable, msg);
+
+  assert.equal(h.enqueued.length, 1, 'メンテ bot のチャンネル直下の依頼で job を立てていない');
+  assert.equal(thread.sent[0].content, '⏳ Fable が受け付けました — 🔧 メンテ bot 経由の依頼');
+  const record = h.jobRuns.get(h.enqueued[0].jobId);
+  assert.deepEqual(record.trigger, { messageId: 'M1', byBotKey: null, kind: 'maintenance' });
+  assert.deepEqual(h.closed, [], 'メンテ bot の発言で作者の受信箱を閉じている');
+  assert.deepEqual(h.spent, [], '新しい仕事の起点を予算に記帳している');
+});
+
+test('メンテ bot: スレッド内では bot と同じく hop を消費し、上限で見送る (人間のようにリセットしない)', async (t) => {
+  const h = harness(t, { maintenanceBotIds: ['MB'], maxHops: 1 });
+  const thread = fakeThread('T1');
+  await h.onMessage(h.fable, fakeMessage({ authorId: 'MB', bot: true, channel: thread, content: '<@F> 1 回目' }));
+  assert.equal(h.enqueued.length, 1);
+  assert.equal(h.hops.hops('T1'), 1, 'メンテ bot の発言が hop を消費していない');
+  assert.deepEqual(h.spent, ['T1']);
+
+  await h.onMessage(h.fable, fakeMessage({ authorId: 'MB', bot: true, channel: thread, content: '<@F> 2 回目', id: 'M2' }));
+  assert.equal(h.enqueued.length, 1, 'hop 上限を超えてメンテ bot の依頼で job を立てている');
+  assert.ok(thread.sent.some((p) => p.content.startsWith('⚠️ bot 間ホップが上限 (1) に達したため')));
+  assert.equal(h.hops.hops('T1'), 1, 'メンテ bot の発言で hop をリセットしている');
+});
+
+test('メンテ bot: 登録していない bot はチャンネル直下でもスレッド内でも無視する', async (t) => {
+  const h = harness(t, { maintenanceBotIds: ['MB'] });
+  const channel = { id: 'C1', name: 'kt', isThread: () => false };
+  const top = fakeMessage({ authorId: 'XB', bot: true, channel, content: '<@F> よその bot' });
+  top.startThread = async () => fakeThread('T-x');
+  await h.onMessage(h.fable, top);
+  await h.onMessage(h.fable, fakeMessage({ authorId: 'XB', bot: true, content: '<@F> よその bot', id: 'M2' }));
+  assert.equal(h.enqueued.length, 0);
+  assert.equal(h.hops.hops('T1'), 0);
+});
+
+test('メンテ bot: 自前の bot の ID を書いても権限は広がらない (チャンネル直下は通らない)', async (t) => {
+  const h = harness(t, { maintenanceBotIds: ['O'] });
+  const channel = { id: 'C1', name: 'kt', isThread: () => false, sent: [], send: async () => {} };
+  await h.onMessage(h.fable, fakeMessage({ authorId: 'O', bot: true, channel, content: '<@F> 自前の bot' }));
+  assert.equal(h.enqueued.length, 0, '自前の bot がメンテ扱いでチャンネル直下から job を立てている');
 });
 
 test('hop 上限の見送りは毎回 owner を呼び、/inbox に残す', async (t) => {
@@ -422,7 +561,7 @@ test('自己呼び出しは制御メッセージの形だけ通し、連続上�
   assert.equal(h.hops.selfHops('T1', 'fable'), 0);
 });
 
-test('失効した再開要求は hop と予算を消費する前に断る', async (t) => {
+test('失効した再開要求 (§11.3) は hop と予算を消費する前に断る', async (t) => {
   const screened = [];
   const recovery = {
     screenTrigger: (p) => { screened.push(p); return { ok: false, reason: '再開要求 7-2 は期限切れです' }; },
@@ -455,6 +594,42 @@ test('受付の記録に失敗した job は起動せず、⏳ を ❌ に直し
   assert.ok(h.errors.some((e) => e.includes('受付を記録できないため起動しません')), h.errors.join('\n'));
 });
 
+test('契約を取り出した後で束縛を記録できない job は起動せず ❌ に直し、取り出した契約があるときだけ委譲し直しを頼む', async (t) => {
+  const h = harness(t);
+  // 受付の記録 (open) は通り、その後の契約の束縛だけが書けない
+  h.jobRuns.bindContract = () => { throw new Error('EACCES: data/job-runs.json'); };
+  const entry = bindContract({
+    id: 'c1', nonce: NONCE, kind: 'report',
+    contract: { body: 'b', changed_files: [], did: ['x'], verification: 'v', remaining: [] },
+    threadId: 'T1', fromBotKey: 'opus', toBotKey: 'fable', cwd: h.cwd, channelName: 'kt', at: new Date().toISOString(),
+  });
+  h.contracts.push('T1', 'fable', entry);
+  const thread = fakeThread('T1');
+  await h.onMessage(h.fable, fakeMessage({ authorId: 'O', bot: true, content: `<@F>\n${formatContractTag(NONCE)}`, channel: thread }));
+  assert.equal(h.enqueued.length, 0);
+  assert.equal(h.contracts.list('T1', 'fable').length, 0, '契約を取り出していない (消費済みと書く前提が崩れている)');
+  const placeholder = thread.sent[0].message;
+  assert.equal(placeholder.edits.length, 1);
+  assert.equal(
+    placeholder.edits[0].content,
+    '❌ Fable を起動しませんでした — 受付を保存できません\n'
+    + 'EACCES: data/job-runs.json (取り出した契約は消費済みなので委譲し直してください)\n'
+    + '→ data/ の書き込み権限と空き容量を確認してから再メンションしてください',
+  );
+  assert.ok(h.errors.some((e) => e.includes('契約の束縛を記録できないため起動しません: EACCES')), h.errors.join('\n'));
+
+  // 契約の無い起動: 同じく起動しないが、消費した契約が無いので委譲し直しは頼まない
+  const plain = fakeThread('T2');
+  await h.onMessage(h.fable, fakeMessage({ channel: plain, id: 'M2' }));
+  assert.equal(h.enqueued.length, 0);
+  assert.equal(
+    plain.sent[0].message.edits[0].content,
+    '❌ Fable を起動しませんでした — 受付を保存できません\n'
+    + 'EACCES: data/job-runs.json\n'
+    + '→ data/ の書き込み権限と空き容量を確認してから再メンションしてください',
+  );
+});
+
 test('待機中の取り消し (onStop) は実行記録を cancelled で閉じ、実行中なら停止の指示だけ残す', async (t) => {
   const h = harness(t);
   await h.onMessage(h.fable, fakeMessage({ channel: fakeThread('T1') }));
@@ -478,7 +653,7 @@ test('stopNoticeFor は予算切れと hop 上限を混ぜない', (t) => {
   assert.equal(h.stopNoticeFor('T0', fallback).reason, 'タスクの job 予算切れ');
 });
 
-// ---- 社会の印が付いた起動 ----
+// ---- 社会の印が付いた起動 (docs/society-ledger.md §5・S2-2) ----
 
 /** screenAction / noteAccepted の呼ばれ方を記録する偽の society 配線 */
 function fakeSociety({ screen = null, accept = { ok: true } } = {}) {
@@ -658,4 +833,437 @@ test('社会の起動: society を持たない配備では何も変わらない 
   assert.equal(h.enqueued.length, 1);
   assert.equal(h.hops.hops('T1'), 1);
   assert.equal(h.jobRuns.get(h.enqueued[0].jobId).society, null);
+});
+
+// --- タスクのスレッドの作業ディレクトリ (taskWorktreeFor — docs/social-engineering.md §8-2) ---
+// タスクのスレッドの job は、そのタスクの作業ツリー (.worktrees/task-N) で走る。ここが壊れると
+// job が本体のチェックアウトで走り、ベースブランチを直接書き換える。
+// git は本物 (一時ディレクトリの中だけ)、ボードは findByThread だけの偽物。
+
+const TASK = { id: 99 };
+// 初期ブランチと baseBranch を揃える (既定の main は fixture に無い)。opus はレビュー担当
+const AUTONOMY = { enabled: true, reviewer: 'opus', baseBranch: 'master' };
+
+/** スレッド ID → タスク。既定はスレッド T1 = タスク 99 */
+function fakeBoard(tasks = { T1: TASK }) {
+  return { findByThread: (threadId) => tasks[threadId] ?? null };
+}
+
+/**
+ * git が dir をリポジトリの中と見ていないこと。`git -C` は祖先を遡って .git を探すので、
+ * 一時ディレクトリの祖先にリポジトリがある (か GIT_DIR が効いている) 環境で進めると、
+ * 作業ツリーの用意が**本物のリポジトリ**に向く。そういう環境ではテストを飛ばす
+ */
+function outsideAnyRepo(dir) {
+  try {
+    execFileSync('git', ['-C', dir, 'rev-parse', '--git-dir'], { stdio: 'ignore', windowsHide: true });
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/** master に 1 コミットと `.worktrees/` の無視設定を持つ一時リポジトリ。用意できない環境では null */
+function tempRepo(t) {
+  const dir = mkdtempSync(join(tmpdir(), 'communitd-messages-repo-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5 }));
+  if (!outsideAnyRepo(dir)) return null;
+  const path = join(dir, 'repo');
+  execFileSync('git', ['init', '-q', '--initial-branch=master', path], { windowsHide: true });
+  const git = (...args) => execFileSync('git', ['-C', path, ...args], { encoding: 'utf8', windowsHide: true }).trim();
+  git('config', 'user.email', 'test@example.com');
+  git('config', 'user.name', 'test');
+  git('config', 'commit.gpgsign', 'false');
+  // prepareWorktree は `.worktrees/` が無視されていないと作らない (verify を汚さないための門)
+  writeFileSync(join(path, '.gitignore'), '.worktrees/\n');
+  git('add', '.gitignore');
+  git('commit', '-q', '-m', 'init');
+  const worktreeCount = () => git('worktree', 'list', '--porcelain')
+    .split('\n').filter((line) => line.startsWith('worktree ')).length;
+  return { repo: canonicalCwd(path), git, worktreeCount };
+}
+
+const worktreeLogs = (h) => h.logs.filter((line) => line.startsWith('[worktree]'));
+
+test('taskWorktreeFor: ボードを持たない配備では {} (チャンネル本体のまま走る)', async (t) => {
+  const h = harness(t);
+  // 実在しないパス — git を 1 回でも叩けば {error} になるので、{} が「叩いていない」の証拠になる
+  const canonical = join(h.dir, 'no-such-repo');
+  const configured = { channelName: 'kt', autonomy: AUTONOMY };
+  assert.deepEqual(await h.taskWorktreeFor({ configured, canonical, bot: h.fable, channel: fakeThread('T1') }), {});
+  assert.equal(existsSync(canonical), false);
+});
+
+test('taskWorktreeFor: スレッドでない・タスクが無い・planTaskCwd が不要と言うときは {} を返し、git を叩かない', async (t) => {
+  const h = harness(t, { board: fakeBoard() });
+  const canonical = join(h.dir, 'no-such-repo');
+  const configured = { channelName: 'kt', autonomy: AUTONOMY };
+  const cases = [
+    ['スレッドでない', { channel: { id: 'T1', isThread: () => false } }],
+    ['タスクのスレッドではない', { channel: fakeThread('T2') }],
+    ['自律運転が無効', { configured: { channelName: 'kt', autonomy: { ...AUTONOMY, enabled: false } } }],
+    ['自律運転の設定が無い', { configured: { channelName: 'kt' } }],
+    ['レビュー担当は本体で走る', { bot: h.bots.get('opus') }],
+  ];
+  for (const [label, override] of cases) {
+    const result = await h.taskWorktreeFor({ configured, canonical, bot: h.fable, channel: fakeThread('T1'), ...override });
+    assert.deepEqual(result, {}, label);
+  }
+  assert.equal(existsSync(canonical), false);
+  assert.deepEqual(worktreeLogs(h), []);
+});
+
+test('taskWorktreeFor: タスクのスレッドでは .worktrees/task-N を用意して返し、2 回目は作り直さず再利用する', async (t) => {
+  const fixture = tempRepo(t);
+  if (!fixture) {
+    t.skip('一時ディレクトリが git の管理下にある');
+    return;
+  }
+  const { repo, git, worktreeCount } = fixture;
+  const h = harness(t, { board: fakeBoard() });
+  const args = { configured: { channelName: 'kt', autonomy: AUTONOMY }, canonical: repo, bot: h.fable, channel: fakeThread('T1') };
+
+  const first = await h.taskWorktreeFor(args);
+  // 期待値は作った後に実パスから作る (8.3 形式・junction で文字列の形が変わる)
+  const worktree = canonicalCwd(join(repo, '.worktrees', 'task-99'));
+  assert.ok(worktree, '作業ツリーが作られていない');
+  assert.deepEqual(first, { cwd: worktree });
+  assert.notEqual(first.cwd, repo, '本体のチェックアウトを返している');
+  assert.equal(
+    execFileSync('git', ['-C', worktree, 'branch', '--show-current'], { encoding: 'utf8', windowsHide: true }).trim(),
+    'task/99',
+  );
+  assert.equal(git('branch', '--show-current'), 'master', '本体のブランチが動いた');
+  assert.equal(worktreeCount(), 2, '本体 + task-99 の 2 つになっていない');
+  assert.equal(worktreeLogs(h).length, 1);
+  assert.match(worktreeLogs(h)[0], /^\[worktree\] kt: タスク 99 の作業ツリーを用意 \(task\/99 ← master \//);
+
+  const second = await h.taskWorktreeFor(args);
+  assert.deepEqual(second, first);
+  assert.equal(worktreeCount(), 2, '2 回目で作業ツリーを二重に作っている');
+  assert.equal(worktreeLogs(h).length, 1, '再利用なのに「用意」と出している');
+});
+
+test('taskWorktreeFor: 同じタスクへ重なった 2 本は 1 本の用意を待ち合わせる (片方が git のエラーで落ちない)', async (t) => {
+  const fixture = tempRepo(t);
+  if (!fixture) {
+    t.skip('一時ディレクトリが git の管理下にある');
+    return;
+  }
+  const { repo, worktreeCount } = fixture;
+  const h = harness(t, { board: fakeBoard() });
+  const args = { configured: { channelName: 'kt', autonomy: AUTONOMY }, canonical: repo, bot: h.fable, channel: fakeThread('T1') };
+  const [a, b] = await Promise.all([h.taskWorktreeFor(args), h.taskWorktreeFor(args)]);
+  assert.deepEqual(a, { cwd: canonicalCwd(join(repo, '.worktrees', 'task-99')) });
+  assert.deepEqual(b, a);
+  assert.equal(worktreeCount(), 2);
+});
+
+test('タスクのスレッドの job は作業ツリーで走る (cc.cwd・レーン・実行記録)。repoRoot は本体のまま', async (t) => {
+  const fixture = tempRepo(t);
+  if (!fixture) {
+    t.skip('一時ディレクトリが git の管理下にある');
+    return;
+  }
+  const { repo, git } = fixture;
+  const h = harness(t, { board: fakeBoard(), channel: { cwd: repo, autonomy: AUTONOMY } });
+  const thread = fakeThread('T1');
+  await h.onMessage(h.fable, fakeMessage({ channel: thread }));
+
+  const worktree = canonicalCwd(join(repo, '.worktrees', 'task-99'));
+  assert.ok(worktree, '作業ツリーが作られていない');
+  assert.equal(thread.sent[0].content, '⏳ Fable が受け付けました');
+  assert.equal(h.enqueued.length, 1);
+  const item = h.enqueued[0];
+  assert.equal(item.laneKey, laneKeyFor(worktree), 'レーンが本体の鍵になっている');
+  const record = h.jobRuns.get(item.jobId);
+  assert.equal(record.cwd, worktree);
+  assert.equal(record.taskId, '99'); // 実行記録は文字列で持つ
+  await item.run({}, null, {});
+  const cc = h.jobCalls[0][3];
+  assert.equal(cc.cwd, worktree, 'job が本体のチェックアウトで走る');
+  assert.equal(cc.repoRoot, repo);
+  assert.equal(git('branch', '--show-current'), 'master');
+});
+
+test('作業ツリーを用意できないタスクのスレッドでは、本体で走らせずに断る (job を立てない・契約も捨てる)', async (t) => {
+  const h = harness(t, { board: fakeBoard(), channel: { autonomy: AUTONOMY } });
+  // h.dir は git でない一時ディレクトリ。祖先にリポジトリがあると本物に作業ツリーを生やしうる
+  if (!outsideAnyRepo(h.dir)) {
+    t.skip('一時ディレクトリが git の管理下にある');
+    return;
+  }
+  const direct = await h.taskWorktreeFor({
+    configured: { channelName: 'kt', autonomy: AUTONOMY }, canonical: h.cwd, bot: h.fable, channel: fakeThread('T1'),
+  });
+  assert.deepEqual(Object.keys(direct), ['error']);
+  // 後ろは git のメッセージ (ロケール依存) なので前方だけ見る
+  assert.match(direct.error, /^タスク 99 の作業ツリーを用意できません: /);
+
+  // 人間のメンション: ⏳ を出さず、⚠️ で理由を返す。記録は not-started の終端 1 件だけ
+  const thread = fakeThread('T1');
+  const msg = fakeMessage({ channel: thread });
+  await h.onMessage(h.fable, msg);
+  assert.equal(msg.replies.length, 1);
+  assert.match(msg.replies[0].content, /^⚠️ タスク 99 の作業ツリーを用意できません: /);
+  assert.equal(thread.sent.length, 0, '⏳ を出している');
+  assert.equal(h.enqueued.length, 0, '本体で job を積んでいる');
+  const [refused, ...rest] = h.jobRuns.list();
+  assert.deepEqual(rest, []);
+  assert.equal(refused.stage, 'ended');
+  assert.equal(refused.outcome, 'not-started');
+  assert.equal(refused.next, 'recovery');
+  assert.equal(refused.reason, 'worktree-unavailable');
+  assert.equal(refused.stageDetail, msg.replies[0].content.replace(/^⚠️ /, '').slice(0, 200));
+  assert.equal(refused.taskId, '99');
+  assert.equal(refused.threadId, 'T1');
+  assert.equal(refused.botKey, 'fable');
+  assert.equal(refused.channelName, 'kt');
+  assert.equal(refused.cwd, h.cwd, '作業ツリーは無いので本体のパスを残す');
+  assert.deepEqual(refused.trigger, { messageId: 'M1', byBotKey: null, kind: 'human' });
+  assert.equal(refused.placeholderId, null);
+  assert.equal(refused.spawn, null);
+  assert.equal(refused.contractState, 'none');
+
+  // bot 起点の契約つき handoff: 契約を捨て、hop も予算も消費しない
+  const entry = bindContract({
+    id: 'c1', nonce: NONCE, kind: 'report',
+    contract: { body: 'b', changed_files: [], did: ['x'], verification: 'v', remaining: [] },
+    threadId: 'T1', fromBotKey: 'opus', toBotKey: 'fable', cwd: h.cwd, channelName: 'kt', at: new Date().toISOString(),
+  });
+  h.contracts.push('T1', 'fable', entry);
+  const handoff = fakeMessage({ authorId: 'O', bot: true, content: `<@F>\n${formatContractTag(NONCE)}`, channel: thread, id: 'M2' });
+  await h.onMessage(h.fable, handoff);
+  assert.match(handoff.replies[0].content, /^⚠️ タスク 99 の作業ツリーを用意できません: /);
+  assert.equal(h.contracts.list('T1', 'fable').length, 0, '起動しない handoff の契約が残っている');
+  assert.ok(h.logs.some((l) => l.includes('起動しない handoff の契約を捨てました (作業ツリーを用意できない)')), h.logs.join('\n'));
+  assert.equal(h.hops.hops('T1'), 0);
+  assert.deepEqual(h.spent, []);
+  assert.equal(h.enqueued.length, 0);
+  assert.equal(existsSync(join(h.dir, '.worktrees')), false);
+  // 断った handoff も 1 件。契約は捨てたので束縛しない (pending を残すと「消費したのに束縛が無い」に見える)
+  const handoffRecord = h.jobRuns.list().find((r) => r.trigger.messageId === 'M2');
+  assert.equal(h.jobRuns.list().length, 2);
+  assert.equal(handoffRecord.outcome, 'not-started');
+  assert.deepEqual(handoffRecord.trigger, { messageId: 'M2', byBotKey: 'opus', kind: 'bot' });
+  assert.equal(handoffRecord.contractState, 'none');
+  assert.equal(handoffRecord.contract, null);
+});
+
+test('作業ツリーで断った記録は、前の job の「返信待ち」を上書きして「起動できなかった」の復旧待ちに出す (自動復旧は拾わない)', async (t) => {
+  const h = harness(t, { board: fakeBoard(), channel: { autonomy: AUTONOMY } });
+  if (!outsideAnyRepo(h.dir)) {
+    t.skip('一時ディレクトリが git の管理下にある');
+    return;
+  }
+  // 前の job: 報告して人間の返信待ちで終わった
+  const T0 = Date.now() - 60 * 60000;
+  h.jobRuns.open({ id: 'prev', taskId: '99', threadId: 'T1', botKey: 'fable' }, { now: T0 });
+  h.jobRuns.finish('prev', { reason: 'ok', now: T0 + 60000 });
+  const task = { id: 99, state: 'in-progress', jobBudget: 20, jobsSpent: 1, updatedAt: new Date(T0).toISOString() };
+  const statusNow = () => deriveTaskStatus({ task, runs: h.jobRuns.forThread('T1'), now: Date.now() + 10 * 60000 });
+  assert.equal(statusNow().status, 'reply-wait', '前提: 断る前は返信待ちに見えている');
+
+  await h.onMessage(h.fable, fakeMessage({ channel: fakeThread('T1') }));
+  const status = statusNow();
+  assert.equal(status.status, 'recovery-wait');
+  assert.match(status.reason, /^起動できなかった: タスク 99 の作業ツリーを用意できません: .* \(fable\)$/s);
+  assert.equal(status.next, 'recovery');
+  assert.equal(status.run.outcome, 'not-started');
+
+  // 自動復旧: 起こし直しても同じ結果 (設定の不備) なので observe に留める — 起こさない
+  const plan = planRecovery({
+    task,
+    status,
+    config: { mode: 'auto', graceMin: 5, maxAutoRetries: 3, retryDelaysMin: [5, 15, 30] },
+    dayJobsLeft: 10,
+    now: Date.now() + 60 * 60000,
+  });
+  assert.equal(plan.action, 'observe');
+  assert.equal(plan.safety, 'config');
+  assert.match(plan.reason, /^設定・契約の不備 \(タスク 99 の作業ツリーを用意できません: /);
+});
+
+test('作業ツリーで断った記録を書けなくても、従来どおり ⚠️ で断り、例外を外へ出さない', async (t) => {
+  const jobRuns = { refuse: () => { throw new Error('EACCES: data/job-runs.json'); } };
+  const h = harness(t, { board: fakeBoard(), channel: { autonomy: AUTONOMY }, jobRuns });
+  if (!outsideAnyRepo(h.dir)) {
+    t.skip('一時ディレクトリが git の管理下にある');
+    return;
+  }
+  const thread = fakeThread('T1');
+  const msg = fakeMessage({ channel: thread });
+  await h.onMessage(h.fable, msg);
+  assert.equal(msg.replies.length, 1);
+  assert.match(msg.replies[0].content, /^⚠️ タスク 99 の作業ツリーを用意できません: /);
+  assert.equal(thread.sent.length, 0);
+  assert.equal(h.enqueued.length, 0);
+  assert.ok(
+    h.errors.some((e) => e === '[jobruns] 作業ツリーを用意できず断った job を記録できませんでした: EACCES: data/job-runs.json'),
+    h.errors.join('\n'),
+  );
+});
+
+test('作業ツリーの断り以外は記録の扱いが変わらない: タスクでないスレッド・作業ディレクトリ解決不能・失効した再開要求', async (t) => {
+  // タスクでないスレッド: 作業ツリーを用意せず本体で受け付ける (記録は queued の 1 件)
+  const h = harness(t, { board: fakeBoard(), channel: { autonomy: AUTONOMY } });
+  await h.onMessage(h.fable, fakeMessage({ channel: fakeThread('T2') }));
+  assert.equal(h.enqueued.length, 1);
+  assert.deepEqual(h.jobRuns.list().map((r) => [r.threadId, r.stage, r.outcome]), [['T2', 'queued', null]]);
+
+  // 作業ディレクトリを解決できない: ⚠️ で断り、記録は残さない
+  const missing = harness(t, { board: fakeBoard(), channel: { cwd: join(tmpdir(), 'communitd-no-such-dir', 'x'), autonomy: AUTONOMY } });
+  const msg = fakeMessage({ channel: fakeThread('T1') });
+  await missing.onMessage(missing.fable, msg);
+  assert.match(msg.replies[0].content, /^⚠️ 作業ディレクトリを解決できません \(kt: /);
+  assert.deepEqual(missing.jobRuns.list(), []);
+
+  // 失効した再開要求: ⏹ で断り、記録は残さない
+  const recovery = { screenTrigger: () => ({ ok: false, reason: '再開要求 7-2 は期限切れです' }), noteAccepted: () => null };
+  const stale = harness(t, { recovery });
+  const thread = fakeThread('T1');
+  await stale.onMessage(stale.fable, fakeMessage({ authorId: 'O', bot: true, content: '<@F> 再開要求 7-2', channel: thread }));
+  assert.equal(thread.sent[0].content, '⏹ 再開要求 7-2 は期限切れです');
+  assert.deepEqual(stale.jobRuns.list(), []);
+});
+
+test('タスクのスレッドで受け付けた job は再開要求を閉じる (§11.3)。ボードに無いスレッド・recovery の無い配備では呼ばない', async (t) => {
+  // 送信完了から受付までの窓で同じタスクをもう一度起こさないための照合点。
+  // チャンネルは自律運転なし = planTaskCwd が作業ツリーを要らないと言う (git を叩かない)
+  const noted = [];
+  let closed = { generation: 2 };
+  const recovery = {
+    screenTrigger: () => ({ ok: true, request: null }),
+    noteAccepted: (p) => { noted.push(p); return closed; },
+  };
+  const h = harness(t, { board: fakeBoard(), recovery });
+  const recoveryLogs = () => h.logs.filter((line) => line.startsWith('[recovery]'));
+  await h.onMessage(h.fable, fakeMessage({ authorId: 'O', bot: true, content: '<@F> 再開要求 99-2', channel: fakeThread('T1') }));
+  assert.equal(h.enqueued.length, 1);
+  const { jobId } = h.enqueued[0];
+  assert.deepEqual(noted, [{ taskId: 99, triggerMessageId: 'M1', botKey: 'fable', runId: jobId }]);
+  assert.deepEqual(recoveryLogs(), [`[recovery] #99 の再開要求 99-2 を受付済みにしました (job ${jobId})`]);
+  assert.deepEqual(worktreeLogs(h), []);
+
+  // 閉じる要求が無かった: 照合はするがログは出さず、job はそのまま積む
+  closed = null;
+  await h.onMessage(h.fable, fakeMessage({ authorId: 'O', bot: true, content: '<@F> 続き', channel: fakeThread('T1'), id: 'M2' }));
+  assert.equal(h.enqueued.length, 2);
+  assert.deepEqual(noted.map((p) => p.triggerMessageId), ['M1', 'M2']);
+  assert.equal(recoveryLogs().length, 1);
+
+  // ボードに無いスレッド (taskId が無い): 照合しない
+  await h.onMessage(h.fable, fakeMessage({ authorId: 'O', bot: true, content: '<@F> 別件', channel: fakeThread('T2'), id: 'M3' }));
+  assert.equal(h.enqueued.length, 3);
+  assert.equal(noted.length, 2, 'タスクの無いスレッドで再開要求を閉じに行っている');
+
+  // recovery を持たない配備: タスクのスレッドでも照合せずに積む
+  const bare = harness(t, { board: fakeBoard() });
+  await bare.onMessage(bare.fable, fakeMessage({ channel: fakeThread('T1') }));
+  assert.equal(bare.enqueued.length, 1);
+  assert.equal(bare.jobRuns.get(bare.enqueued[0].jobId).taskId, '99', 'タスクのスレッドとして受け付けていない');
+});
+
+// ---- 受付 (docs/notes/2026-10-11-intake.md) ----
+
+/** 受付の配線の偽物 — 受けた投稿を記録するだけ */
+function fakeIntake() {
+  const posts = [];
+  return { posts, handlePost: async (bot, msg, { configured }) => { posts.push({ bot: bot.key, msg, configured }); } };
+}
+
+const intakeChannel = () => ({ id: 'C1', name: 'kt', isThread: () => false });
+
+test('受付: 有効なチャンネルの直下の人間の投稿は受付 bot だけが受け、他の bot は起きない', async (t) => {
+  const intake = fakeIntake();
+  const h = harness(t, { intakeBot: true, intake, channel: { intake: true } });
+  const msg = fakeMessage({ channel: intakeChannel(), content: 'ログイン画面が真っ白になる' });
+  msg.startThread = async () => { throw new Error('スレッドを立てた'); };
+  for (const key of ['fable', 'opus', 'manager']) await h.onMessage(h.bots.get(key), msg);
+  assert.equal(intake.posts.length, 1);
+  assert.equal(intake.posts[0].bot, 'manager');
+  assert.equal(intake.posts[0].configured.channelName, 'kt');
+  assert.equal(h.enqueued.length, 0);
+
+  // 受付 bot への明示メンションも受付が受ける
+  await h.onMessage(h.bots.get('manager'), fakeMessage({ channel: intakeChannel(), content: '<@M> これ見て' }));
+  assert.equal(intake.posts.length, 2);
+});
+
+test('受付: 特定の bot へのメンションはその bot へ直行し (逃げ道)、受付は受けない — ロールのピルでも', async (t) => {
+  const intake = fakeIntake();
+  const h = harness(t, { intakeBot: true, intake, channel: { intake: true } });
+  const thread = fakeThread('T-new');
+  const msg = fakeMessage({ channel: intakeChannel(), content: '<@O> 直してほしい' });
+  msg.startThread = async () => thread;
+  await h.onMessage(h.bots.get('manager'), msg);
+  await h.onMessage(h.bots.get('opus'), msg);
+  assert.equal(intake.posts.length, 0);
+  assert.equal(h.enqueued.length, 1);
+  assert.equal(h.enqueued[0].botKey, 'opus');
+
+  // 入力補完で管理ロールが選ばれた形 (<@&role>) も「opus 宛」として受付は見送る
+  const roleMsg = fakeMessage({ channel: intakeChannel(), content: '<@&R-O> 直してほしい' });
+  roleMsg.guild = { roles: { botRoleFor: (userId) => (userId === 'O' ? { id: 'R-O' } : null) } };
+  await h.onMessage(h.bots.get('manager'), roleMsg);
+  assert.equal(intake.posts.length, 0);
+});
+
+test('受付: 有効なチャンネルの直下では返信で起動しない (返信先も取りに行かない)。無効なチャンネルは今までどおり', async (t) => {
+  const intake = fakeIntake();
+  const h = harness(t, { intakeBot: true, intake, channel: { intake: true } });
+  let fetched = 0;
+  const reply = (channel) => {
+    const msg = fakeMessage({ channel, content: 'それで進めて' });
+    msg.reference = { messageId: 'X', type: 0, channelId: channel.id };
+    msg.fetchReference = async () => { fetched += 1; return { author: { id: 'O' } }; };
+    msg.startThread = async () => fakeThread('T-new');
+    return msg;
+  };
+  await h.onMessage(h.bots.get('opus'), reply(intakeChannel()));
+  assert.equal(h.enqueued.length, 0);
+  assert.equal(fetched, 0, '起動しないのに返信先を取りに行った');
+
+  const plain = harness(t, { intakeBot: true, intake });
+  await plain.onMessage(plain.bots.get('opus'), reply(intakeChannel()));
+  assert.equal(plain.enqueued.length, 1, '受付の無いチャンネルの返信起動まで止めた');
+});
+
+test('受付: 中継 (受付 bot の投稿) はスレッドの中で人間の重みで通る — hop を戻し・受信箱を閉じ・予算を減らさず・relay と記録', async (t) => {
+  const h = harness(t, { intakeBot: true, intake: fakeIntake(), channel: { intake: true } });
+  h.hops.take('T1');
+  const thread = fakeThread('T1');
+  await h.onMessage(h.bots.get('opus'), fakeMessage({ authorId: 'M', bot: true, content: '<@O>', channel: thread }));
+
+  assert.equal(h.hops.hops('T1'), 0, '中継で hop を戻していない');
+  assert.deepEqual(h.closed, ['T1'], '中継で受信箱を閉じていない');
+  assert.deepEqual(h.spent, [], '中継をタスクの job 予算に記帳した');
+  assert.equal(h.enqueued.length, 1);
+  assert.equal(thread.sent[0].content, '⏳ Opus が受け付けました — 📥 受付経由の依頼');
+  assert.deepEqual(h.jobRuns.get(h.enqueued[0].jobId).trigger, { messageId: 'M1', byBotKey: 'manager', kind: 'relay' });
+});
+
+test('受付: 中継はチャンネル直下では何も起こさない — 本文に <@id> が紛れても', async (t) => {
+  const h = harness(t, { intakeBot: true, intake: fakeIntake(), channel: { intake: true } });
+  const msg = fakeMessage({ authorId: 'M', bot: true, content: '<@O> の件はスレッドへ回しました', channel: intakeChannel() });
+  msg.startThread = async () => { throw new Error('スレッドを立てた'); };
+  await h.onMessage(h.bots.get('opus'), msg);
+  await h.onMessage(h.bots.get('fable'), msg);
+  assert.equal(h.enqueued.length, 0);
+  assert.deepEqual(msg.replies, []);
+});
+
+test('受付: 受付 bot は通常の job を走らせない — スレッドで呼ばれても・無効なチャンネルでも何もしない', async (t) => {
+  const intake = fakeIntake();
+  const h = harness(t, { intakeBot: true, intake, channel: { intake: true } });
+  const thread = fakeThread('T1');
+  await h.onMessage(h.bots.get('manager'), fakeMessage({ content: '<@M> ここも見て', channel: thread }));
+  assert.equal(thread.sent.length, 0);
+  assert.equal(h.enqueued.length, 0);
+  assert.equal(intake.posts.length, 0);
+
+  const off = harness(t, { intakeBot: true, intake });
+  await off.onMessage(off.bots.get('manager'), fakeMessage({ content: '<@M> 受付して', channel: intakeChannel() }));
+  assert.equal(intake.posts.length, 0);
+  assert.equal(off.enqueued.length, 0);
 });

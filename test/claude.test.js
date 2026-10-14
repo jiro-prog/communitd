@@ -98,7 +98,7 @@ test('スキーマを渡した job だけ --json-schema が付き、structured_o
   const i = args.indexOf('--json-schema');
   assert.ok(i > 0, '--json-schema が付いていない');
   assert.deepEqual(JSON.parse(args[i + 1]), SCHEMAS.report);
-  // 結果 JSON の structured_output はパース済みのオブジェクトで返る
+  // 結果 JSON の structured_output はパース済みのオブジェクトで返る (T0 §4.1)
   assert.deepEqual(res.structuredOutput, { 本文: 'ok' });
 });
 
@@ -121,6 +121,63 @@ test('スキーマ無しでは structuredOutput は null (縮退の判定に使�
   const res = await runT({ cwd: 'C:/tmp', model: 'opus', prompt: 'x', spawnImpl });
   assert.equal(res.structuredOutput, null);
   assert.equal(res.result, '散文');
+});
+
+/** is_error の結果 JSON を返す runClaude。extra で既定の result JSON を上書きする */
+async function errorRun(extra) {
+  const seen = {};
+  return runT({ cwd: 'C:/tmp', model: 'opus', prompt: 'x', spawnImpl: fakeSpawn(seen, { is_error: true, ...extra }) });
+}
+
+test('is_error の result があれば、その最初の行を error に入れる (result 自体は変えない)', async () => {
+  // error が無いと呼び出し側が「実行エラー」の一語で記録し、停滞通知・/status・再開メッセージに
+  // 何で落ちたのかが出なかった
+  const result = '\n  API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}  \n詳細の 2 行目';
+  const res = await errorRun({ subtype: 'success', result });
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}');
+  assert.equal(res.result, result, 'result の中身が変わっている');
+});
+
+test('is_error の理由は 200 字で切る (1 行でも長文を記録へ流さない)', async () => {
+  const res = await errorRun({ result: 'あ'.repeat(500) });
+  assert.equal(res.error.length, 200);
+  assert.ok(res.error.endsWith('…'));
+});
+
+test('is_error で result が空なら errors → api_error → api_error_code → subtype の順に理由を拾う', async () => {
+  // error_during_execution / error_max_turns は result を持たず、理由が errors (文字列の配列) に入る
+  assert.equal((await errorRun({
+    subtype: 'error_during_execution', result: undefined, errors: ['', 'queryParams builder failed: x'],
+  })).error, 'queryParams builder failed: x');
+  // structured_output がある経路では result が空に落とされ、API エラーの種別だけが残りうる
+  assert.equal((await errorRun({
+    subtype: 'success', result: '', api_error: 'rate_limit', api_error_code: 'too_many_requests',
+  })).error, 'rate_limit');
+  assert.equal((await errorRun({
+    subtype: 'success', result: '', api_error_code: 'too_many_requests',
+  })).error, 'too_many_requests');
+});
+
+test('is_error で result が空なら subtype を理由にする', async () => {
+  const res = await errorRun({ subtype: 'error_max_turns', result: '   ' });
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'error_max_turns');
+  assert.equal(res.result, '   ');
+});
+
+test('is_error で理由がどこにも無ければ error は入れない (呼び出し側の「実行エラー」に任せる)', async () => {
+  const res = await errorRun({ result: undefined });
+  assert.equal(res.ok, false);
+  assert.equal('error' in res, false, '空の理由で error を埋めている');
+  assert.equal(res.result, '');
+});
+
+test('成功の経路には error のキーが付かない (回帰)', async () => {
+  const { res } = await argsFor({});
+  assert.equal(res.ok, true);
+  assert.equal('error' in res, false);
+  assert.equal(res.result, '{"本文":"ok"}');
 });
 
 test('参照ディレクトリを空にすれば --add-dir は付かない (touch 制限中)', async () => {

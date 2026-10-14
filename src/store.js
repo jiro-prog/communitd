@@ -1,9 +1,8 @@
-// @ts-check
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
 
 /**
- * 読込の分類。**不在は broken ではない** —
+ * 読込の分類 (docs/social-engineering.md §12.3 (1))。**不在は broken ではない** —
  * 既存の台帳では「初回」で、空から始めてよい唯一の場合。
  */
 export const LEDGER_BROKEN_KINDS = Object.freeze(['read-error', 'syntax-error', 'shape-error']);
@@ -11,7 +10,7 @@ export const LEDGER_BROKEN_KINDS = Object.freeze(['read-error', 'syntax-error', 
 /**
  * JSON 1 ファイルを丸ごと持つ薄い KV の共通部。
  *
- * **読めなかったファイルは動かさない。** 2026-09-07 より前は
+ * **読めなかったファイルは動かさない。** 2026-09-07 (§12.3 (1)) より前は
  * `.corrupt-<時刻>` へ退避して空で続行していたが、それだと**次の起動が「初回」に見える** —
  * pause.json が壊れた日に kill switch が黙って解ける。いまは在処に残して `broken` に理由を持ち、
  * メモリだけ空で開く (読む側を落とさないため)。**書き込みは broken の間ずっと断る**
@@ -22,11 +21,9 @@ export const LEDGER_BROKEN_KINDS = Object.freeze(['read-error', 'syntax-error', 
 export class JsonStore {
   constructor(filePath) {
     this.filePath = filePath;
-    /** @type {Record<string, any>} */
     this.data = {};
     // **公開するのは getter の `broken`** (JobRunStore は文字列で返す互換 API を持つので、
     // 素の値はここに置いて派生側から読み替えられるようにする)
-    /** @type {{kind: string, reason: string, at: string, code?: string|null}|null} */
     this.brokenInfo = null;
     if (existsSync(filePath)) {
       const read = readLedgerFile(filePath);
@@ -68,7 +65,7 @@ export class JsonStore {
    */
   commit(next) {
     // **読めなかった台帳の上には書かない。** 空のメモリを保存すると、人が直すための
-    // 中身が消えて「最初からそうだった」になる
+    // 中身が消えて「最初からそうだった」になる (§12.3 (1))
     if (this.brokenInfo) throw new Error(brokenWriteMessage(this.filePath, this.brokenInfo));
     const prev = this.data;
     this.data = next;
@@ -131,7 +128,7 @@ function brokenWriteMessage(filePath, broken) {
  * 文字列を返すので、どちらも `{file, reason}` へそろえる。**store を持たない配線
  * (テストの偽物) も混ざる**ので、`broken` を持たないものは健全として扱う。
  *
- * @param {Array<{filePath?: string, broken?: {reason?: string, kind?: string}|string|null}|null|undefined>} stores
+ * @param {Array<{filePath?: string, broken?: object|string|null}|null|undefined>} stores
  * @returns {Array<{file: string, reason: string}>}
  */
 export function brokenLedgers(stores = []) {
@@ -228,8 +225,6 @@ export class ContractStore extends JsonStore {
    *
    * 期限切れはここでも掃除する (起動しなかった handoff の契約を溜めない)。
    *
-   * @param {string} threadId
-   * @param {string} botKey
    * @param {{fromBotKey: string, nonce: string, now?: number, ttlMs?: number}} key
    * @returns {object|null}
    */
@@ -284,7 +279,7 @@ function isExpired(entry, now, ttlMs) {
 }
 
 /**
- * 自律運転の kill switch を JSON で永続化する。
+ * 自律運転の kill switch (docs/social-engineering.md §3.7) を JSON で永続化する。
  *
  * **再起動をまたいで残す。** 契約や編成と違って、これは「人が止めた」という事実で、
  * プロセスの再起動で勝手に解けると**止めた理由が残っているのに社会が動き出す**。
@@ -301,7 +296,7 @@ export class PauseStore extends JsonStore {
    * **`paused: false` と明示されているときだけ「動いている」と読む。** 手で壊された
    * ファイルを「動いてよい」側へ倒すと、kill switch が黙って無効になる。
    *
-   * **ファイルごと読めないときも停止扱い**。値の検証は「有効な JSON の中の
+   * **ファイルごと読めないときも停止扱い** (§12.3 (1))。値の検証は「有効な JSON の中の
    * 壊れた値」しか見ないので、ファイル単位の破損だと `current()` が null =
    * 「動いている」になり、再起動のたびに停止が解ける。
    */
@@ -333,9 +328,9 @@ export class PauseStore extends JsonStore {
     return {
       paused: true,
       by: 'system',
-      reason: `${basename(this.filePath)} が読めない: ${this.brokenInfo?.reason}`,
+      reason: `${basename(this.filePath)} が読めない: ${this.brokenInfo.reason}`,
       broken: true,
-      at: this.brokenInfo?.at,
+      at: this.brokenInfo.at,
     };
   }
 
@@ -356,7 +351,7 @@ export class PauseStore extends JsonStore {
 
   /**
    * @returns {object|null} 再開する前に止まっていた記録 (元から動いていれば null)
-   * @throws {Error} 台帳が読めないとき — **`/resume` では解けない**。
+   * @throws {Error} 台帳が読めないとき — **`/resume` では解けない** (§12.3 (1))。
    *   壊れた pause.json を再開で上書きできると、kill switch を「壊して消す」道ができる
    */
   resume({ by = null, now = Date.now() } = {}) {
@@ -371,7 +366,8 @@ export class PauseStore extends JsonStore {
 
 /**
  * チャンネル → スケジューラの勘定を永続化する薄い KV
- * (定期巡回の最終実行時刻と日次消費を永続化し、再起動直後の連発を防ぐ)。
+ * (docs/social-engineering.md §3.9「定期巡回の最終実行時刻と日次消費は永続化し、
+ * 再起動直後の連発を防ぐ」)。
  *
  * **中身の形はこの層の関心ではない。** 何を持ち越して何を捨てるかは
  * `persistedState` / `restoreState` (src/scheduler.js) が決める — 判断の層と

@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   appendTraceEntry,
+  digestTrace,
   formatTraceLine,
+  formatTraceSteps,
   postTraceQuietly,
   readTraceEntries,
   summarizeToolInput,
@@ -45,10 +47,10 @@ test('最初の編集までの Read 数を数える (編集が無ければ null)
   assert.equal(readonly.readsBeforeFirstEdit, null);
 });
 
-test('引数は短く畳む — Bash は先頭語・ファイルは basename・WebFetch はドメイン', () => {
-  assert.equal(summarizeToolInput('Bash', { command: 'npm test -- --watch' }), 'npm');
+test('引数は短く畳む — Bash は先頭語と続く語・ファイルは basename・WebFetch はドメイン', () => {
+  assert.equal(summarizeToolInput('Bash', { command: 'npm test -- --watch' }), 'npm test');
   // Windows の job は Bash ではなく PowerShell ツールを使う (実測)
-  assert.equal(summarizeToolInput('PowerShell', { command: 'Get-ChildItem -Recurse' }), 'Get-ChildItem');
+  assert.equal(summarizeToolInput('PowerShell', { command: 'Get-ChildItem -Recurse' }), 'Get-ChildItem -Recurse');
   assert.equal(summarizeToolInput('Read', { file_path: 'C:/proj/src/index.js' }), 'index.js');
   assert.equal(summarizeToolInput('Edit', { file_path: '/home/x/src/a.js' }), 'a.js');
   assert.equal(summarizeToolInput('WebFetch', { url: 'https://example.com/a/b?q=1' }), 'example.com');
@@ -75,13 +77,29 @@ test('秘密らしい引数は要約ごと落とす (件数だけ残る)', () =>
 });
 
 test('シェルの先頭語がフルパスでも、ホストのディレクトリ構造を出さない', () => {
-  assert.equal(summarizeToolInput('Bash', { command: 'C:\\Users\\me\\bin\\build.exe --release' }), 'build.exe');
-  assert.equal(summarizeToolInput('Bash', { command: '/home/me/tools/run.sh -v' }), 'run.sh');
+  assert.equal(summarizeToolInput('Bash', { command: 'C:\\Users\\me\\bin\\build.exe --release' }), 'build.exe --release');
+  assert.equal(summarizeToolInput('Bash', { command: '/home/me/tools/run.sh -v' }), 'run.sh -v');
   assert.equal(summarizeToolInput('Bash', { command: './scripts/deploy.sh' }), 'deploy.sh');
   // 引用符・変数展開が混じった語は、名前だけ切り出しても実体を表さないので落とす
   assert.equal(summarizeToolInput('Bash', { command: '"C:\\Program Files\\x\\a.exe" -q' }), null);
   assert.equal(summarizeToolInput('PowerShell', { command: '$env:FOO=1; Get-Item x' }), null);
   assert.equal(summarizeToolInput('Bash', { command: 'cd /home/me/private && ls' }), 'cd');
+});
+
+test('シェルの先頭語に続く語は、何を走らせたかが分かるものを 3 語まで — 拡張子の無いパス・引用符・演算子で止める', () => {
+  // どのテストを走らせたかを手順の要約で読めるように (帰属の材料)
+  assert.equal(summarizeToolInput('PowerShell', { command: 'node --test test/harness.test.js' }), 'node --test harness.test.js');
+  assert.equal(
+    summarizeToolInput('Bash', { command: 'node --test --experimental-test-isolation=none test/*.test.js' }),
+    'node --test --experimental-test-isolation=none *.test.js',
+  );
+  assert.equal(summarizeToolInput('Bash', { command: 'node scripts/harness-report.mjs --bot opus' }), 'node harness-report.mjs --bot opus');
+  assert.equal(summarizeToolInput('Bash', { command: 'npx eslint .' }), 'npx eslint');
+  assert.equal(summarizeToolInput('Bash', { command: 'git commit -m "feat: x"' }), 'git commit -m');
+  assert.equal(summarizeToolInput('Bash', { command: 'git -C C:/Users/me/repo status' }), 'git -C');
+  assert.equal(summarizeToolInput('Bash', { command: 'npm test | tail -5' }), 'npm test');
+  assert.equal(summarizeToolInput('Bash', { command: 'ls $HOME' }), 'ls');
+  assert.equal(summarizeToolInput('Bash', { command: 'a b c d e' }), 'a b c d');
 });
 
 test('引数が多いツールは打ち切りを … で示す', () => {
@@ -139,7 +157,7 @@ test('実行されなかったツールは記録しない (実行後イベント
 
 test('失敗した実行も記録する (PostToolUse は成功時しか発火しない)', () => {
   // 落ちた npm test が軌跡から消えると、総数が過少になり「実行した証拠」として使えない
-  assert.deepEqual(failedEntry(), { tool: 'PowerShell', arg: 'npm', failed: true });
+  assert.deepEqual(failedEntry(), { tool: 'PowerShell', arg: 'npm test', failed: true });
   // 成功時は failed を持たせない (1 job で数百行になるファイルを短く保つ)
   assert.deepEqual(traceEntryFrom(done('Read', { file_path: '/a/b.js' })), { tool: 'Read', arg: 'b.js' });
 
@@ -150,7 +168,7 @@ test('失敗した実行も記録する (PostToolUse は成功時しか発火し
   ]);
   assert.equal(summary.total, 3);
   assert.equal(summary.failed, 2);
-  assert.equal(formatTraceLine(summary), '🔧 ツール 3 件 (うち失敗 2): PowerShell×2 (npm) / Read×1 (b.js)');
+  assert.equal(formatTraceLine(summary), '🔧 ツール 3 件 (うち失敗 2): PowerShell×2 (npm test) / Read×1 (b.js)');
   // 失敗が無ければ注記そのものを出さない
   assert.equal(
     formatTraceLine(summarizeTrace([traceEntryFrom(done('Read', { file_path: '/a/b.js' }))])),
@@ -208,4 +226,45 @@ test('軌跡の投稿が失敗しても呼び出し側へ throw しない (hando
   // 成功時は通知を呼ばない
   await postTraceQuietly(async () => 'ok', 'x', () => seen.push('呼ばれてはいけない'));
   assert.equal(seen.length, 2);
+});
+
+test('手順の要約: 読むだけの手を畳み、編集・コマンド・失敗を順に残す', () => {
+  const steps = [
+    { tool: 'Read', arg: 'a.js' }, { tool: 'Grep' }, { tool: 'Read', arg: 'b.js' },
+    { tool: 'Edit', arg: 'a.js' }, { tool: 'Edit', arg: 'a.js' },
+    { tool: 'PowerShell', arg: 'node --test a.test.js', failed: true },
+    { tool: 'Edit', arg: 'a.js' },
+    { tool: 'PowerShell', arg: 'node --test a.test.js' },
+    { tool: 'TodoWrite' },
+    { tool: 'Bash' },
+  ];
+  assert.equal(
+    digestTrace(steps),
+    '読む×3 → 編集 a.js×2 → $ node --test a.test.js ✗ → 編集 a.js → $ node --test a.test.js → TodoWrite → $ ?',
+  );
+  assert.equal(digestTrace([]), null);
+  assert.equal(digestTrace([{ tool: '' }]), null);
+});
+
+test('手順の要約が長いときは頭と尻を残し、真ん中を手の数で畳む', () => {
+  const steps = Array.from({ length: 40 }, (_, i) => ({ tool: 'Edit', arg: `f${i}.js` }));
+  const digest = digestTrace(steps, { maxChars: 80 });
+  assert.ok(digest.length <= 80, digest);
+  assert.match(digest, /^編集 f0\.js → /);
+  assert.match(digest, / → 編集 f39\.js$/);
+  const [, elided] = digest.match(/… (\d+) 手 …/);
+  const shown = digest.split(' → ').filter((p) => p.startsWith('編集')).length;
+  assert.equal(Number(elided) + shown, 40, '畳んだ手と見せた手の合計が元の手の数と合わない');
+});
+
+test('手順の全部は 1 手 1 行・時刻は UTC・失敗に ✗', () => {
+  const at = Date.UTC(2026, 9, 13, 10, 9, 20);
+  assert.deepEqual(formatTraceSteps([
+    { tool: 'Read', arg: 'a.js', at },
+    { tool: 'Bash', arg: 'npm test', failed: true },
+    { tool: '' },
+  ]), [
+    '1. 10:09:20 Read a.js',
+    '2. Bash npm test ✗',
+  ]);
 });

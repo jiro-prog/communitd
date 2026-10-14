@@ -200,6 +200,27 @@ export function stripMarkerLines(text) {
   return dropLines(lines, dropped);
 }
 
+/**
+ * 末尾の制御フッターから呼び出し (handoff / notify) の行だけを外す。
+ * 契約として扱えなかった本文を出すときに使う (src/bridge/job.js) — 呼び出しを生かすと
+ * 契約の無い委譲 (touch 制限の効かない handoff) が開く。
+ * 判定は resolveOutgoingText と同じ: 実行されない行 (コード内・不可視文字入り・本文の途中) と
+ * 呼び出しではない attach には触らない。
+ * @returns {{text: string, removed: string[]}} removed = 外した行 (前後の空白は落とす)
+ */
+export function stripFooterControls(raw) {
+  const text = normalizeNewlines(raw);
+  const { lines, markers } = scanMarkers(text);
+  const live = markers.filter((m) => !m.inCode && !m.invisible);
+  const footerStart = footerStartLine(lines, live);
+  const controls = live.filter((m) => (m.kind === 'handoff' || m.kind === 'notify') && m.line >= footerStart);
+  if (controls.length === 0) return { text, removed: [] };
+  return {
+    text: dropLines(lines, new Set(controls.map((m) => m.line))),
+    removed: controls.map((m) => lines[m.line].trim()),
+  };
+}
+
 /** 指定行を落として本文を組み直す (空行の連続は畳む) */
 function dropLines(lines, dropped) {
   return lines
@@ -525,7 +546,7 @@ export function sendControlMention(channel, mention, { suffix = '' } = {}) {
   return sendSafe(channel, `<@${mention.userId}>${tail}`, { mentionUserIds: [mention.userId] });
 }
 
-// ---- 自律運転のタスクスレッド ----
+// ---- 自律運転のタスクスレッド (docs/social-engineering.md §3.1) ----
 
 /** Discord のスレッド名の上限 */
 export const MAX_THREAD_NAME_CHARS = 100;
@@ -539,14 +560,34 @@ export const MAX_THREAD_NAME_CHARS = 100;
  */
 export const MAX_TASK_START_CHARS = 1900;
 
+/**
+ * スカウトの起動文でボードの 1 行に載せる題の上限 (超えた分は … で切る)。
+ *
+ * 題は「主題 — 詳細」の形で数百字になるので、そのまま並べると 1 通に数行しか入らず、
+ * 残りが「…ほか n 件」に畳まれて二重起票を避ける材料にならない。
+ */
+export const MAX_SCOUT_TITLE_CHARS = 100;
+
 /** 見出しへ入れる 1 行 (改行と連続空白を潰す) */
 const oneLine = (text) => String(text ?? '').replace(/\s+/g, ' ').trim();
+
+/**
+ * スカウトの一覧に載せる題。「 — 」の前 (主題) だけを残し、それでも長ければ
+ * `MAX_SCOUT_TITLE_CHARS` 字 + … に切る (「 — 」が無い題は全体を同じく切る)。
+ */
+function scoutTitle(title) {
+  const line = oneLine(title);
+  const subject = line.split(' — ')[0] || line;
+  return subject.length > MAX_SCOUT_TITLE_CHARS
+    ? `${subject.slice(0, MAX_SCOUT_TITLE_CHARS)}…`
+    : subject;
+}
 
 /**
  * タスク用スレッドの名前。`task/<id> <タイトル>` を Discord の上限へ丸める。
  *
  * id を先頭に置くのは、スレッド名からボードのタスクを引けるようにするため
- * (スレッドとタスクは 1:1)。タイトルが長いときに削るのはタイトル側。
+ * (§3.2 スレッドとタスクは 1:1)。タイトルが長いときに削るのはタイトル側。
  */
 export function taskThreadName(task, { max = MAX_THREAD_NAME_CHARS } = {}) {
   const prefix = `task/${oneLine(task?.id)}`;
@@ -567,7 +608,7 @@ export function taskThreadName(task, { max = MAX_THREAD_NAME_CHARS } = {}) {
  * @param {object} p
  * @param {object} p.task ボードのタスク (id / title / rationale / branch / jobBudget)
  * @param {string} p.botUserId 起こす担当の Discord ユーザー ID
- * @param {string} [p.directionFile] 方向性ドキュメントのパス
+ * @param {string} [p.directionFile] 方向性ドキュメントのパス (§3.4)
  */
 export function taskStartMessage({
   task = {}, botUserId, directionFile = '', max = MAX_TASK_START_CHARS,
@@ -608,8 +649,109 @@ export function taskStartMessage({
   return build(room > 0 ? `${reason.slice(0, room)}…` : '…').slice(0, max);
 }
 
+/** レビューの依頼に載せる承認時の備考の上限 (落ちた検証の段と合わせて契約の本文に収める) */
+export const MAX_REVIEW_APPROVAL_CHARS = 2500;
+
+/** 承認時の備考を分けて出すときの 2 通目以降の見出し */
+const APPROVAL_NOTE_CONTINUED = '### 承認時の備考 (続き)\n';
+
 /**
- * 差し戻しの再開メッセージ (review → in-progress)。
+ * 着手の起動文の**直前**に出す「承認時の備考」(§3.2)。無ければ空配列。
+ *
+ * 承認する側は「着手する人への注意」(触る範囲・設計の穴) を承認の本文に書くが、それは承認の
+ * スレッドにしか出ず、別スレッドで起こされる着手者には届かなかった。起動文は 1 通に収める
+ * 約束があるので (MAX_TASK_START_CHARS)、備考は別の通にしてメンションより前に置く —
+ * 前に置けば着手者の最初の job の文脈 (遡り分) に必ず入る。
+ *
+ * **切らずに分ける** — 注意は ①〜③ の確認の後、本文の末尾に書かれることが多いので、
+ * 1 通に収めようと末尾を切ると、運びたいところから消える。
+ * **どの通も運用の接頭辞 (INFRA_PREFIXES) で始めない** — 始めると文脈から外され、出す意味が
+ * 無くなる (2 通目以降は「(続き)」の見出しで始める)。生メンションは潰す (受信側は生の content で
+ * 起動を判定する)。
+ * @returns {string[]} 出す順の本文 (どれも size 字以内)
+ */
+export function approvalNoteMessages({ note = '', approver = '', size = MAX_TASK_START_CHARS } = {}) {
+  const text = neutralizeRawMentions(String(note ?? '').trim()).text;
+  if (!text) return [];
+  const who = oneLine(approver);
+  const head = [
+    `### 承認時の備考${who ? ` (${who})` : ''}`,
+    '承認した側の本文です。着手する人への注意が含まれていれば着手前に読み、'
+      + '従わないときは理由を報告に書いてください。',
+    '',
+  ].join('\n');
+  return chunkText(`${head}\n${text}`, size - APPROVAL_NOTE_CONTINUED.length)
+    .map((chunk, i) => (i === 0 ? chunk : `${APPROVAL_NOTE_CONTINUED}${chunk}`));
+}
+
+const SCOUT_REPORT_CONTINUED = '### 前回の巡回の報告 (続き)\n';
+
+/**
+ * 巡回 (スカウト) の起動文の**直前**に出す「前回の巡回の報告」。前回が無ければ空配列。
+ *
+ * スカウトは毎回新しいスレッド・新しいセッションで始まるので、前回が本文に書いた「次の巡回への申し送り」が
+ * 次の巡回に届かなかった。承認時の備考と同じく別の通にし、メンションより前に置く (前に置けば最初の job の
+ * 文脈に入る)。生メンションは潰し、制御フッターの行は外す (本文ではなく材料として読ませる)。
+ *
+ * @param {{report?: {at: number, proposed: number, body: string}|null, size?: number}} p
+ * @returns {string[]} 出す順の本文 (どれも size 字以内)
+ */
+export function scoutReportMessages({ report = null, size = MAX_TASK_START_CHARS } = {}) {
+  if (!report) return [];
+  const text = neutralizeRawMentions(stripFooterControls(report.body).text.trim()).text;
+  const at = formatJst(report.at, { label: false });
+  const proposed = Number.isSafeInteger(report.proposed) && report.proposed >= 0 ? report.proposed : '?';
+  const head = [
+    `### 前回の巡回${at ? ` (${at.slice(5)} JST)` : ''} の報告 — 提案 ${proposed} 件`,
+    '参考。判断は今回の巡回で',
+  ].join('\n');
+  return chunkText(text ? `${head}\n\n${text}` : head, size - SCOUT_REPORT_CONTINUED.length)
+    .map((chunk, i) => (i === 0 ? chunk : `${SCOUT_REPORT_CONTINUED}${chunk}`));
+}
+
+const CARRY_CONTINUED = '### 申し送り (続き)\n';
+
+/**
+ * 企画の巡回の起動文の**直前**に出す「申し送り」(src/scheduler.js の addCarry が溜めたもの)。無ければ空配列。
+ *
+ * 巡回 (スカウトなど) が起票しない気づきと、作者の手が要るものを `carry` に書き、企画の巡回がまとめてさばく
+ * (2026-10-14 作者「いちいち僕に来るならめんどくさい」)。承認時の備考と同じく、起動文の 1 通に収める約束を
+ * 崩さないよう別の通にし、メンションより前に置く (前に置けば企画役の最初の job の文脈に入る)。
+ * 生メンションは潰し、制御フッターの表記は外す (本文ではなく材料として読ませる)。
+ *
+ * @param {{items?: Array<{at: number, from: string, text: string}>, size?: number}} p
+ * @returns {string[]} 出す順の本文 (どれも size 字以内)
+ */
+export function carryMessages({ items = [], size = MAX_TASK_START_CHARS } = {}) {
+  const list = Array.isArray(items) ? items : [];
+  const lines = list.map((item) => {
+    const text = neutralizeRawMentions(oneLine(item?.text).replace(/\[\[(?:handoff|notify)[^\]]*\]\]/gi, '')).text.trim();
+    const at = formatJst(item?.at, { label: false });
+    return text ? `- ${at ? `${at.slice(5)} ` : ''}${oneLine(item?.from) || '?'}: ${text}` : '';
+  }).filter(Boolean);
+  if (lines.length === 0) return [];
+  const head = [
+    `### 申し送り (前の企画の巡回の後 ${lines.length} 件)`,
+    '巡回が起票しなかった気づきと、作者の手が要るものです。起動文の手順で 1 件ずつさばいてください。',
+    '',
+  ].join('\n');
+  return chunkText(`${head}\n${lines.join('\n')}`, size - CARRY_CONTINUED.length)
+    .map((chunk, i) => (i === 0 ? chunk : `${CARRY_CONTINUED}${chunk}`));
+}
+
+/**
+ * レビューの依頼 (契約の本文) に足す承認時の備考の段。無ければ空文字。
+ * Discord には出ない (制御メンションはタグだけ) ので、長さは契約の本文の上限から割り当てる。
+ */
+export function reviewApprovalSection(note, { maxChars = MAX_REVIEW_APPROVAL_CHARS } = {}) {
+  const text = String(note ?? '').trim();
+  if (!text) return '';
+  const body = text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+  return '\n\n承認時の備考 (承認した側が着手する人へ残した注意を含む — 守られているかも見る):\n' + body;
+}
+
+/**
+ * 差し戻しの再開メッセージ (§3.2 の review → in-progress)。
  *
  * **理由をそのまま載せる。** レビューの本文はスレッドに出ているが、直す側の job は
  * この 1 通で起こされるので、何を直すのかがここに無いと読み落とす経路ができる。
@@ -661,8 +803,24 @@ export function scoutThreadName(now, { max = MAX_THREAD_NAME_CHARS } = {}) {
   return `scout/${at}`.slice(0, max);
 }
 
+/** ハーネスの改訂の巡回のスレッド名 (scoutThreadName と同じ暦で刻む) */
+export function harnessThreadName(now, { max = MAX_THREAD_NAME_CHARS } = {}) {
+  const ms = now instanceof Date ? now.getTime() : (typeof now === 'number' ? now : Number.NaN);
+  const at = formatJst(ms);
+  if (at === null) return 'harness';
+  return `harness/${at}`.slice(0, max);
+}
+
+/** 企画の巡回のスレッド名 (scoutThreadName と同じ暦で刻む) */
+export function planThreadName(now, { max = MAX_THREAD_NAME_CHARS } = {}) {
+  const ms = now instanceof Date ? now.getTime() : (typeof now === 'number' ? now : Number.NaN);
+  const at = formatJst(ms);
+  if (at === null) return 'plan';
+  return `plan/${at}`.slice(0, max);
+}
+
 /**
- * `work` / `process` 提案の裁定を経営裁量の bot へ頼む文面。
+ * `work` / `process` 提案の裁定を経営裁量の bot へ頼む文面 (§3.9)。
  *
  * **この経路が無いと提案は永久に滞留する** (sol 指摘 2026-08-30) — org には作者の
  * 裁定カードがあるが、work / process は「bot はボタンを押せないので report の
@@ -722,7 +880,7 @@ export function adjudicationRequestMessage({
 }
 
 /**
- * 裁定依頼を落とすスレッドの名前。`proposal/<id> <要旨>`。
+ * 裁定依頼を落とすスレッドの名前 (§3.9)。`proposal/<id> <要旨>`。
  *
  * 発議元のスレッドが archive されているときに**親チャンネルへ直接投げない**ため
  * (sol 指摘 2026-08-30)。bot 起点の投稿はスレッドの中だけが job になるので、
@@ -737,7 +895,7 @@ export function adjudicationThreadName(proposal = {}, { max = MAX_THREAD_NAME_CH
 }
 
 /**
- * 発議の巡回スレッドの名前。`initiative/<duty>/<JST>`。
+ * 発議の巡回スレッドの名前 (§3.9)。`initiative/<duty>/<JST>`。
  * duty を名前に入れるのは、同じ日に別の duty が回ったとき一覧で区別するため。
  */
 export function initiativeThreadName(duty, now, { max = MAX_THREAD_NAME_CHARS } = {}) {
@@ -748,9 +906,9 @@ export function initiativeThreadName(duty, now, { max = MAX_THREAD_NAME_CHARS } 
 }
 
 /**
- * 発議 job の起動メッセージ (発議 3 経路のうち (2) と (3) が共用する)。
+ * 発議 job の起動メッセージ (§3.9 の発議 3 経路のうち (2) と (3) が共用する)。
  *
- * **「提案なし」を正常と書いておく**のが要点 (「budget はノルマではなく上限であり、
+ * **「提案なし」を正常と書いておく**のが要点 (§3.8「budget はノルマではなく上限であり、
  * 『提案なし』が正常な巡回も認める」)。書かないと、観測して何も無かった巡回が
  * 無理やり提案をひねり出す — 発議の質は裁定の負荷にそのまま乗る。
  *
@@ -761,7 +919,7 @@ export function initiativeThreadName(duty, now, { max = MAX_THREAD_NAME_CHARS } 
  * @param {string} p.botUserId 担当 bot の Discord ユーザー ID
  * @param {string} p.duty 起こす duty のキー
  * @param {string} [p.trigger] 起こした理由 (定期巡回なら空、イベントならその説明)
- * @param {string} [p.directionFile] 方向性ドキュメントのパス
+ * @param {string} [p.directionFile] 方向性ドキュメントのパス (§3.4)
  * @param {Array<{id: string, class: string, state: string, summary: string}>} [p.openProposals]
  *   その duty で今 open な提案 (重ねて発議させないための材料)
  * @param {string} [p.schemaTag] 起こす job の様式を決める目印 (src/contract.js の formatSchemaTag)
@@ -821,25 +979,44 @@ export function initiativeStartMessage({
 }
 
 /**
- * スカウト job の起動メッセージ。
+ * スカウト job の起動メッセージ (§3.3)。
  *
  * **ボードの現状を渡すのが要点。** 何が既に起票されているか分からないまま巡回させると、
- * 同じ改善を何度も起票して承認側の負担になる。長くなったら一覧の方を削る
- * (規律の側を削ると、様式も 0 件の許可も伝わらなくなる)。
+ * 同じ改善を何度も起票して承認側の負担になる。長くなったら一覧の方を末尾から削る
+ * (規律の側を削ると、様式も 0 件の許可も伝わらなくなる)。題は主題だけに縮めて
+ * (`scoutTitle`) 1 通に載る行数を稼ぐ — 重複を見分けるには主題で足りる。
  *
  * 1 行目が `<@botId>` ちょうどなのは taskStartMessage と同じ理由 —
  * **担当自身の client から投げないこと** (多行の自分の発言は捨てられる)。
  *
  * @param {object} p
  * @param {string} p.botUserId スカウト担当の Discord ユーザー ID
- * @param {string} [p.directionFile] 方向性ドキュメントのパス
+ * @param {string} [p.directionFile] 方向性ドキュメントのパス (§3.4)
  * @param {Array<{id: string, state: string, title: string}>} [p.openTasks]
- *   いまボードにあるもの (非終端すべてと、直近に merged になったもの。
+ *   いまボードにあるもの (§9.1 — 非終端すべてと、直近に merged になったもの。
  *   選ぶのは `scoutBoardView` — src/board.js)
+ * @param {{file: string, active: Array<{slug: string, title: string, weight?: string}>}|null} [p.themes]
+ *   企画の巡回が決めた進行中の主題 (src/themes.js)。企画の巡回を置いていなければ null。
+ *   weight = その主題のタスクが使った重さの文面 (themeCostText) で、題の後ろに付ける (無ければ付けない)
  */
 export function scoutStartMessage({
-  botUserId, directionFile = '', openTasks = [], max = MAX_TASK_START_CHARS,
+  botUserId, directionFile = '', openTasks = [], themes = null, max = MAX_TASK_START_CHARS,
 } = {}) {
+  const active = Array.isArray(themes?.active) ? themes.active : [];
+  const themeRules = !themes
+    ? []
+    : active.length === 0
+      ? [`- 進行中の主題は無い (\`${oneLine(themes.file)}\`) — 方向性ドキュメントの方向から選ぶ`]
+      : [
+        `- **進行中の主題 (\`${oneLine(themes.file)}\`) の次の 1 歩を優先する:** `
+          + active.map((t) => `\`${oneLine(t.slug)}\` ${oneLine(t.title).slice(0, 60)}${oneLine(t.weight)}`).join(' / '),
+        '- 主題のタスクは題の頭に `[slug]` を付ける (企画の巡回が進み具合を数える)。主題ファイル自体は触らない',
+      ];
+  // 申し送りは企画の巡回が回収する — 企画の巡回を置いたチャンネルだけで言う (置いていなければ届かない)
+  const carryRule = themes
+    ? ['- 起票しない気づき (回し方の無駄・詰まり) と作者の手が要るもの (配備・`/retry`・設定) は `carry` (申し送り) に書く '
+      + '— 次の企画の巡回がまとめてさばく。`[[notify:owner]]` で作者を直接呼ばない']
+    : [];
   const head = [
     `<@${botUserId}>`,
     '',
@@ -856,18 +1033,20 @@ export function scoutStartMessage({
       ? `- まず \`${directionFile}\` (方向性ドキュメント) を読む — `
         + '方向・やらないこと・粒度・品質基準はそこが正本'
       : '- 方向性ドキュメントが設定されていない — 起票せず、その旨を報告すること',
+    ...themeRules,
     '- 1 タスク = 1 スレッドで完結する大きさに割る',
     '- 返答は **task-proposal 様式** (本文 / 起票するタスク) で返す',
     '- **1 件ごとに touch (触るファイルの相対パス) を宣言する。** 宣言の無い起票はボードが断る '
       + '— 触る場所が分からないタスクがあると、そのチャンネルでは組織提案が全件拒否されるため',
     '- **0 件も正しい報告。** 起票するに値するものが無ければ空配列で返すこと',
+    ...carryRule,
     '- **本文に制御フッタ ([[handoff:...]]) を書かないこと。** '
       + '承認はブリッジが自動で回すので、書くと承認担当が二重に起動する',
   ];
   const build = (items) => [...head, ...items, ...tail].join('\n');
 
   const lines = (Array.isArray(openTasks) ? openTasks : []).map(
-    (task) => `- [${oneLine(task?.state)}] ${oneLine(task?.id)}: ${oneLine(task?.title)}`,
+    (task) => `- [${oneLine(task?.state)}] ${oneLine(task?.id)}: ${scoutTitle(task?.title)}`,
   );
   if (lines.length === 0) return build(['- (なし)', '']).slice(0, max);
 
@@ -880,4 +1059,151 @@ export function scoutStartMessage({
   }
   const dropped = lines.length - kept.length;
   return build([...kept, ...(dropped > 0 ? [`- …ほか ${dropped} 件`] : []), '']).slice(0, max);
+}
+
+/**
+ * ハーネスの改訂の巡回の起動メッセージ (src/harness.js、arXiv 2609.35738)。
+ *
+ * 提案役に渡すのは論文の実行レポートに当たるもの — bot ごとの「今の版 ← 前の版」の成績と判定。
+ * 問題の抜粋は 1 通に収まらないので、詳細は提案役が `scripts/harness-report.mjs` で読む
+ * (論文が今後の課題に挙げた「提案役が自分で調べる」側に寄せている)。長すぎたら成績の行を削る
+ * (規律の側を削ると、改訂の範囲と 0 件の許可が伝わらない)。
+ *
+ * @param {object} p
+ * @param {string} p.botUserId 提案役の Discord ユーザー ID
+ * @param {string[]} [p.verdictLines] bot ごとの判定 (src/harness.js の verdictLine)
+ * @param {string} [p.gateReason] 巡回を起こした理由 (harnessGate の reason)
+ * @param {string[]} [p.editable] 改訂してよい役割文のパス (提案役自身と、成績に出ない bot の役割文は除く)
+ * @param {string[]} [p.ledgerLines] いちばん新しい改訂の台帳 (src/harness.js の ledgerStartLines)。
+ *   arXiv 2610.02616 (VERSE) の訓練の監査 — 前の改訂の狙いが当たったかを、次の改訂の前に読ませる
+ * @param {boolean} [p.carry] 申し送り (`carry`) が企画の巡回へ届くか (企画の巡回を置いたチャンネル)。
+ *   届くなら model / effort の変更もそこへ書かせ、作者を直接呼ばせない
+ */
+export function harnessStartMessage({
+  botUserId, verdictLines = [], gateReason = '', editable = [], ledgerLines = [], carry = false,
+  max = MAX_TASK_START_CHARS,
+} = {}) {
+  const files = (Array.isArray(editable) ? editable : []).map((f) => `\`${oneLine(f)}\``).join(' / ');
+  const head = [
+    `<@${botUserId}>`,
+    '',
+    '## ハーネスの改訂 (巡回)',
+    'bot は「モデル + ハーネス (役割文と runtime / model / effort)」で動いています。実行記録から版ごとの成績を出したので、'
+      + '役割文を 1 か所直す改訂を起票するか判断してください (実行のフィードバックで直し、測って下がったら戻す)。',
+    '',
+    `### 成績 (bot ごとに 今の版 ← 前の版${gateReason ? ` / ${oneLine(gateReason)}` : ''})`,
+  ];
+  const ledger = (Array.isArray(ledgerLines) ? ledgerLines : []).map((line) => `- ${oneLine(line)}`);
+  const tail = [
+    ...(ledger.length > 0 ? ['', '### 前の改訂 (台帳)', ...ledger] : []),
+    '',
+    '### 進め方',
+    '- 詳細 (改訂の台帳・問題の抜粋と手順・差し戻しの理由) は `node scripts/harness-report.mjs` で読む (`--bot` / `--excerpts` で絞れる。'
+      + '1 job の手順の全部は `--trace <job id>`)',
+    ...(ledger.length > 0
+      ? ['- **前の改訂の狙いが当たったか** (狙った失敗が再発したか・別の失敗が出たか) を抜粋と手順で確かめ、本文 (body) の頭に 1 行書く (0 件でも)']
+      : []),
+    '- **起票は 0 件か 1 件。** 1 件 = 役割文の 1 か所の改訂。理由に「どの抜粋の再発を減らすか・何が変わるはずか」を書く',
+    '- 判定が「悪化」の bot がいれば、その版を入れた commit を戻すタスクを先に起票する',
+    '- 「同等」「改善」「比較相手なし」「未確定」は戻す根拠にならない — 問題の抜粋に共通する原因から次の 1 か所を選ぶか、0 件',
+    files ? `- 直してよいのは ${files} だけ (touch もこの中)` : '- 直してよい役割文が無い — 起票しないこと',
+    '- 変えない: 1〜2 行目の `communitd-protocol` / `communitd-schema` の宣言、安全の門 (verify・hop・touch・承認・'
+      + '自己レビューの禁止・停止契約) を緩める文面。model / effort の変更は起票せず '
+      + (carry ? '`carry` (申し送り) に書く (次の企画の巡回がまとめて作者に上げる)' : '`[[notify:owner]]` で上げる'),
+    '- 役割文は merge した瞬間に全 bot へ効く。次の改訂はこの版を測り終えてから (ブリッジが待つ)',
+    '- 返答は **task-proposal 様式**。**0 件も正しい報告**。本文に制御フッタ ([[handoff:...]]) を書かない',
+  ];
+  const build = (items) => [...head, ...items, ...tail].join('\n');
+  const lines = (Array.isArray(verdictLines) ? verdictLines : []).map((line) => `- ${oneLine(line)}`);
+  if (lines.length === 0) return build(['- (記録なし)']).slice(0, max);
+  const kept = [];
+  for (const [i, line] of lines.entries()) {
+    const rest = lines.length - i - 1;
+    if (build([...kept, line, ...(rest > 0 ? [`- …ほか ${rest} 体`] : [])]).length > max) break;
+    kept.push(line);
+  }
+  const dropped = lines.length - kept.length;
+  return build([...kept, ...(dropped > 0 ? [`- …ほか ${dropped} 体`] : [])]).slice(0, max);
+}
+
+/**
+ * 企画の巡回の起動メッセージ (src/themes.js、§3.3c)。
+ *
+ * 企画役に渡すのは主題の現状 (進行中の主題とそのタスクの進み具合・完了 / 取り下げの数) と、
+ * **考え抜く手順** (振り返り → 候補 3 つ以上 → 自分で反論 → 0〜1 件)。材料 (方向性ドキュメント・
+ * ボード・ハーネスの成績・回し方の成績・引き継ぎ・メモ) は企画役が自分で読む。長すぎたら主題の行を削る
+ * (手順と柵の側を削ると、考え方と範囲が伝わらない)。
+ *
+ * @param {object} p
+ * @param {string} p.botUserId 企画役の Discord ユーザー ID
+ * @param {string} p.themesFile 主題ファイルのパス (cwd 基準)
+ * @param {string} [p.directionFile] 方向性ドキュメントのパス (範囲と柵の正本)
+ * @param {'add'|'review'} [p.mode] add = 新しい主題を足してよい / review = 上限なので振り返りだけ
+ * @param {string} [p.reason] 巡回を起こした理由 (themesGate の reason)
+ * @param {string[]} [p.themeLines] 主題の行 (進行中の主題と進み具合・完了 / 取り下げの数・読めない見出し)
+ * @param {string[]} [p.loopLines] 回し方の数字 (スカウトの空振りと間隔・日次の消費 — ブリッジの勘定)。
+ *   2026-10-14 作者「こういう提案すらエージェントたちに出して欲しい」— 設定は主題にできないので、
+ *   数字を渡して `[[notify:owner]]` で上げさせる
+ * @param {number} [p.carryCount] この起動文の前に出した申し送りの件数 (carryMessages)。同日の作者
+ *   「いちいち僕に来るならめんどくさい」— 作者を呼ぶのは企画の巡回だけ、1 回で 1 通にまとめる
+ */
+export function planStartMessage({
+  botUserId, themesFile = '', directionFile = '', mode = 'add', reason = '', themeLines = [], loopLines = [],
+  carryCount = 0, max = MAX_TASK_START_CHARS,
+} = {}) {
+  const file = `\`${oneLine(themesFile) || '(主題ファイル未設定)'}\``;
+  const head = [
+    `<@${botUserId}>`,
+    '',
+    '## 企画の巡回 — 自律ループの次の主題',
+    '自律ループ (スカウト → 実装 → レビュー) が次に何を伸ばすかを、主題として考え抜いて決めてください。'
+      + '主題は承認 → 実装 → レビューを経て取り込まれ、スカウトがタスクに割ります。',
+    '',
+    `### 主題 (${file}${reason ? ` / ${oneLine(reason)}` : ''})`,
+  ];
+  const loop = (Array.isArray(loopLines) ? loopLines : []).map((line) => `- ${oneLine(line)}`);
+  const tail = [
+    ...(loop.length > 0 ? ['', '### 回し方 (ブリッジの勘定)', ...loop] : []),
+    '',
+    '### 進め方',
+    `- 読む: ${directionFile ? `\`${oneLine(directionFile)}\` (範囲と柵の正本)・` : ''}${file} (今と過去の主題と結果)・`
+      + 'ボード (題の頭の `[slug]` が主題のタスク)・`node scripts/harness-report.mjs` (成績と問題の抜粋)・'
+      + '`node scripts/loop-report.mjs --channel <チャンネル名>` (回し方の成績)・'
+      + '引き継ぎとメモ (積み残し・壁打ち・論文の読み)',
+    '1. **振り返り**: 進行中の主題を「できた」の基準と照らす。満たした / 進まない理由がはっきりした主題は '
+      + '`[done]` / `[dropped]` にし、結果 (関わったタスク・学び 1 行) を残す。残りが配備 (`/restart`) や時間の経過を'
+      + '待つ確認だけなら `[waiting]` にする (枠に数えず、スカウトも割らない。確かめたら `[done]` / `[dropped]`)',
+    mode === 'review'
+      ? '2. **主題は上限** — 振り返りで枠を空けない限り新しい主題は足さない。空けたら同じ 1 件で足してよい '
+        + '(候補 3 つ以上 → 反論 → 1 つ。易しい仕事で数を稼ぐ主題は選ばない)'
+      : '2. **候補を 3 つ以上**: それぞれ 根拠 (実測と出どころ)・自律ループのどこが強く / 賢くなるか・'
+        + '「できた」の基準 (確かめられる形)・最初の 2〜3 手・危険',
+    ...(mode === 'review'
+      ? []
+      : ['3. **反論**: 候補ごとに「やらない方がよい理由」を自分で書き、それでも残るものを 1 つ選ぶ。'
+        + '易しい仕事 (テストを足すだけなど) で数を稼ぐ主題は選ばない']),
+    `${mode === 'review' ? '3' : '4'}. **起票は 0 件か 1 件。** touch は ${file} だけ。`
+      + '足す / 書き換える文言をそのまま理由に書く (見出しの形はファイル冒頭)。振り返りの印と新しい主題は 1 件にまとめる',
+    ...(Number.isSafeInteger(carryCount) && carryCount > 0
+      ? [`- **申し送り** (この上の投稿、${carryCount} 件) を 1 件ずつさばき、本文に 1 行ずつ書く: `
+        + '主題で扱う / 捨てる (理由) / 作者にしかできない (配備・`/retry`・設定) のどれか']
+      : []),
+    '- **回し方も振り返る**: 空回りの巡回・日次上限で止まった時間 (loop-report の数字を引く。`node -e` で数え直さない)。'
+      + '変えた方がよい設定と作者にしかできないものは、主題にせず数字を添えて**まとめて 1 通**で上げる '
+      + '(本文の最後に `[[notify:owner]]`。無ければ呼ばない。受信箱 `data/inbox.json` で開いている同じ用件は重ねない)',
+    '- 柵: 方向性ドキュメントの「やらないこと」、役割文 (ハーネスの改訂の領分)・設定・台帳・作者の返事待ちの設計は'
+      + '主題にしない (要るなら `[[notify:owner]]` で上げる)。方向性ドキュメントは書き換えない',
+    '- 返答は **task-proposal 様式**。**0 件も正しい報告**。本文に制御フッタ ([[handoff:...]]) を書かない',
+  ];
+  const build = (items) => [...head, ...items, ...tail].join('\n');
+  const lines = (Array.isArray(themeLines) ? themeLines : []).map((line) => `- ${oneLine(line)}`);
+  if (lines.length === 0) return build(['- (まだ無い — 最初の主題を考える)']).slice(0, max);
+  const kept = [];
+  for (const [i, line] of lines.entries()) {
+    const rest = lines.length - i - 1;
+    if (build([...kept, line, ...(rest > 0 ? [`- …ほか ${rest} 行`] : [])]).length > max) break;
+    kept.push(line);
+  }
+  const dropped = lines.length - kept.length;
+  return build([...kept, ...(dropped > 0 ? [`- …ほか ${dropped} 行`] : [])]).slice(0, max);
 }

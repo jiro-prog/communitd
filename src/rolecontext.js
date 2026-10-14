@@ -9,6 +9,7 @@
 // 起こして役割文の後ろへ差し込む。役割文が書くのは「どう振る舞うか」だけ。
 
 import { basename } from 'node:path';
+import { DEFAULT_RUNTIME, capabilitiesOf } from './runtime.js';
 import { OBSERVE_ACTION_KINDS } from './society-policy.js';
 
 /** 書込みとみなす claude ツール名 (プリセット・allowedTools のどちらでも同じ綴り) */
@@ -69,7 +70,7 @@ const ROSTER_SOURCE_LABELS = {
 export function describeWriteAccess({
   runtime, sandbox, allowedTools = [], permissionMode = 'default',
 } = {}) {
-  if (runtime === 'codex') {
+  if (!capabilitiesOf(runtime).pathScopedPermissions) {
     return sandbox === 'workspace-write'
       ? {
           canWrite: true,
@@ -143,8 +144,8 @@ export function describeWriteAccess({
  * @returns {{canUse: boolean, text: string}}
  */
 export function describeSubagentAccess({ runtime } = {}) {
-  if (runtime === 'codex') {
-    return { canUse: false, text: '使えない (codex ランタイムに subagent は無い)' };
+  if (!capabilitiesOf(runtime).subagent) {
+    return { canUse: false, text: `使えない (${capabilitiesOf(runtime).name} ランタイムに subagent は無い)` };
   }
   return {
     canUse: true,
@@ -154,6 +155,15 @@ export function describeSubagentAccess({ runtime } = {}) {
       + '永続状態を変え、hook による別の実行経路も持ちうる**。'
       + '自分が書いた実装の検収には使わない (同じセッションの延長なので自己検証になる)',
   };
+}
+
+/**
+ * 役割文のファイル名から役の名前 (`roles/worker.md` → `worker`)。無ければ null。
+ * 呼べる相手の表示 (下の peerTraits) と受付の「回せる担当」(src/bridge/intake.js) が同じ名前を使う
+ */
+export function roleNameOf(rolePromptFile) {
+  const file = typeof rolePromptFile === 'string' ? rolePromptFile.trim() : '';
+  return file === '' ? null : basename(file).replace(/\.[^.]+$/, '');
 }
 
 /**
@@ -169,9 +179,11 @@ export function describeSubagentAccess({ runtime } = {}) {
  */
 function peerTraits(peer = {}) {
   const traits = [];
-  const file = typeof peer.rolePromptFile === 'string' ? peer.rolePromptFile.trim() : '';
-  if (file !== '') traits.push(basename(file).replace(/\.[^.]+$/, ''));
-  if (peer.runtime && peer.runtime !== 'claude') traits.push(peer.runtime);
+  const role = roleNameOf(peer.rolePromptFile);
+  if (role !== null) traits.push(role);
+  // **綴りは解決しないで出す。** ここは表示で、渡ってくるのは外からの生値
+  // (`capabilitiesOf(...).name` へ通すと、不明な綴りが既定へ倒れて表示から消える)
+  if (peer.runtime && peer.runtime !== DEFAULT_RUNTIME) traits.push(peer.runtime);
   return traits.length > 0 ? ` (${traits.join(', ')})` : '';
 }
 
@@ -185,7 +197,9 @@ function peerTraits(peer = {}) {
  * @param {object} ctx
  * @param {string} ctx.selfKey 自分の bot キー
  * @param {string} [ctx.displayName]
- * @param {string} [ctx.runtime] 'claude' | 'codex'
+ * @param {string} [ctx.runtime] 'claude' | 'codex' | 'pi'
+ * @param {string|null} [ctx.reportTool] 最終報告を道具の引数で受け取る job の道具名 (pi ランタイム —
+ *        src/pi-extension.js)。claude / codex は CLI が最終出力をスキーマで縛るので要らない
  * @param {string} [ctx.channelName]
  * @param {string} [ctx.cwd]
  * @param {string} [ctx.sandbox] codex の sandbox
@@ -213,10 +227,10 @@ function peerTraits(peer = {}) {
  * @returns {string}
  */
 /**
- * 案件に結ばれた job の実行文脈。
+ * 案件に結ばれた job の実行文脈 (docs/society-ledger.md §2〜§5)。
  *
  * **決定権者と自分の Claim の世代をここに書く。** 世代は「いま自分が確定操作をしてよいか」の
- * 根拠で、交代が済んだ後の遅い応答は台帳が弾く — その理由をモデル側にも見せておく。
+ * 根拠で (§4)、交代が済んだ後の遅い応答は台帳が弾く — その理由をモデル側にも見せておく。
  * 次の起動を `next.plan` に限るのもここで言う (自由文の `[[handoff:]]` は Action にならない)。
  *
  * @param {object|null} societyCase `{caseId, desiredOutcome, authority, claimId, claimGeneration,
@@ -280,6 +294,7 @@ export function buildRuntimeContext({
   owner = null,
   handoffFile = null,
   societyCase = null,
+  reportTool = null,
 } = {}) {
   const access = describeWriteAccess({ runtime, sandbox, allowedTools, permissionMode });
   const subagents = describeSubagentAccess({ runtime });
@@ -308,6 +323,14 @@ export function buildRuntimeContext({
   }
   lines.push(`- ファイル権限: ${access.text}`);
   lines.push(`- subagent: ${subagents.text}`);
+  // 役割文の「スキーマで返す」は、このランタイムでは道具の呼び出しで果たす。
+  // 言わないと文章で報告して終え、促されてから出し直すぶん 1 往復余計にかかる
+  if (reportTool) {
+    lines.push(
+      `- 最終報告: 道具 \`${reportTool}\` を**最後に 1 回**呼んで出す。引数がそのまま報告になり`
+        + ' (body が Discord への本文)、文章だけで終えると報告として受け取れない',
+    );
+  }
   // 有効なときは書かない。役割文が既に説明しているうえ、既定側に行が増えると
   // 全 job の system prompt が太る (切ったチャンネルだけが例外的な状態)
   if (structuredOutput === false) {
@@ -318,7 +341,7 @@ export function buildRuntimeContext({
     );
   }
 
-  // 案件に結ばれた job。**この job が誰の何のために
+  // 案件に結ばれた job (docs/society-ledger.md §2〜§5・S2-3a)。**この job が誰の何のために
   // 走っているか**と、次の一手をどこへ書くかを実行文脈で示す。案件が無い job では 1 行も出さない
   lines.push(...describeCase(societyCase));
 

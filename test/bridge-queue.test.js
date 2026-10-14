@@ -71,6 +71,17 @@ test('runItem は開始と終端を実行記録へ書き、成否を勘定へ返
     outcome.gitChanged = false;
     outcome.traceReadable = true;
     outcome.hooks = true;
+    metrics.verifyMs = 1234;
+    metrics.verifyAttempts = 1;
+    metrics.inputTokens = 12;
+    metrics.cacheReadTokens = 45000;
+    metrics.cacheWriteTokens = 0;
+    metrics.outputTokens = 800;
+    // ここから先は Date.now を呼ぶたびに 1 秒進める — runMs を記録とログで別々に測ると秒がずれる
+    const realNow = Date.now;
+    let ticks = 0;
+    Date.now = () => realNow() + (ticks += 1000);
+    t.after(() => { Date.now = realNow; });
     return 'ok';
   }));
   await settle();
@@ -86,12 +97,21 @@ test('runItem は開始と終端を実行記録へ書き、成否を勘定へ返
   assert.equal(record.evidence.gitChanged, false);
   assert.equal(record.evidence.traceReadable, true);
   assert.equal(record.evidence.hooks, true);
+  // job の重さ: 所要・verify の合計と試行回数・トークン 4 種 (0 は取れた値として残す)
+  assert.ok(Number.isSafeInteger(record.evidence.runMs) && record.evidence.runMs >= 1000, `runMs: ${record.evidence.runMs}`);
+  assert.equal(record.evidence.verifyMs, 1234);
+  assert.equal(record.evidence.verifyAttempts, 1, '1 回で通った verify');
+  assert.deepEqual(record.evidence.tokens, { input: 12, cacheRead: 45000, cacheWrite: 0, output: 800 });
+  // ファイルへ書いて読み直しても残る
+  assert.deepEqual(new JobRunStore(h.jobRuns.filePath).get('j1').evidence, record.evidence);
   assert.deepEqual(h.outcomes, [['j1', 'ok']]);
   assert.equal(h.jobs.activeCount, 0, 'レーンが解放されていない');
   const metricsLine = logs.find((l) => l.startsWith('[job j1 opus thread:T1]'));
   assert.ok(metricsLine, '計測ログが出ていない');
   assert.match(metricsLine, /queueWait \d+(\.\d+)?s \/ run \d+(\.\d+)?s/);
   assert.match(metricsLine, /tools 3 件/);
+  // 計測ログの run は記録の runMs と同じ値
+  assert.ok(metricsLine.includes(` / run ${(record.evidence.runMs / 1000).toFixed(1)}s / `), metricsLine);
   assert.match(metricsLine, / \/ ok$/);
 });
 
@@ -110,16 +130,86 @@ test('run が返さなければ ok、throw すれば internal-error として終
   assert.equal(h.jobs.activeCount, 0);
 });
 
-test('verify の結果は evidence.verified へ 3 値 (true / false / null) で写す', async (t) => {
+test('verify の結果は evidence.verified へ 3 値 (true / false / null) で写し、取れない verifyMs・verifyAttempts・tokens は null', async (t) => {
   captureConsole(t);
   const h = harness(t);
-  h.enqueue(item(h.jobRuns, 'v1', async (metrics) => { metrics.verifyPassed = 0; return 'verify-failed'; }));
+  // usage を返さないランタイムの verify NG (Stop hook の差し戻しを 1 回挟んで最終 NG)
+  h.enqueue(item(h.jobRuns, 'v1', async (metrics) => {
+    metrics.verifyPassed = 0;
+    metrics.verifyMs = 500;
+    metrics.verifyAttempts = 2;
+    return 'verify-failed';
+  }));
   h.enqueue(item(h.jobRuns, 'v2', async () => 'ok', { laneKey: 'lane-b' }));
+  // 一部だけ取れた usage は器を残し、数えられない値 (負・小数) だけ null
+  h.enqueue(item(h.jobRuns, 'v3', async (metrics) => {
+    metrics.inputTokens = 7;
+    metrics.cacheReadTokens = -1;
+    metrics.outputTokens = 1.5;
+    return 'ok';
+  }, { laneKey: 'lane-c' }));
+  // 数えられない試行回数 (0・小数・文字列) は null — 1 以上の整数だけを回数として残す
+  const badAttempts = { v4: 0, v5: 1.5, v6: '2' };
+  for (const [id, value] of Object.entries(badAttempts)) {
+    h.enqueue(item(h.jobRuns, id, async (metrics) => {
+      metrics.verifyPassed = 1;
+      metrics.verifyAttempts = value;
+      return 'ok';
+    }, { laneKey: `lane-${id}` }));
+  }
   await settle();
-  assert.equal(h.jobRuns.get('v1').evidence.verified, false);
-  assert.equal(h.jobRuns.get('v2').evidence.verified, null, '検証記録なしは成功と数えない');
+  const v1 = h.jobRuns.get('v1').evidence;
+  assert.equal(v1.verified, false);
+  assert.equal(v1.verifyMs, 500);
+  assert.equal(v1.verifyAttempts, 2, '差し戻しを含む試行回数');
+  assert.equal(v1.tokens, null, 'usage の無い job は tokens ごと null');
+  assert.ok(Number.isSafeInteger(v1.runMs) && v1.runMs >= 0, `runMs: ${v1.runMs}`);
+  const v2 = h.jobRuns.get('v2').evidence;
+  assert.equal(v2.verified, null, '検証記録なしは成功と数えない');
+  assert.equal(v2.verifyMs, null, 'verify の無い job は null');
+  assert.equal(v2.verifyAttempts, null, 'verify の無い job (metrics に鍵が無い) は null');
+  assert.equal(v2.tokens, null);
   // 数えられない toolCalls は null (0 と混ぜない)
-  assert.equal(h.jobRuns.get('v2').evidence.toolCalls, null);
+  assert.equal(v2.toolCalls, null);
+  assert.deepEqual(h.jobRuns.get('v3').evidence.tokens, { input: 7, cacheRead: null, cacheWrite: null, output: null });
+  for (const [id, value] of Object.entries(badAttempts)) {
+    assert.equal(h.jobRuns.get(id).evidence.verifyAttempts, null, `${id}: ${JSON.stringify(value)} を回数として残した`);
+  }
+});
+
+test('job が渡した verify NG の理由は stageDetail に残り、reason は verify-failed の一語のまま', async (t) => {
+  captureConsole(t);
+  const h = harness(t);
+  const detail = 'exit 1: # fail 1 / # cancelled 0 / # skipped 0 / # todo 0 / # duration_ms 812.5';
+  h.enqueue(item(h.jobRuns, 'd1', async (metrics, recorder, outcome) => {
+    metrics.verifyPassed = 0;
+    outcome.verifyDetail = detail;
+    return 'verify-failed';
+  }));
+  // 渡さなければ今までどおり空 (ok で終わった job も)
+  h.enqueue(item(h.jobRuns, 'd2', async () => 'verify-failed', { laneKey: 'lane-b' }));
+  h.enqueue(item(h.jobRuns, 'd3', async () => 'ok', { laneKey: 'lane-c' }));
+  // reason から読めた理由 (failed(...) の中身) があればそちらを採る
+  h.enqueue(item(h.jobRuns, 'd4', async (metrics, recorder, outcome) => {
+    outcome.verifyDetail = detail;
+    return 'failed(spawn ENOENT)';
+  }, { laneKey: 'lane-d' }));
+  // 長すぎる理由は 200 字で切る
+  h.enqueue(item(h.jobRuns, 'd5', async (metrics, recorder, outcome) => {
+    outcome.verifyDetail = `exit 1: ${'x'.repeat(300)}`;
+    return 'verify-failed';
+  }, { laneKey: 'lane-e' }));
+  await settle();
+
+  const ng = h.jobRuns.get('d1');
+  assert.equal(ng.reason, 'verify-failed');
+  assert.equal(ng.outcome, 'verify-failed');
+  assert.equal(ng.stageDetail, detail);
+  assert.equal(h.jobRuns.get('d2').stageDetail, '');
+  assert.equal(h.jobRuns.get('d3').stageDetail, '');
+  assert.equal(h.jobRuns.get('d4').stageDetail, 'spawn ENOENT');
+  assert.equal(h.jobRuns.get('d5').stageDetail.length, 200);
+  assert.deepEqual(h.outcomes.find(([id]) => id === 'd1'), ['d1', 'verify-failed']);
 });
 
 test('受付停止中は pump が 1 本も起こさない (待機分は shutdown が取り消す)', async (t) => {
@@ -186,7 +276,7 @@ test('開始の記録に失敗しても job は走る (記録の失敗で job �
   assert.deepEqual(h.outcomes, [['ghost', 'ok']]);
 });
 
-// ---- 社会の Action に結ぶ job ----
+// ---- 社会の Action に結ぶ job (docs/society-ledger.md §5・S2-2) ----
 
 /** noteRunning / noteSettled の呼ばれ方を記録する偽の society 配線 */
 function fakeSociety({ throws = false } = {}) {

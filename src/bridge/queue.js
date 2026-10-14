@@ -5,6 +5,25 @@
 import { pumpJobs } from '../interactions.js';
 import { formatJobMetrics } from '../queue.js';
 
+/** 記録に残せる非負整数だけ通す (取れなかった値は 0 と混ぜずに null) */
+function countOrNull(v) {
+  return Number.isSafeInteger(v) && v >= 0 ? v : null;
+}
+
+/**
+ * 実消費のトークン 4 種 (計測ログの tok と同じ出どころ)。usage を返さないランタイムと
+ * spawn 前に失敗した job では 4 つとも取れないので、器ごと null にする
+ */
+function tokensOf(metrics) {
+  const tokens = {
+    input: countOrNull(metrics.inputTokens),
+    cacheRead: countOrNull(metrics.cacheReadTokens),
+    cacheWrite: countOrNull(metrics.cacheWriteTokens),
+    output: countOrNull(metrics.outputTokens),
+  };
+  return Object.values(tokens).every((v) => v === null) ? null : tokens;
+}
+
 /**
  * @param {object} deps
  * @param {import('../queue.js').JobQueue} deps.jobs
@@ -69,7 +88,7 @@ export function createJobQueueWiring({
     } catch (err) {
       console.error(`[jobruns] ${item.jobId}: 開始を記録できませんでした (実行は続けます): ${err.message}`);
     }
-    // 社会の Action に結ぶ job なら「走り出した」を台帳へ (running)
+    // 社会の Action に結ぶ job なら「走り出した」を台帳へ (§5 の running)
     const actionId = societyActionOf(item.jobId);
     if (actionId) noteSociety(`${actionId} の running`, () => society.noteRunning(actionId));
     // job 側が終わり方の文脈 (handoff 先・task の遷移・成果の証拠) をここへ書く
@@ -79,8 +98,12 @@ export function createJobQueueWiring({
     } catch (err) {
       console.error(`[job ${item.jobId} ${item.botKey} thread:${item.threadId}] job error`, err);
     } finally {
+      // 実行記録と計測ログで同じ値を使う (別々に測るとずれる)
+      const runMs = Date.now() - startedAt;
       const finished = recorder.finish({
         reason,
+        // verify NG の出口と出力の末尾 (reason は 'verify-failed' の一語のまま — 完全一致で比べる側がある)
+        detail: outcome.verifyDetail ?? '',
         handoff: outcome.handoff ?? null,
         taskState: outcome.taskState ?? null,
         taskSubmitted: outcome.taskSubmitted === true,
@@ -91,9 +114,18 @@ export function createJobQueueWiring({
           hooks: outcome.hooks ?? null,
           // verify の結果 (無ければ null = 検証記録なし。/status は成功と数えない)
           verified: metrics.verifyPassed === 1 ? true : metrics.verifyPassed === 0 ? false : null,
+          // job の重さ。添えるだけで判定・門には使わない。この鍵が無い古い記録は null と読む
+          runMs,
+          // verify の試行の所要の合計 (Stop hook の差し戻しぶんも含む。verify の無い job は null)
+          verifyMs: metrics.verifyMs ?? null,
+          // verify の試行回数 (Stop hook の差し戻しぶんも含む。verify の無い job・途中で止めた job と、数えられない値は null)
+          verifyAttempts: Number.isSafeInteger(metrics.verifyAttempts) && metrics.verifyAttempts >= 1
+            ? metrics.verifyAttempts
+            : null,
+          tokens: tokensOf(metrics),
         },
       });
-      // job の結果を Action へ (settled)。**配送の後**なので、外へ出したものは出し終えている。
+      // job の結果を Action へ (§5 の settled)。**配送の後**なので、外へ出したものは出し終えている。
       // outcome / reason は実行記録と同じ値を使う (台帳と記録で食い違わせない)。
       //
       // **構造化された戻り (`case-turn`) が既に写していれば、ここは何もしない** (S2-3a) —
@@ -113,7 +145,7 @@ export function createJobQueueWiring({
           botKey: item.botKey,
           threadId: item.threadId,
           queueWaitMs: startedAt - item.enqueuedAt,
-          runMs: Date.now() - startedAt,
+          runMs,
           reason,
           ...metrics,
         }),

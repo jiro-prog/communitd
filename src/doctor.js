@@ -1,4 +1,4 @@
-// 導入診断。**読むだけ・純粋。**
+// 導入診断 (docs/implementation-plan.md P7 / docs/social-engineering.md §11.6)。**読むだけ・純粋。**
 //
 // 初めての利用者が「設定は通っているか・CLI は居るか・作業ディレクトリと Git は要件を満たすか・
 // data/ に書けるか」を、モデルも Discord も動かさずに確かめるための判定。
@@ -10,11 +10,15 @@ import { WORKTREE_DIR } from './worktree.js';
 import { checkRoleProtocol } from './protocol.js';
 // CLI の在り処は clicmd.js が正本。**ランタイム側 (claude.js / codex.js) からは取らない** —
 // doctor は「読むだけ」の純粋モジュールなので、子プロセスを起こすモジュールに依存させない
-import { CLAUDE_CLI, CODEX_CLI, cliCmdFailure, cliCmdHint, resolveConfiguredCommand } from './clicmd.js';
+import {
+  CLAUDE_CLI, CODEX_CLI, PI_CLI, cliCmdFailure, cliCmdHint, resolveConfiguredCommand,
+} from './clicmd.js';
 import {
   isExampleCwd, isExampleId, resolveAutonomy, resolveHooksEnabled, resolveVerifyCommand,
 } from './config.js';
 import { isUnsafeCwd } from './project.js';
+// どの runtime で走る bot なのかの解決は runtime.js が正本 (doctor も同じ既定へ倒す)
+import { runtimeOf } from './runtime.js';
 import { resolveSociety } from './society-policy.js';
 // 台帳の分類はランタイムと同じ関数を使う (判定を 2 か所に書かない)。
 // **純粋関数だけを取る** — doctor 自身はファイルを読まず、読取りは注入された fs が行う
@@ -66,6 +70,12 @@ export function diagnose({
   if (exampleUsers.length > 0) {
     add('fail', 'config', `allowedUserIds が設定例のまま (${exampleUsers[0]}) — 自分の Discord ユーザー ID に置き換える。例の値のままだと全メンションが拒否されます`);
   }
+  // ロールで許可を広げているなら診断に出す (「誰が呼べるか」が secrets の ID 列挙だけでは
+  // 読めなくなるため)。空配列・未設定のときは何も言わない = 例のままの ❌ 件数は変わらない
+  const allowedRoles = Array.isArray(config.allowedRoleIds) ? config.allowedRoleIds : [];
+  if (allowedRoles.length > 0) {
+    add('ok', 'config', `allowedRoleIds ${allowedRoles.length} 件 — このロールを持つ人は allowedUserIds に無くても bot を呼べます (裁定は ownerUserId のまま)`);
+  }
   if (isExampleId(config.ownerUserId)) {
     add('fail', 'config', `ownerUserId が設定例のまま (${config.ownerUserId}) — 自分のユーザー ID に置き換えるか、人間への通知を使わないならキーごと消す`);
   } else if (!config.ownerUserId) {
@@ -107,7 +117,7 @@ export function diagnose({
         add('ok', `bots.${key}`, `Codex 指示ファイル ${instructionsFile} を読める (組み込み指示を置き換える)`);
       }
     }
-    runtimes.add(bot?.runtime === 'codex' ? 'codex' : 'claude');
+    runtimes.add(runtimeOf(bot));
   }
 
   // ---- CLI ----
@@ -142,6 +152,12 @@ export function diagnose({
   }
   if (runtimes.has('codex')) {
     checkCli(config.codexCmd, CODEX_CLI, ' (runtime: "codex" の bot が居ます)');
+  }
+  if (runtimes.has('pi')) {
+    // ログインは pi 自身の `~/.pi/agent/auth.json` (ChatGPT のアカウントなら `/login`)。
+    // ここでは起動できるかだけを見る。ログインの確かめは `pi auth check --provider openai --no-refresh`
+    // (モデルは呼ばない) を手で — 診断へ入れるのは注入する口 (cli) を足してから
+    checkCli(config.piCmd, PI_CLI, ' (runtime: "pi" の bot が居ます)', '。ログインは pi を起動して `/login`');
   }
 
   // ---- channel ----
@@ -193,11 +209,11 @@ export function diagnose({
   if (writable === false) add('fail', 'data', 'data/ に書けない — 実行記録を保存できない job は起動しないので、全 job が止まる');
   else if (writable === true) add('ok', 'data', 'data/ に書ける');
   else add('warn', 'data', 'data/ の書き込み可否を確かめられなかった (無ければ起動時に作られる)');
-  // 自律起動の門になる台帳 (src/index.js の GATE 側と同じ顔ぶれ)
+  // 自律起動の門になる台帳 (src/index.js の GATE 側と同じ顔ぶれ。§12.3 (1))
   const GATE_LEDGERS = new Set(['pause.json', 'tasks.json', 'recovery.json', 'job-runs.json', 'tick-states.json', 'proposals.json']);
   for (const file of dataFiles) {
     const rel = file.slice(root.length + 1);
-    // 社会台帳だけは「不在」の意味が mode で変わるので下でまとめて見る
+    // 社会台帳だけは「不在」の意味が mode で変わるので下でまとめて見る (§12.2 (h))
     if (basename(file) === 'society.json') continue;
     // 壊れたときの影響は台帳で違う (src/index.js の門と同じ分け方 — Opus2 レビュー 2026-09-07 Minor1)。
     // 門になる 6 台帳は自律起動ごと止まり、それ以外は書き込みだけ断られる
@@ -218,12 +234,12 @@ export function diagnose({
     if (text === null || text === undefined) continue;
     const parsed = attempt(() => JSON.parse(text), undefined);
     if (parsed === undefined || !parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      // 2026-09-07 から退避しない = このまま起動すると壊れたまま残る
+      // 2026-09-07 (§12.3 (1)) から退避しない = このまま起動すると壊れたまま残る
       add('fail', 'data', `${rel} が JSON として読めない — ${effect}。直すか手で退避する`);
     }
   }
 
-  // ---- 社会台帳 ----
+  // ---- 社会台帳 (docs/society-ledger.md §1) ----
   // **他の台帳と唯一違うのは「不在」の扱い。** 既存の台帳は不在 = 初回だが、society は
   // observe / active で不在なら起動停止 (初回と推測しない)。off なら触れないので何も言わない。
   const societyFile = dataFiles.find((f) => basename(f) === 'society.json') ?? null;

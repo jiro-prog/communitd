@@ -6,20 +6,15 @@
 // 反映のための再起動だけは手動。
 //
 // **読むのは policy + secrets、書くのは policy だけ** — 検証と Discord 接続には
-// 起動時と同じ合成後の config が要るが、秘密と合成結果は保存しない。
-import { REST, Routes } from 'discord.js';
+// 起動時と同じ合成後の config が要るが、秘密と合成結果は保存しない
+// (docs/social-engineering.md §3.9)。
 import * as nodeFs from 'node:fs';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { POLICY_FILE, SECRETS_FILE, mergeConfigSources, validateConfig } from '../src/config.js';
-import {
-  createChannelAndSave,
-  matchTextChannels,
-  pickChannelCreator,
-  redact,
-} from '../src/discord-setup.js';
+import { createChannelAndSave, matchTextChannels, redact } from '../src/discord-setup.js';
 import {
   TOOLS_CHOICES,
   addChannel,
@@ -29,10 +24,9 @@ import {
   saveConfigAtomically,
   validateChannelName,
 } from '../src/project.js';
+import { createSetupIo } from '../src/setup-cli.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const POLICY_PATH = resolve(ROOT, POLICY_FILE);
-const SECRETS_PATH = resolve(ROOT, SECRETS_FILE);
 
 // 比較の基準になるブリッジのルート。ここが解決できないなら安全判定ができない
 let REAL_ROOT;
@@ -62,53 +56,6 @@ function abort(message) {
   console.error(`\n${message}`);
   rl.close();
   process.exit(1);
-}
-
-/** 設定ファイルを 1 つ読む。生の中身も返す — 書き込み直前に「対話中に誰かが触っていないか」を見るため */
-function readJson(path, file) {
-  if (!existsSync(path)) {
-    abort(`${file} がありません: ${path}\n  → まず SETUP.md §0 の手順で作ってください`);
-  }
-  let raw;
-  try {
-    raw = readFileSync(path, 'utf8');
-  } catch (err) {
-    abort(`${file} を読めません: ${err.message}`);
-  }
-  try {
-    return { value: JSON.parse(raw), raw };
-  } catch (err) {
-    abort(`${file} を JSON として読めません: ${err.message}`);
-  }
-}
-
-/** policy と secrets を読み、起動時と同じ検証にかけるための合成後 config も返す */
-function loadConfig() {
-  const policy = readJson(POLICY_PATH, POLICY_FILE);
-  const secrets = readJson(SECRETS_PATH, SECRETS_FILE);
-  const { config, errors } = mergeConfigSources(policy.value, secrets.value);
-  if (errors.length > 0) {
-    console.error('⚠️ 設定ファイルを合成できません (先に直してください):');
-    for (const line of errors) console.error(`  - ${line}`);
-    abort('中止しました (追記していません)');
-  }
-  return {
-    config,
-    policy: policy.value,
-    policyRaw: policy.raw,
-    secrets: secrets.value,
-    // secrets は書き換えないが、対話中に変わったら保存を中止するために生の中身を持つ
-    secretsRaw: secrets.raw,
-  };
-}
-
-/** 既存の設定が壊れている状態で追記すると原因が混ざるので先に見る */
-function checkExisting(config) {
-  const errors = validateConfig(config);
-  if (errors.length === 0) return;
-  console.error(`⚠️ 既存の設定 (${POLICY_FILE} + ${SECRETS_FILE}) に問題があります (先に直してください):`);
-  for (const line of errors) console.error(`  - ${line}`);
-  abort('中止しました (追記していません)');
 }
 
 async function askChannelName(config) {
@@ -173,35 +120,13 @@ async function confirm(question) {
   return /^(y|yes)$/i.test(answer);
 }
 
-/** Discord へのアクセス手段を組み立てる (トークンはここから外へ出さない) */
-function connectDiscord(config) {
-  const creator = pickChannelCreator(config);
-  if (!creator) abort(`${POLICY_FILE} に bots がありません (チャンネルを作る bot を決められません)`);
-  const token = process.env[creator.cfg?.tokenEnv];
-  if (!token) {
-    abort(
-      `${creator.cfg?.tokenEnv ?? 'トークン'} が環境にありません\n` +
-        '  → npm run add-project から起動してください (.env を読み込みます)',
-    );
-  }
-  const rest = new REST({ version: '10' }).setToken(token);
-  return {
-    creator,
-    // 全 bot のトークンを伏字対象にする (どれが混ざっても外へ出さない)。
-    // config.secrets.json とは別物なので名前を分ける — こちらは .env のトークン文字列
-    tokens: Object.values(config.bots ?? {})
-      .map((b) => process.env[b?.tokenEnv])
-      .filter(Boolean),
-    discord: {
-      listChannels: (guildId) => rest.get(Routes.guildChannels(guildId)),
-      createChannel: (guildId, body) => rest.post(Routes.guildChannels(guildId), { body }),
-      deleteChannel: (channelId) => rest.delete(Routes.channel(channelId)),
-    },
-  };
-}
+// 設定の読み込み・既存設定の検査・Discord 接続は new-project と共有 (src/setup-cli.js)
+const io = createSetupIo({ root: ROOT, abort });
+const POLICY_PATH = io.policyPath;
+const SECRETS_PATH = io.secretsPath;
 
-const { config, policy, policyRaw, secrets, secretsRaw } = loadConfig();
-checkExisting(config);
+const { config, policy, policyRaw, secrets, secretsRaw } = io.loadConfig();
+io.checkExisting(config);
 
 console.log(`${POLICY_FILE} にプロジェクト (チャンネル) を追加します。Ctrl+C でいつでも中止できます。\n`);
 
@@ -233,7 +158,7 @@ if (errors.length > 0) {
 console.log('✅ 起動時検証を通りました');
 
 // Discord 側の状態を先に見て、「作る」のか「既存を使う」のかを確認に載せる
-const { creator, tokens, discord } = connectDiscord(config);
+const { creator, tokens, discord } = io.connectDiscord(config);
 console.log(`\nDiscord を確認しています (${creator.cfg.displayName ?? creator.key} として)…`);
 let existing;
 try {

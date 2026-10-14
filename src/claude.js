@@ -1,4 +1,3 @@
-// @ts-check
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { CLAUDE_CLI, cliCmdHint, cliCmdReason, resolveCliCommand, resolveConfiguredCommand } from './clicmd.js';
@@ -21,7 +20,7 @@ export const CLAUDE_BIN_HINT = cliCmdHint(CLAUDE_CLI);
  *
  * codex 側の値域は別 (`CODEX_EFFORTS` — `none` / `minimal` がある)。
  */
-export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+export const CLAUDE_EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
 
 /**
  * spawn できる形の claude コマンドへ解決する (実体は src/clicmd.js)。
@@ -42,7 +41,7 @@ export function runClaude({
   // spawn の直前に PATH から引き直す (Windows の .cmd シム対策 — src/clicmd.js)
   claudeBin = 'claude',
   // 解決をテストから固定するための差し替え口 (実機の PATH に判定を委ねない)
-  resolveCmdImpl = /** @type {((cmd: string|string[]|null|undefined) => string[]|null)|null} */ (null),
+  resolveCmdImpl = null,
   cwd,
   model,
   effort,
@@ -56,7 +55,7 @@ export function runClaude({
   allowedTools = [],
   // T6: 契約の touch 制限で使う絞り込み。**どれも「狭める」向きにしか渡さない**
   // (組み込みツール自体の限定 / 明示的な拒否 / MCP の遮断)
-  tools = /** @type {string[]|null} */ (null),
+  tools = null,
   disallowedTools = [],
   strictMcp = false,
   settingSources = null,
@@ -69,7 +68,7 @@ export function runClaude({
   // 子プロセスが立った直後に pid と時刻を知らせる (実行記録 — src/jobruns.js)。
   // 「モデルが起動した = ここから先は副作用がありうる」の境目を記録するためだけの口で、
   // 起動そのものには関与しない。省略可・throw しても起動は続ける
-  onSpawn = /** @type {((info: {pid: number|null, at: number, runtime: string}) => void)|null} */ (null),
+  onSpawn = null,
   // 組み立てた引数をテストから検査するための差し替え口 (src/verify.js と同じ流儀)。
   // 権限に関わる引数が増えたので、「契約が無い job では 1 つも増えない」を固定できる形にする
   spawnImpl = spawn,
@@ -116,7 +115,7 @@ export function runClaude({
   if (rolePromptFile) args.push('--append-system-prompt-file', rolePromptFile);
   if (settingsFile) args.push('--settings', settingsFile);
   // 最終出力をスキーマへ拘束する。結果 JSON の structured_output にパース済みで入る
-  //。**result はそのスキーマの JSON 文字列になる**ので、人間向けの散文は
+  // (T0 §4.1)。**result はそのスキーマの JSON 文字列になる**ので、人間向けの散文は
   // スキーマ側の `本文` フィールドで受ける (src/contract.js)
   if (jsonSchema) args.push('--json-schema', JSON.stringify(jsonSchema));
   // 外部 settings (user / project / local) を読み込ませない。
@@ -130,7 +129,7 @@ export function runClaude({
   // 省略すると絞ったつもりで全ツールが使える。実測: `--tools ""` は全ツール無効になる)
   if (Array.isArray(tools)) args.push('--tools', tools.join(','));
   if (allowedTools.length > 0) args.push('--allowedTools', ...allowedTools);
-  // Agent / Task は --allowedTools に書かなくても呼べるので、
+  // Agent / Task は --allowedTools に書かなくても呼べる (T0 §6c) ので、
   // 止めるには明示的な拒否が要る
   if (disallowedTools.length > 0) args.push('--disallowedTools', ...disallowedTools);
   // MCP サーバを 1 つも読まない (書けないと分かったモデルが MCP へ迂回するのを塞ぐ)
@@ -233,13 +232,13 @@ export function runClaude({
       }
     });
     child.stderr.on('data', (d) => { stderr += d; });
-    child.on('error', (/** @type {NodeJS.ErrnoException} */ err) => finish({
+    child.on('error', (err) => finish({
       ok: false,
       sessionId: sid,
       // 実行ファイルが見つからない / 直接起動できない (Windows の .cmd シム) の 2 つは
       // 生の errno だけでは原因が分からないので、設定の直し方を添える
       error: `spawn failed: ${err.message}`
-        + (['ENOENT', 'EINVAL'].includes(err.code ?? '') ? ` — ${CLAUDE_BIN_HINT}` : ''),
+        + (['ENOENT', 'EINVAL'].includes(err.code) ? ` — ${CLAUDE_BIN_HINT}` : ''),
     }));
     child.on('close', (code) => {
       if (aborted) {
@@ -266,12 +265,16 @@ export function runClaude({
         });
         return;
       }
+      // is_error の理由。入れないと呼び出し側が「実行エラー」の一語で記録し、停滞通知・/status・
+      // 再開メッセージに何で落ちたのかが出ない。成功の経路にはキーごと足さない
+      const reason = json.is_error ? isErrorReason(json) : undefined;
       finish({
         ok: !json.is_error,
+        ...(reason !== undefined && { error: reason }),
         sessionId: json.session_id ?? sid,
         result: json.result ?? '',
-        // --json-schema を渡したときだけ入る (パース済みのオブジェクト)。
-        // stream-json 経路でも同じキーに入るので分岐は要らない
+        // --json-schema を渡したときだけ入る (パース済みのオブジェクト — T0 §4.1)。
+        // stream-json 経路でも同じキーに入る (T0 §4.3) ので分岐は要らない
         structuredOutput: json.structured_output ?? null,
         costUsd: json.total_cost_usd,
         numTurns: json.num_turns,
@@ -320,6 +323,36 @@ function normalizeUsage(u) {
     outputTokens: num(u.output_tokens),
   };
   return Object.values(usage).some((v) => v !== undefined) ? usage : null;
+}
+
+/** is_error の理由の上限 (1 行目だけを取ったうえで、さらにこの字数で切る) */
+const ERROR_REASON_MAX = 200;
+
+/**
+ * is_error で返った result JSON から、失敗の理由を 1 行に縮める。
+ *
+ * 理由の入り場所は失敗の種類で違うので、入りうる場所を順に見る (CLI 2.1.x の本体で確認。
+ * 失敗した本物の job の出力ではまだ見ていない):
+ * - `subtype: "success"` のまま is_error — API エラーで終わった turn。`result` にその文面が入り、
+ *   `api_error` (種別) / `api_error_code` (サーバ側の識別子) が付くことがある。
+ *   structured_output がある経路では `result` が空に落とされる
+ * - `subtype: "error_during_execution"` / `"error_max_turns"` など — `result` が無く、
+ *   理由は `errors` (文字列の配列) に入る
+ * どれも無ければ subtype、それも無ければ undefined (呼び出し側の「実行エラー」に任せる)。
+ *
+ * @returns {string|undefined}
+ */
+function isErrorReason(json) {
+  const firstLine = (v) => (typeof v === 'string'
+    ? v.split(/\r?\n/).map((s) => s.trim()).find(Boolean)
+    : undefined);
+  const head = firstLine(json.result)
+    ?? (Array.isArray(json.errors) ? json.errors.map(firstLine).find(Boolean) : undefined)
+    ?? firstLine(json.api_error)
+    ?? firstLine(json.api_error_code)
+    ?? firstLine(json.subtype);
+  if (!head) return undefined;
+  return head.length > ERROR_REASON_MAX ? `${head.slice(0, ERROR_REASON_MAX - 1)}…` : head;
 }
 
 function formatBytes(n) {

@@ -4,10 +4,14 @@
 > 入口は [README](../../README.md)、導入手順は [SETUP.md](../../SETUP.md)。
 
 役割文の先頭に `<!-- communitd-schema: delegation -->` / `<!-- communitd-schema: report -->` を
-書いた bot は、最終出力が `--json-schema` でスキーマに拘束される。**宣言の無い bot・
-ランタイム (codex) は完全に従来どおり**動く。
+書いた bot は、最終出力がスキーマに拘束される。**宣言の無い bot は完全に従来どおり**動く。
 
-- **Discord に出るのは `body` (本文) フィールドだけ。** `--json-schema` を渡すと `result` は
+渡し方はランタイムで違うが、**様式の正本は `src/contract.js` の 1 つ**:
+claude は `--json-schema` に原スキーマをそのまま、codex は `--output-schema` に strict 変換した
+ものを渡す (全キー `required` + 任意キーは nullable。変換と戻り値の後始末は
+[codex ランタイム](codex-runtime.md#構造化出力---output-schema) を参照)。
+
+- **Discord に出るのは `body` (本文) フィールドだけ。** スキーマを渡すと `result` は
   スキーマの JSON 文字列そのものになる (実測 CLI 2.1.220) ので、散文の置き場をスキーマの中に
   持たせてある。制御フッターも `body` の末尾に置かれ、**抽出と無害化は従来と同じ経路**を通る
 - 委譲は `{body, background, purpose, touch_set[], acceptance[], stop_conditions[], touch_restricted?}`、
@@ -66,10 +70,10 @@
 | 手段 | 無いとどうなるか |
 | --- | --- |
 | `--permission-mode default` へ狭める | `acceptEdits` は `Edit(パス)` の照合を**丸ごと迂回**する (touch 外が書き換わった) |
-| `--setting-sources ''` で外部 settings を落とす | user / project の `permissions.allow` が `--allowedTools` に**勝って権限を付与する**。`permissions.allow: ["Edit"]` を 1 行足すだけで破れた |
+| `--setting-sources ''` で外部 settings を落とす | user / project の `permissions.allow` が `--allowedTools` に**勝って権限を付与する** (T0 §2.4)。`permissions.allow: ["Edit"]` を 1 行足すだけで破れた |
 | `--tools` を読み取り系 + `Edit` に限定 | 組み込みツールが残り、別経路で書ける。**空集合も明示的に渡す** (省略すると全ツールが使える) |
 | `--allowedTools` の書込みを `Edit(./パス)` だけにする | 裸の `Edit` が残ると全ファイルが対象になる |
-| `--disallowedTools` で明示的に落とす | `Agent` / `Task` は**指定しなくても呼べる**ため、省略では止まらない |
+| `--disallowedTools` で明示的に落とす | `Agent` / `Task` は**指定しなくても呼べる** (T0 §6c) ため、省略では止まらない |
 
 加えて `--strict-mcp-config` で MCP を遮断し、**参照ディレクトリ (`claudeAddDirs`) も開かない**
 (`--add-dir` は読取専用にできないので、残すと touch 集合どころか作業ツリーの外へ書ける)。

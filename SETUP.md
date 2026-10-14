@@ -57,8 +57,9 @@ cp config.policy.dev.example.json config.policy.json
 | `config.secrets.json` | 追跡しない | サーバー ID・ユーザー ID | `guildId` / `allowedUserIds` |
 | `.env` | 追跡しない | Discord bot のトークン | `config.policy.json` の `tokenEnv` に書いた変数名すべて |
 
-**`config.secrets.json` に置けるのは 4 キーだけ** (`guildId` / `allowedUserIds` / `ownerUserId` /
-`ownerNames`)。他を書くと起動時に落ちる。逆にこの 4 つを `config.policy.json` 側へ書いても落ちる。
+**`config.secrets.json` に置けるのは 5 キーだけ** (`guildId` / `allowedUserIds` / `allowedRoleIds` /
+`ownerUserId` / `ownerNames`)。他を書くと起動時に落ちる。逆にこの 5 つを `config.policy.json` 側へ
+書いても落ちる。
 分けてあるのは、採択された組織提案の diff をブリッジが `config.policy.json` へ当てる回路があるため —
 **裁定権者を、その適用回路から書き換えられないように**秘密側へ固定してある。同じキーを両方に書くと
 「どちらが効くか」が設定から読めないので、起動時に断る。
@@ -116,6 +117,7 @@ cp config.policy.dev.example.json config.policy.json
 {
   "guildId": "自分のサーバーの ID",
   "allowedUserIds": ["自分のユーザー ID"],
+  "allowedRoleIds": [],
   "ownerUserId": "自分のユーザー ID",
   "ownerNames": ["あなたの呼び名"]
 }
@@ -124,6 +126,13 @@ cp config.policy.dev.example.json config.policy.json
 ID の取り方: Discord の設定 → 詳細設定 → **開発者モード** を ON にしてから、
 サーバー名を右クリック → 「サーバー ID をコピー」/ 自分のアイコンを右クリック →
 「ユーザー ID をコピー」。
+
+`allowedRoleIds` は省略可。**書くと、そのサーバーロールを持つ人は `allowedUserIds` に載っていなくても
+bot を呼べる**ようになる (ロール ID はサーバー設定 → ロール → 右クリック → 「ロール ID をコピー」)。
+できることは許可ユーザーと同じで、メンションだけでなく**スラッシュコマンド (`/restart` `/stop`
+`/pause` など) とツール承認ボタンも使える**。一人ずつ ID を集めなくて済むのが利点だが、
+**ロールを配ることが下の ⚠️ をそのまま配ることになる**点は同じ。`@everyone` のロール ID は `guildId` と同じ値で、書くと起動時に落とす (全員への許可は事故なので、
+必要なら専用のロールを作る)。`ownerUserId` の判定はロールでは広がらない — 組織提案の裁定は作者だけ。
 
 `ownerUserId` は bot が判断を仰ぐ相手 (省略可)。書いておくと、bot が応答末尾の独立行に
 `[[notify:owner]]` を置いたとき実メンションになって通知が飛ぶ。`ownerNames` は
@@ -134,10 +143,11 @@ bot の `displayName` と同じ呼び名は起動時に拒否する (どちら�
 
 ブリッジはメンションを受けるとローカルの `claude` CLI をあなたのユーザー権限で起動する。
 チャンネル設定によっては、そのエージェントはファイルを書き換え、`git` や `npm` を実行し、
-ネットワークへ出る。**`allowedUserIds` に書いた Discord ユーザーは、その実行を依頼できる。**
-自分以外を載せるのは、その人にこの PC のシェルを渡すのと同じだと考えて決めること。
-入口は 3 段で塞いである — `guildId` で自サーバー以外を遮断、`allowedUserIds` で発言者を限定、
-自前 bot 以外の bot 発言は常時無視。`guildId` と `allowedUserIds` は**必須**で、
+ネットワークへ出る。**`allowedUserIds` に書いた Discord ユーザー (と `allowedRoleIds` のロールを
+持つ人) は、その実行を依頼できる。** 自分以外を載せるのは、その人にこの PC のシェルを渡すのと
+同じだと考えて決めること。
+入口は 3 段で塞いである — `guildId` で自サーバー以外を遮断、`allowedUserIds` (+ 任意の
+`allowedRoleIds`) で発言者を限定、自前 bot 以外の bot 発言は常時無視。`guildId` と `allowedUserIds` は**必須**で、
 どちらかが空なら起動時に理由を表示して終了する (設定漏れを「制限なし」と解釈しない)。
 Discord トークンは claude 子プロセスの環境変数から自動で除去される。
 
@@ -217,7 +227,29 @@ settings にある hooks は置換されず、job 専用 hooks と両方走る�
 出ていた日に「前のタスクの未マージの変更の上に積まれる」が静かに再発するので、書いてある方へ倒す。対象
 リポジトリでは `.worktrees/` を Git の無視対象に入れておくこと。入っていないとタスク job は作業ツリーを
 作らずに落ちる) / `scout: { bot, intervalMin, maxOpenTasks }` (種を起票する担当・起こす間隔 (分)・未着手が
-この件数あれば起票を止める。既定 60 分 / 6 件) / `worker: { bots: [...] }` (実装担当) / `reviewer` (昇格を
+この件数あれば起票を止める。既定 60 分 / 6 件。提案 0 件の巡回が続くと間隔を 2 倍ずつ 4 倍まで伸ばし、そのチャンネルで
+タスクが merge されたら戻す。最後の企画の巡回の後に 0 件が 2 回続いたら、企画の巡回を間隔を待たずに起こす) /
+`harness: { bot, intervalMin, minRuns }` (ハーネスの改訂の
+巡回 — `bot` を書いたときだけ起こす。実行記録に残る「その job を動かした役割文と runtime / model / effort の版」から
+bot ごとに今の版と前の版の問題率を比べ、測り終えたら提案役に役割文の改訂を 1 件起票するか判断させる。今の版が
+`minRuns` 本 (既定 20) に届くまでと、役割文を触るタスクが終わっていない間は次を起こさない。間隔の既定は 1440 分。
+`bot` にはその時点でいちばん賢いモデルの bot を置く。起動文には、いちばん新しい改訂 (役割文を触った merge 済みの
+タスク) とその merge で始まった版の成績 (改訂の台帳) も載り、狙いが当たったかを提案役に確かめさせる。数字は
+`node scripts/harness-report.mjs` で同じものが見られる — 問題の抜粋にはその job の手順の要約が付き、1 job の手順の全部は
+`--trace <job id>`。worker が読む役割文を触る改訂は、merge の前に下書きの役割文で過去のタスクを解き直してから
+レビューを呼ぶ — `replayCases` (改訂の理由が名指しした差し戻しのタスク、既定 2) / `replayCanary` (差し戻しの無い最近の
+タスク、既定 1。どちらも 0 で解き直さない) / `replayJobBudget` (解き直し 1 件の job 予算、既定 2) / `replayTimeoutMin`
+(解き直しを待つ上限、既定 720 分)。解き直しはブリッジ自身のリポジトリのチャンネルでだけ走る) /
+`planner: { bot, intervalMin, maxThemes, themesFile }` (企画の巡回 — `bot` を書いたときだけ起こす。企画役が
+自律ループの次の方向を「主題」(目的・根拠・できたの基準・最初の手・危険) として考え、主題ファイル
+(`themesFile`、`cwd` 基準・既定 `docs/themes.md`) を書き換えるタスクを 0〜1 件起票する。以降は通常の承認 →
+実装 → レビュー。スカウトは進行中の主題を優先してタスクに割り、題の頭に `[slug]` を付ける。進行中の主題が
+`maxThemes` (既定 2) に届いている間は振り返りが先で、印を付けて枠を空けたら同じ 1 件で足してよい。残りが配備待ちの
+確認だけの主題は `waiting` にでき、枠に数えずスカウトも割らない。巡回 (スカウト・ハーネスの改訂・企画) が返答の
+`carry` に書いた申し送り (起票しない気づきと作者の手が要るもの) はチャンネルごとに溜まり、次の企画の巡回の起動文の
+前に出る。作者を呼ぶのは企画の巡回だけで、1 回の巡回で 1 通にまとめる。主題ファイルを触るタスクが終わっていない間は次を
+起こさない。間隔の既定は 1440 分。見出しの形は `## [active|waiting|done|dropped] slug — 題`) /
+`worker: { bots: [...] }` (実装担当) / `reviewer` (昇格を
 裁く bot) / `maxConcurrentTasks` (同時に走らせるタスク数・既定 2) / `maxJobsPerDay` (そのチャンネルの 1 日
 あたり自律 job 数・既定 40) / `taskJobBudget` (1 タスクへ払い出す job 数・既定 20)。数値はすべて 1 以上の
 整数で、`scout.bot` / `worker.bots` / `reviewer` は `config.bots` に実在するキーだけ書ける。**未知キー・
@@ -226,9 +258,10 @@ settings にある hooks は置換されず、job 専用 hooks と両方走る�
 `enabled: true` には同じチャンネルの `verify` (と `hooks: true`) が要り、`worker.bots` が `reviewer` 1 人
 だけの編成も拒否する (人が見ていない間に既定ブランチへ昇格する経路なので、機械検証と「執筆と検収は別 bot」
 を設定で外せないようにしてある)。`recovery: { mode, graceMin, maxAutoRetries, retryDelaysMin }` は止まった
-タスクの自動復旧 (既定 `mode: "observe"` = 判断をログに残すだけで起こさない。`"auto"` で副作用が始まって
-いないと実行記録で確認できる停止だけを起こし直す。`"off"` で判定もしない。猶予 5 分・上限 2 回・間隔
-[5, 15] 分が初期値)。
+タスクの自動復旧 (既定 `mode: "auto"` = 人間の `/stop` と設定の不備以外で止まったタスクを、同じブランチ・
+同じ作業ツリーの続きとして担当に起こし直す。`"observe"` は判断をログに残すだけで起こさない。`"off"` で
+判定もしない。猶予 5 分・上限 3 回・間隔 [5, 15, 30] 分が初期値。上限を使い切ったタスクは復旧待ちに残り、
+人間の `/retry` を待つ)。
 
 自律運転を止めたくなったら **`/pause`** (理由は `reason:` に書ける。再開は `/resume`)。止まるのは**自律起動
 だけ**で、実行中の job は殺さず、人間のメンション・handoff・自己呼び出しは従来どおり通る (いま動いている
@@ -237,7 +270,8 @@ job を止めるのは `/stop`)。状態は `data/pause.json` に永続するの
 
 足りない許可は手で書かずに済ませられる: 拒否されたツール要求はスレッドに**承認カード**として出て、
 「承認する」→「恒久設定として確定」の 2 段階を踏むと `data/tools-extra.json` に積まれ、**次の job から**
-効く (`config.policy.json` は書き換えない)。押せるのは `allowedUserIds` の人間だけ、期限は既定 30 分
+効く (`config.policy.json` は書き換えない)。押せるのは呼ぶ権限のある人間だけ
+(`allowedUserIds` と `allowedRoleIds`)、期限は既定 30 分
 (`limits.toolApprovalTtlMs`・1 分〜24 時間)、1 job あたりのカードは既定 3 件まで
 (`limits.maxToolApprovalCards`・1〜10。範囲外は起動時に落ちる)。
 
@@ -415,6 +449,10 @@ npm グローバルは `.cmd` シムで Node から直接起動できないの�
 二重ログインを防ぐためで、その場合はターミナルで `npm start` をやり直す。ターミナルを閉じるとブリッジも
 止まる点は従来どおり。
 
+`npm start -- --log logs/bridge.log` と渡すと、画面に出る行を同じ内容でファイルにも追記する
+(ファイル側だけ各行の先頭に UTC の時刻が付き、相対パスはリポジトリ直下から。`/restart` をまたいで同じ
+ファイルに続く)。**ローテーションは無い**ので、膨らんだら止めてから手で消す。
+
 ## 4. 動作確認
 
 `cwd` に指定したディレクトリを **git リポジトリにしておく** (`git init` でよい)。必須ではないが、
@@ -471,6 +509,9 @@ npm グローバルは `.cmd` シムで Node から直接起動できないの�
   Reset Token して再記入
 - bot がメンションに無反応 → MESSAGE CONTENT INTENT の ON を確認。`guildId` と `allowedUserIds` が
   例の値のままだと**全メンションが黙って拒否される** (`npm run doctor` が ❌ で教える)
+- **ロールを付けたのに無反応** → `allowedRoleIds` の ID をロール名と取り違えていないか、そのロールが
+  そのサーバーのものかを確認する。ロールが読めないときブリッジは**拒否側に倒れる** (許可側に倒さない)
+  ので、無反応と「設定が効いていない」は見分けが付かない。確実なのは `allowedUserIds` で試すこと
 - `⚠️ このチャンネル (…) は config.policy.json の channels に未登録です` → 警告に**今のチャンネル名と
   登録されている名前**が並ぶので、綴りを見比べる。判定は完全一致で、スレッドは親チャンネルの名前を見る
   (Discord は作成時に小文字化・空白を `-` に変えるが、`_` はそのまま残る)

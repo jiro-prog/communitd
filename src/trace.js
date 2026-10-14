@@ -1,4 +1,3 @@
-// @ts-check
 import { appendFileSync, readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -62,16 +61,17 @@ export function summarizeToolInput(tool, input) {
     // どちらも同じ形の command を持つので同じ扱いにする。
     case 'Bash':
     case 'PowerShell': {
-      // コマンド全体は出さない (パス・URL・引数が載る)。先頭語だけで十分に検収材料になる。
+      // コマンド全体は出さない (パス・URL・引数が載る)。先頭語と、それに続く素性の分かる語だけ。
       const command = String(input.command ?? '');
       if (SECRET_WORD.test(command) || SECRET_BLOB.test(command)) return null;
-      const head = command.trim().split(/\s+/)[0] ?? '';
+      const [head = '', ...rest] = command.trim().split(/\s+/);
       // 先頭語が絶対パスのこともある (`C:\Users\...\bin\build.exe`)。ホスト側の
       // ディレクトリ構造を Discord へ出さないよう名前だけにし、素性の怪しいものは落とす。
       // 引用符・変数展開・リダイレクトが混じった語は、名前だけ切り出しても実体を表さない。
       if (/["'`]/.test(head)) return null;
       const name = basename(head.replaceAll('\\', '/'));
-      return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) ? name.slice(0, 40) : null;
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return null;
+      return [name, ...shellWords(rest)].join(' ').slice(0, 60);
     }
     case 'Read':
     case 'NotebookRead':
@@ -94,13 +94,39 @@ export function summarizeToolInput(tool, input) {
   }
 }
 
+/** 先頭語に続けて残す語の上限 (`node --test x.test.js` の 3 語まで) */
+const SHELL_MAX_WORDS = 3;
+
+/**
+ * 先頭語に続く語のうち、何を走らせたかが分かるものだけを前から拾う — サブコマンド (`commit`)・
+ * フラグ (`--test`)・拡張子のあるパスの名前 (`test/a.test.js` → `a.test.js`)。
+ * 拡張子の無いパス (ディレクトリ名に利用者名が載りうる)・引用符・変数・演算子が来たらそこで止める。
+ * 手順の要約 (digestTrace) で「どのテストを走らせたか」を読めるようにするため (帰属の材料)。
+ */
+function shellWords(words) {
+  const out = [];
+  for (const word of words) {
+    if (out.length >= SHELL_MAX_WORDS) break;
+    if (/^--?[A-Za-z][\w-]*(=[\w.-]+)?$/.test(word) || /^[a-z][a-z0-9-]*$/.test(word)) {
+      out.push(word.slice(0, 40));
+      continue;
+    }
+    const file = basename(word.replaceAll('\\', '/'));
+    if (/^[\w.*/\\:-]+$/.test(word) && /^[\w*-][\w.*-]*\.[A-Za-z0-9]+$/.test(file)) {
+      out.push(file.slice(0, 40));
+      continue;
+    }
+    break;
+  }
+  return out;
+}
+
 /** 記録の配列 → 表示と計測に使う集計 (純粋関数)。 */
 export function summarizeTrace(entries = []) {
   const kinds = new Map();
   let total = 0;
   let failed = 0;
   let reads = 0;
-  /** @type {number|null} */
   let readsBeforeFirstEdit = null;
 
   for (const entry of entries) {
@@ -160,6 +186,70 @@ export function formatTraceLine(
   const dropped = kinds.length - chosen.length;
   const body = [...chosen, ...(dropped > 0 ? [`他 ${dropped} 種省略`] : [])].join(SEP);
   return `${head}${body}`.slice(0, maxChars);
+}
+
+/** 手順の要約の既定の長さ (ハーネスの成績の問題の抜粋 1 件に添える) */
+export const TRACE_DIGEST_MAX_CHARS = 400;
+
+const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
+const LOOK_TOOLS = new Set([...READ_TOOLS, 'Grep', 'Glob', 'LS', 'WebFetch', 'WebSearch']);
+const DIGEST_SEP = ' → ';
+
+/**
+ * 1 job の手順 → 「どの段で外れたか」を読むための 1 行 (純粋関数)。arXiv 2610.02616 (VERSE) の
+ * 帰属 (失敗の軌跡を原因の手まで縮める) の代わり — 再実行で縮める代わりに、読むだけの手を畳み、
+ * 編集したファイル・走らせたコマンド・失敗 (✗) を順に残す。続く同じ手は「×n」にまとめる。
+ * 長いときは頭と尻を残して真ん中を「… n 手 …」で畳む (最後の検証まで見えるように)。
+ *
+ * 例: `読む×14 → 編集 harness.js×3 → $ node --test a.test.js ✗ → 編集 harness.js → $ node --test a.test.js`
+ * @returns {string|null} 手が 0 件なら null
+ */
+export function digestTrace(entries = [], { maxChars = TRACE_DIGEST_MAX_CHARS } = {}) {
+  const steps = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const tool = typeof entry?.tool === 'string' ? entry.tool : '';
+    if (tool === '') continue;
+    const arg = typeof entry.arg === 'string' && entry.arg !== '' ? sanitizeForDisplay(entry.arg, 60) : null;
+    let label;
+    if (LOOK_TOOLS.has(tool)) label = '読む';
+    else if (EDIT_TOOLS.has(tool)) label = `編集 ${arg ?? '?'}`;
+    else if (SHELL_TOOLS.has(tool)) label = `$ ${arg ?? '?'}`;
+    else label = sanitizeForDisplay(tool, 40);
+    if (entry.failed === true) label += ' ✗';
+    const last = steps[steps.length - 1];
+    if (last && last.label === label) last.count += 1;
+    else steps.push({ label, count: 1 });
+  }
+  if (steps.length === 0) return null;
+  const parts = steps.map((s) => (s.count > 1 ? `${s.label}×${s.count}` : s.label));
+  const full = parts.join(DIGEST_SEP);
+  if (full.length <= maxChars) return full;
+
+  // 頭 parts[0, lo) と尻 parts[hi, n) を交互に 1 つずつ広げ、真ん中の注記の分まで見て入らなく
+  // なったら止める (黙って切らない)。真ん中には必ず 1 手以上残る
+  const render = (lo, hi) => [...parts.slice(0, lo), `… ${hi - lo} 手 …`, ...parts.slice(hi)].join(DIGEST_SEP);
+  let lo = 0;
+  let hi = parts.length;
+  for (let fromHead = true; hi - lo > 1; fromHead = !fromHead) {
+    const [a, b] = fromHead ? [lo + 1, hi] : [lo, hi - 1];
+    if (render(a, b).length > maxChars) break;
+    [lo, hi] = [a, b];
+  }
+  return render(lo, hi).slice(0, maxChars);
+}
+
+/**
+ * 1 job の手順の全部を 1 手 1 行で (scripts/harness-report.mjs の `--trace`)。時刻は UTC の時:分:秒
+ * (ハーネスの成績の他の時刻と同じ)。digestTrace で畳んだ所を手ごとに読み直すためのもの。
+ */
+export function formatTraceSteps(entries = []) {
+  const list = (Array.isArray(entries) ? entries : []).filter((e) => typeof e?.tool === 'string' && e.tool !== '');
+  const width = String(list.length).length;
+  return list.map((e, i) => {
+    const at = Number.isSafeInteger(e.at) && e.at > 0 ? `${new Date(e.at).toISOString().slice(11, 19)} ` : '';
+    const arg = typeof e.arg === 'string' && e.arg !== '' ? ` ${sanitizeForDisplay(e.arg, 60)}` : '';
+    return `${String(i + 1).padStart(width)}. ${at}${sanitizeForDisplay(e.tool, 40)}${arg}${e.failed === true ? ' ✗' : ''}`;
+  });
 }
 
 function renderKind(kind, maxArgs) {

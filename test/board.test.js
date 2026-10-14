@@ -1,26 +1,33 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { DEFAULT_SCOUT_MAX_OPEN_TASKS } from '../src/config.js';
 import {
   DEFAULT_JOB_BUDGET,
   MERGED_WINDOW_MS,
+  REVIEW_EVIDENCE_NOTE_PREFIX,
+  TASK_ARCHIVE_AFTER_MS,
   TASK_STATES,
   TERMINAL_STATES,
   TRANSITIONS,
   TaskBoardStore,
+  approvalNote,
   canSpendJob,
   canTransition,
   planFiling,
+  planTaskArchive,
   planTouchMigration,
   remainingJobs,
+  reviewEvidenceNote,
   scoutBoardView,
   sendBackCount,
+  taskArchiveFiles,
   tasksMissingTouch,
   touchOverlaps,
 } from '../src/board.js';
+import { scoutStartMessage } from '../src/mentions.js';
 
 function tempFile(name = 'tasks.json') {
   return join(mkdtempSync(join(tmpdir(), 'communitd-board-')), name);
@@ -43,15 +50,15 @@ function seed(store, over = {}, options = { now: T0 }) {
   }, options);
 }
 
-// ---- 遷移表 ----
+// ---- 遷移表 (§3.2) ----
 
-test('canTransition は遷移表そのもの', () => {
+test('canTransition は §3.2 の遷移表そのもの', () => {
   assert.equal(canTransition('proposed', 'approved'), true);
   assert.equal(canTransition('approved', 'in-progress'), true);
   assert.equal(canTransition('in-progress', 'review'), true);
   assert.equal(canTransition('review', 'merged'), true);
 
-  // 差し戻し (裁定 2026-08-28)。M0-1 では「終端まで一方通行」だったが、
+  // 差し戻し (§3.2 裁定 2026-08-28)。M0-1 では「終端まで一方通行」だったが、
   // レビューが通らなかったときに同じスレッドの続きとして直させる辺を足した
   assert.equal(canTransition('review', 'in-progress'), true);
 
@@ -120,7 +127,7 @@ test('起票は空の channel / title と壊れた jobBudget を断る', () => {
   assert.deepEqual(store.list(), []);
 });
 
-// ---- touch ----
+// ---- touch (§3.9) ----
 
 test('起票は touch を必須にする — 無い / 空 / 壊れたパスは断って何も書かない', () => {
   const store = board();
@@ -183,7 +190,7 @@ test('touchOverlaps は重なったパスを返す (大小文字だけの違い�
   assert.equal(touchOverlaps(['tools/a.py'], [42, null, 'tools/a.py']), 'tools/a.py');
 });
 
-// ---- 起票の制動 (重なり + 枠) ----
+// ---- 起票の制動 (§9.1b 重なり + §9.2a 枠) ----
 
 /** planFiling / scoutBoardView が見るのは id と state と touch だけ */
 const onBoard = (id, state, touch) => ({ id, state, title: `#${id}`, touch });
@@ -345,7 +352,7 @@ test('planFiling: 壊れた入力でも落ちない (枠が読めなければ設
   assert.equal(planFiling({ wanted: many, openTasks: [] }).file.length, DEFAULT_SCOUT_MAX_OPEN_TASKS);
 });
 
-// ---- スカウトへ見せるボード ----
+// ---- スカウトへ見せるボード (§9.1a) ----
 
 test('scoutBoardView: 非終端すべてと直近 48 時間の merged を渡す', () => {
   const hoursBack = (hours) => new Date(at(-hours * 60)).toISOString();
@@ -370,7 +377,7 @@ test('scoutBoardView: 非終端すべてと直近 48 時間の merged を渡す'
     { id: '8', state: 'dropped', title: 'd8', updatedAt: hoursBack(1) },
     null, // 壊れた値が混ざっても落ちない
   ];
-  // 非終端が先・直近の merged が後 (一覧が長すぎるときは末尾から削られる)
+  // 非終端が先・直近の merged が後 (merged は着地の新しい順。一覧が長すぎるときは末尾から削られる)
   assert.deepEqual(
     scoutBoardView(tasks, { now: at(0) }).map((t) => t.id),
     ['1', '2', '3', '4', '5', '6'],
@@ -383,6 +390,44 @@ test('scoutBoardView: 非終端すべてと直近 48 時間の merged を渡す'
     ['1', '2', '3', '4', '5', '6', '7'],
   );
   assert.deepEqual(scoutBoardView(null, { now: at(0) }), []);
+});
+
+test('scoutBoardView: merged は id 順ではなく着地の新しい順に並べる', () => {
+  const hoursBack = (hours) => new Date(at(-hours * 60)).toISOString();
+  const landed = (id, hoursAgo) => ({
+    id, state: 'merged', title: `m${id}`, history: [{ at: hoursBack(hoursAgo), from: 'review', to: 'merged' }],
+  });
+  const tasks = [
+    landed('20', 30),
+    landed('21', 2),
+    onBoard('22', 'in-progress', ['tools/x.py']),
+    landed('23', 10),
+    landed('24', 10), // 同時刻は元の並びのまま
+    landed('25', 1),
+  ];
+  assert.deepEqual(
+    scoutBoardView(tasks, { now: at(0) }).map((t) => t.id),
+    ['22', '25', '21', '23', '24', '20'],
+  );
+});
+
+test('scoutBoardView → scoutStartMessage: 一覧が溢れたら古い merged から削られる', () => {
+  // id の古い順に着地した merged が 40 件 (題は長い)。新しいものが残り、古いものが畳まれる
+  const tasks = Array.from({ length: 40 }, (_, i) => ({
+    id: String(100 + i),
+    state: 'merged',
+    title: `${'あ'.repeat(90)}${i} — ${'い'.repeat(400)}`,
+    history: [{ at: new Date(at(-(40 - i) * 60)).toISOString(), from: 'review', to: 'merged' }],
+  }));
+  const text = scoutStartMessage({
+    botUserId: 'O1', directionFile: 'docs/direction.md', openTasks: scoutBoardView(tasks, { now: at(0) }),
+  });
+  const shown = text.split('\n')
+    .filter((line) => line.startsWith('- [merged] '))
+    .map((line) => line.split(' ')[2].replace(':', ''));
+  assert.ok(shown.length >= 10, `${shown.length} 行しか載っていない`);
+  assert.deepEqual(shown, tasks.map((t) => t.id).reverse().slice(0, shown.length));
+  assert.ok(text.includes(`\n- …ほか ${tasks.length - shown.length} 件\n`));
 });
 
 test('scoutBoardView: merged の時刻は履歴の to:merged 行で見る (読めなければ載せない)', () => {
@@ -492,6 +537,94 @@ test('setTouch は touch を持たない終端でないタスクだけに入る 
   assert.throws(() => store.setTouch('99', ['src/a.ts']), /ボードにありません/);
 });
 
+/** touch を持たない古い形のタスク (移行前のボード) を 9 / 31 に、終端のものを 40 に置く */
+function legacyBoard() {
+  const path = tempFile();
+  const store = new TaskBoardStore(path);
+  const task = seed(store);
+  store.write('9', { ...task, id: '9', state: 'blocked', touch: undefined, history: [] });
+  store.write('31', { ...task, id: '31', state: 'review', touch: undefined, history: [] });
+  store.write('40', { ...task, id: '40', state: 'merged', touch: undefined });
+  return { path, store, task };
+}
+
+/** 保存の回数を数える (commit は this.save() を呼ぶので、インスタンスに被せれば拾える) */
+function countSaves(store) {
+  const counter = { saves: 0 };
+  const save = store.save.bind(store);
+  store.save = () => {
+    counter.saves += 1;
+    save();
+  };
+  return counter;
+}
+
+test('setTouchMany は複数件の touch を 1 回の保存で入れる (移行 CLI の書き込み口)', () => {
+  const { path, store, task } = legacyBoard();
+  const counter = countSaves(store);
+
+  const updated = store.setTouchMany(
+    [['9', [' src/a.ts ']], ['31', ['src/b.ts', 'src/c.ts']]],
+    { now: at(5) },
+  );
+  assert.equal(counter.saves, 1);
+  assert.deepEqual(updated.map((t) => [t.id, t.touch]), [
+    ['9', ['src/a.ts']],
+    ['31', ['src/b.ts', 'src/c.ts']],
+  ]);
+  for (const t of updated) {
+    assert.equal(t.updatedAt, iso(5));
+    assert.deepEqual(t.history, []); // 遷移ではないので履歴は積まない
+  }
+  assert.equal(store.get('9').state, 'blocked'); // 状態は動かさない
+
+  const reread = new TaskBoardStore(path);
+  assert.deepEqual(reread.get('9').touch, ['src/a.ts']);
+  assert.deepEqual(reread.get('31').touch, ['src/b.ts', 'src/c.ts']);
+  assert.deepEqual(reread.get(task.id), task); // 指定していないタスクは動かない
+  assert.deepEqual(tasksMissingTouch(reread.list()), []);
+
+  // 空なら保存もしない
+  assert.deepEqual(store.setTouchMany([]), []);
+  assert.equal(counter.saves, 1);
+});
+
+test('setTouchMany は保存に失敗したら全件を元のままにする (ディスクもメモリも)', () => {
+  const { path, store } = legacyBoard();
+  const before = readFileSync(path, 'utf8');
+  store.save = () => {
+    throw new Error('EIO: 書き込めません');
+  };
+
+  assert.throws(() => store.setTouchMany([['9', ['src/a.ts']], ['31', ['src/b.ts']]]), /EIO/);
+  assert.equal(store.get('9').touch, undefined);
+  assert.equal(store.get('31').touch, undefined);
+  assert.equal(readFileSync(path, 'utf8'), before);
+  assert.deepEqual(tasksMissingTouch(new TaskBoardStore(path).list()).map((t) => t.id), ['9', '31']);
+});
+
+test('setTouchMany は 1 件でも通らなければ何も書かない (1 件目だけ入る台帳を作らない)', () => {
+  const { path, store, task } = legacyBoard();
+  const before = readFileSync(path, 'utf8');
+  const counter = countSaves(store);
+
+  // どれも 1 件目は正しく、2 件目だけが通らない
+  const cases = [
+    [[['9', ['src/a.ts']], ['31', ['../外.ts']]], /タスク 31: .*使えないパス/],
+    [[['9', ['src/a.ts']], ['31', []]], /touch は必須/],
+    [[['9', ['src/a.ts']], [task.id, ['src/b.ts']]], /移行の対象ではありません/], // 既に touch がある
+    [[['9', ['src/a.ts']], ['40', ['src/b.ts']]], /移行の対象ではありません/], // 終端
+    [[['9', ['src/a.ts']], ['99', ['src/b.ts']]], /ボードにありません/],
+    [[['9', ['src/a.ts']], ['9', ['src/b.ts']]], /二度指定されています/],
+  ];
+  for (const [entries, pattern] of cases) {
+    assert.throws(() => store.setTouchMany(entries), pattern);
+  }
+  assert.equal(counter.saves, 0);
+  assert.equal(store.get('9').touch, undefined);
+  assert.equal(readFileSync(path, 'utf8'), before);
+});
+
 // ---- 幹の遷移 ----
 
 test('起票 → 承認 → 着手 → レビュー提出 → 完了まで通る (履歴が積まれる)', () => {
@@ -502,7 +635,7 @@ test('起票 → 承認 → 着手 → レビュー提出 → 完了まで通る
   const started = store.start(task.id, { threadId: 777, by: 'opus', now: at(2) });
   assert.equal(started.state, 'in-progress');
   assert.equal(started.threadId, '777');
-  assert.equal(started.branch, 'task/1', 'branch 省略時は task/<id>');
+  assert.equal(started.branch, 'task/1', 'branch 省略時は §3.6 の task/<id>');
 
   store.submitForReview(task.id, { by: 'opus', now: at(3) });
   const merged = store.complete(task.id, { by: 'fable', note: 'merge --no-ff', now: at(4) });
@@ -528,7 +661,7 @@ test('branch は明示すればそちらが残る', () => {
 
 // ---- 不正遷移 ----
 
-test('遷移表に無い遷移は拒否する (proposed から直接 merged にできない)', () => {
+test('§3.2 に無い遷移は拒否する (proposed から直接 merged にできない)', () => {
   const store = board();
   const task = seed(store);
 
@@ -624,7 +757,7 @@ test('スレッドとタスクは 1:1 — 同じスレッドを 2 つのタス�
   assert.equal(store.get(b.id).state, 'approved', '断ったら状態は動かない');
 });
 
-// ---- job 予算 ----
+// ---- job 予算 (§3.5) ----
 
 test('job 予算は消費できるが履歴も状態も汚さない', () => {
   const store = board();
@@ -754,7 +887,7 @@ test('spendJob は blocked を引き続き拒否する (止まっている間に
   assert.equal(store.spendJob(task.id, { now: at(5) }).jobsSpent, 1);
 });
 
-// ---- 差し戻し (裁定 2026-08-28) ----
+// ---- 差し戻し (§3.2 裁定 2026-08-28) ----
 
 /** 着手済み (in-progress) のタスクを 1 件作る */
 function started(store, over = {}) {
@@ -797,6 +930,50 @@ test('差し戻しの回数は履歴から数える (別フィールドで持た
   assert.equal(sendBackCount({ history: 'なし' }), 0);
 });
 
+test('承認時の備考は proposed → approved の note から読む (封鎖からの復帰の note は承認ではない)', () => {
+  const store = board();
+  const none = seed(store);
+  assert.deepEqual(approvalNote(store.get(none.id)), { note: '', by: '' }, '承認前');
+  store.approve(none.id, { now: at(1) });
+  assert.deepEqual(approvalNote(store.get(none.id)), { note: '', by: '' }, 'note の無い承認');
+
+  const task = seed(store);
+  store.approve(task.id, { by: 'reviewer', note: '  touch の外は触らない\n', now: at(1) });
+  store.start(task.id, { threadId: 'T2', now: at(2) });
+  store.block(task.id, { reason: '予算切れ', now: at(3) });
+  store.resume(task.id, { addBudget: 2, by: 'owner', note: '追い予算', now: at(4) });
+  assert.deepEqual(approvalNote(store.get(task.id)), { note: 'touch の外は触らない', by: 'reviewer' });
+
+  // 壊れた入力でも落ちない
+  assert.deepEqual(approvalNote(null), { note: '', by: '' });
+  assert.deepEqual(approvalNote({ history: [{ from: 'proposed', to: 'approved', note: 3 }] }), { note: '', by: '' });
+});
+
+test('レビューの証拠は最後の review 遷移の note からだけ読む (差し戻し前の周回には遡らない)', () => {
+  const store = board();
+  const task = started(store);
+  assert.deepEqual(reviewEvidenceNote(store.get(task.id)), { evidence: '', at: '' }, 'review 前');
+
+  // 最後の review 遷移に証拠がある
+  store.submitForReview(task.id, { note: `${REVIEW_EVIDENCE_NOTE_PREFIX}落ちる 1 / 落ちない 0`, now: at(3) });
+  assert.deepEqual(reviewEvidenceNote(store.get(task.id)), { evidence: '落ちる 1 / 落ちない 0', at: iso(3) });
+
+  // 差し戻し後の review 遷移に証拠が無い → 前の周回の証拠は返さない
+  store.sendBack(task.id, { reason: '直して', now: at(4) });
+  store.submitForReview(task.id, { now: at(5) });
+  assert.deepEqual(reviewEvidenceNote(store.get(task.id)), { evidence: '', at: '' }, '前の周回の証拠');
+  // 証拠の頭で始まらない note も証拠ではない
+  store.sendBack(task.id, { reason: 'もう一度', now: at(6) });
+  store.submitForReview(task.id, { note: `メモ ${REVIEW_EVIDENCE_NOTE_PREFIX}x`, now: at(7) });
+  assert.deepEqual(reviewEvidenceNote(store.get(task.id)), { evidence: '', at: '' }, '頭の違う note');
+
+  // history が無い・壊れた入力でも落ちない
+  assert.deepEqual(reviewEvidenceNote(null), { evidence: '', at: '' });
+  assert.deepEqual(reviewEvidenceNote({}), { evidence: '', at: '' });
+  assert.deepEqual(reviewEvidenceNote({ history: 'なし' }), { evidence: '', at: '' });
+  assert.deepEqual(reviewEvidenceNote({ history: [null, { to: 'review', note: 3 }] }), { evidence: '', at: '' });
+});
+
 test('差し戻しても job 予算は消費し続けられる (blocked とは違う)', () => {
   const store = board();
   const task = started(store);
@@ -824,4 +1001,118 @@ test('壊れた値が混ざっていても一覧が落ちない', () => {
   store.commit({ ...store.data, ごみ: 'これはタスクではない', 'ごみ2': null });
   assert.deepEqual(store.list().map((t) => t.id), ['1']);
   assert.equal(store.get('ごみ'), null);
+});
+
+// ---- 終わったタスクのアーカイブ (月ごとのファイルへ移す — 2026-10-14) ----
+
+const DAY_MIN = 24 * 60;
+
+/** その時刻に終端まで進めたタスク (どの遷移も同じ時刻) */
+function finish(store, to, minutes, over = {}) {
+  const task = seed(store, over, { now: at(minutes) });
+  if (to === 'dropped') return store.drop(task.id, { now: at(minutes) });
+  store.approve(task.id, { now: at(minutes) });
+  store.start(task.id, { now: at(minutes) });
+  store.submitForReview(task.id, { now: at(minutes) });
+  return store.complete(task.id, { now: at(minutes) });
+}
+
+/** #1 merged・#2 dropped (08-27)・#3 merged (JST で 09-01)・#4 merged (20 日目)・#5 proposed・#6 merged (最大の id) */
+function archiveBoard() {
+  const store = board();
+  finish(store, 'merged', 0);
+  finish(store, 'dropped', 0);
+  finish(store, 'merged', 4 * DAY_MIN + 16 * 60); // 2026-08-31T16:00Z = JST 09-01 01:00
+  finish(store, 'merged', 20 * DAY_MIN);
+  seed(store, {}, { now: at(0) });
+  finish(store, 'merged', 0);
+  return store;
+}
+
+test('planTaskArchive: 終わってから 30 日を過ぎた終端だけを、終わった月 (JST) ごとに選ぶ', () => {
+  const store = archiveBoard();
+  const now = at(40 * DAY_MIN);
+  const picked = (tasks, options = {}) => planTaskArchive(tasks, { now, ...options }).map(({ task, month }) => [task.id, month]);
+
+  // 終端でない #5・30 日以内の #4・id が最大の #6 は残す
+  assert.deepEqual(picked(store.list()), [['1', '2026-08'], ['2', '2026-08'], ['3', '2026-09']]);
+  assert.equal(TASK_ARCHIVE_AFTER_MS, 30 * DAY_MIN * 60_000, '実行記録の保持期間とずれている');
+  // ちょうど 30 日はまだ移さない
+  assert.deepEqual(picked(store.list(), { now: at(30 * DAY_MIN) }), []);
+  assert.deepEqual(picked(store.list(), { now: at(30 * DAY_MIN) + 1 }), [['1', '2026-08'], ['2', '2026-08']]);
+  // 期間は渡せる (壊れた値は既定の 30 日)
+  assert.deepEqual(picked(store.list(), { afterMs: 10 * DAY_MIN * 60_000 }).map(([id]) => id), ['1', '2', '3', '4']);
+  assert.deepEqual(picked(store.list(), { afterMs: -1 }).map(([id]) => id), ['1', '2', '3']);
+
+  // 終わった時刻は履歴の行で見る (updatedAt は手で触られても動く)
+  const [first, , , recent, , top] = store.list();
+  const touched = { ...first, updatedAt: iso(39 * DAY_MIN) };
+  const backdated = { ...recent, updatedAt: iso(0) };
+  const unreadable = { ...first, id: '2', history: first.history.map((h) => (h.to === 'merged' ? { ...h, at: 'いつか' } : h)) };
+  assert.deepEqual(picked([touched, backdated, unreadable, top]), [['1', '2026-08']]);
+  // 最大の id は終わっていても残す (nextId が番号を戻さないように)
+  assert.deepEqual(picked([touched]), []);
+  assert.deepEqual(planTaskArchive(null), []);
+});
+
+test('archiveEnded: 月のファイルへ書いてからボードから消し、番号は戻さない', () => {
+  const store = archiveBoard();
+  const dir = join(dirname(store.filePath), 'archive');
+  const now = at(40 * DAY_MIN);
+  const [first] = store.list();
+  const nextBefore = store.nextId();
+
+  assert.deepEqual(store.archiveEnded({ dir, now }), { moved: 3, files: ['tasks-2026-08.json', 'tasks-2026-09.json'], errors: [] });
+  assert.deepEqual(store.list().map((t) => t.id), ['4', '5', '6']);
+  assert.equal(store.nextId(), nextBefore, '移したら番号が戻った');
+  assert.deepEqual(new TaskBoardStore(store.filePath).list().map((t) => t.id), ['4', '5', '6'], 'ディスクから消えていない');
+  // 月のファイルはボードと同じ id → タスクの形で、記録は丸ごと
+  const august = JSON.parse(readFileSync(join(dir, 'tasks-2026-08.json'), 'utf8'));
+  assert.deepEqual(Object.keys(august), ['1', '2']);
+  assert.deepEqual(august['1'], first);
+  assert.deepEqual(taskArchiveFiles(dir).map((f) => basename(f)), ['tasks-2026-08.json', 'tasks-2026-09.json']);
+
+  // 2 回目は移すものが無い (何も書かない)
+  assert.deepEqual(store.archiveEnded({ dir, now }), { moved: 0, files: [], errors: [] });
+  // 後から終わった月の分は、既にあるファイルへ id で足す
+  assert.deepEqual(store.archiveEnded({ dir, now: at(55 * DAY_MIN) }), { moved: 1, files: ['tasks-2026-09.json'], errors: [] });
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(dir, 'tasks-2026-09.json'), 'utf8'))), ['3', '4']);
+  assert.deepEqual(store.list().map((t) => t.id), ['5', '6']);
+
+  // ディレクトリが無い・渡されていない
+  assert.deepEqual(taskArchiveFiles(join(dir, 'none')), []);
+  assert.deepEqual(store.archiveEnded({ now }), { moved: 0, files: [], errors: [] });
+});
+
+test('archiveEnded: 読めない月のファイルには書かずにその月の分を残し、ボードの保存が落ちても失わない', () => {
+  const store = archiveBoard();
+  const dir = join(dirname(store.filePath), 'archive');
+  const now = at(40 * DAY_MIN);
+  mkdirSync(dir, { recursive: true });
+  const august = join(dir, 'tasks-2026-08.json');
+  writeFileSync(august, '{', 'utf8');
+
+  const result = store.archiveEnded({ dir, now });
+  assert.equal(result.moved, 1);
+  assert.deepEqual(result.files, ['tasks-2026-09.json']);
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0], /^tasks-2026-08\.json: .*読めないので保存しません/);
+  assert.equal(readFileSync(august, 'utf8'), '{', '壊れたファイルの上から書いている');
+  assert.deepEqual(store.list().map((t) => t.id), ['1', '2', '4', '5', '6']);
+
+  // アーカイブへ書いた後にボードの保存が落ちた回: 両方に残るだけで、次の回が消す
+  writeFileSync(august, '{}', 'utf8');
+  store.save = () => { throw new Error('ディスクがいっぱい'); };
+  assert.throws(() => store.archiveEnded({ dir, now }), /ディスクがいっぱい/);
+  assert.deepEqual(store.list().map((t) => t.id), ['1', '2', '4', '5', '6'], 'ボードから消えた');
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(august, 'utf8'))), ['1', '2']);
+  delete store.save;
+  assert.deepEqual(store.archiveEnded({ dir, now }), { moved: 2, files: ['tasks-2026-08.json'], errors: [] });
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(august, 'utf8'))), ['1', '2']);
+  assert.deepEqual(store.list().map((t) => t.id), ['4', '5', '6']);
+
+  // 読めないボードは触らない (メモリが空なので移すものも無い)
+  const broken = tempFile();
+  writeFileSync(broken, '{', 'utf8');
+  assert.deepEqual(new TaskBoardStore(broken).archiveEnded({ dir, now }), { moved: 0, files: [], errors: [] });
 });

@@ -1,4 +1,3 @@
-// @ts-check
 /**
  * スレッド文脈に載せる発言の選別と整列。
  *
@@ -19,9 +18,9 @@ const defaultMeasure = (m) => (m?.content ?? '').length;
  *   lastMessageId は前進するので、落とした発言は二度と読まれない。予算の対象外。
  *
  * @param {object} params
- * @param {{id: string}|null} params.starter 起点投稿 (新規セッション時のみ。無ければ null)。無条件保持
- * @param {Array<{id: string}>} [params.history] 予算超過時に古い順で落としてよい発言
- * @param {Array<{id: string}>} [params.required] 落とすと恒久欠落する発言 (無条件保持)
+ * @param {object|null} params.starter 起点投稿 (新規セッション時のみ。無ければ null)。無条件保持
+ * @param {Array<object>} [params.history] 予算超過時に古い順で落としてよい発言
+ * @param {Array<object>} [params.required] 落とすと恒久欠落する発言 (無条件保持)
  * @param {string} params.triggerId 「あなた宛の指示」として別枠に出すトリガーの ID
  * @param {string} params.botUserId 自分の user ID
  * @param {boolean} [params.includeSelf] 自分の過去発言も文脈に含めるか (履歴を再構築する時)
@@ -66,7 +65,7 @@ export function selectTranscript({
   const { kept, omitted } = applyBudget(candidates, {
     charBudget,
     measure,
-    used: starterKept && starter ? measure(starter) : 0,
+    used: starterKept ? measure(starter) : 0,
   });
 
   return { messages: [...pinned, ...kept].sort(byTime), omitted };

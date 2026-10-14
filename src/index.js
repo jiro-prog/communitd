@@ -5,6 +5,7 @@
 //
 // 組み立ての順序は起動時のログの順序でもある: 設定 → 記録 → 承認台帳 → 上限 → 発議 → キュー →
 // pause → hops → bot の起動 → スケジューラ → 復旧 → tick → 配線 → コマンド。
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,8 +13,10 @@ import { ApprovalRegistry } from './approvals.js';
 import { resolveLimits } from './attachments.js';
 import { TaskBoardStore, tasksMissingTouch } from './board.js';
 import { createBoardWiring } from './bridge/board.js';
+import { recordBoot } from './bridge/boots.js';
 import { createContractWiring } from './bridge/contracts.js';
 import { createDiscordWiring, snowflakeAt } from './bridge/discord.js';
+import { createIntakeWiring } from './bridge/intake.js';
 import { createJobRunner } from './bridge/job.js';
 import { createMessageWiring } from './bridge/messages.js';
 import { createOrgApplyWiring } from './bridge/orgapply.js';
@@ -21,6 +24,7 @@ import { createPromptBuilder } from './bridge/prompt.js';
 import { createProposalWiring } from './bridge/proposals.js';
 import { createJobQueueWiring } from './bridge/queue.js';
 import { createRecoveryWiring } from './bridge/recovery.js';
+import { createRestartRequestWiring } from './bridge/restart-request.js';
 import { createRunRecorder, reconcileJobRunsOnStartup } from './bridge/recorder.js';
 import { AUTONOMY_TICK_MS, createSchedulerWiring, createTickLedger } from './bridge/scheduler.js';
 import { RESTART_DRAIN_MS, createShutdownWiring } from './bridge/shutdown.js';
@@ -31,7 +35,9 @@ import {
   POLICY_FILE,
   SECRETS_FILE,
   channelConfigForName,
+  intakeBotKeyOf,
   isInitiativeEnabled,
+  isIntakeChannel,
   loadConfigSources,
   resolveAutonomy,
   resolveDutyBots,
@@ -50,13 +56,16 @@ import {
 import { readContractKind } from './contract.js';
 import { HopTracker } from './hops.js';
 import { InboxStore } from './inbox.js';
+import { acquireInstanceLock, formatLockRefusal, releaseInstanceLock } from './instance-lock.js';
 import { createInteractionHandler, createLifecycle } from './interactions.js';
 import { JobRunStore } from './jobruns.js';
 import { sendSafe } from './mentions.js';
 import { ProposalStore } from './proposals.js';
 import { JobQueue } from './queue.js';
 import { RecoveryStore } from './recovery.js';
+import { RESTART_REQUEST_POLL_MS } from './restart.js';
 import { RosterStore, resolveEffectiveRoster } from './roster.js';
+import { runtimeOf } from './runtime.js';
 import { isSocietyEnabled, resolveSociety } from './society-policy.js';
 import { SocietyStore } from './society-store.js';
 import { formatStatus, summarizeStatus } from './status.js';
@@ -68,6 +77,8 @@ import { DOMAIN_TOOLS, sanitizeForDisplay } from './toolrules.js';
 import { ToolExtraStore } from './toolstore.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+// この起動の時刻。これより前に置かれた再起動の依頼は、起動時に読んだ設定へもう入っている
+const STARTED_AT = Date.now();
 // 全 bot の前段に付く共通規定 (制御フッター・停止契約・Discord 運用)。
 // bots.*.rolePromptFile は「その bot 固有の職務」だけを持つ
 const COMMON_ROLE_PATH = resolve(ROOT, 'roles', '_common.md');
@@ -111,6 +122,38 @@ if (configErrors.length > 0) {
 }
 const config = loadedConfig;
 
+// 二重起動の検出 (src/instance-lock.js)。**最初の台帳を開く前**に取る —
+// 2 つ目のブリッジが data/ を読み書きし始めてから断っても遅い。
+// 起動時刻は STARTED_AT ではなく OS の起動時刻に近い timeOrigin (既定値) を書く
+const instanceLock = await acquireInstanceLock({ dataDir: resolve(ROOT, 'data') });
+if (!instanceLock.ok) {
+  for (const line of formatLockRefusal(instanceLock)) console.error(`[lock] ${line}`);
+  process.exit(1);
+}
+if (instanceLock.stolen) {
+  console.error(
+    `[lock] ⚠️ 前のブリッジ (pid ${instanceLock.stolen.pid} / ${instanceLock.stolen.at} 起動) が残した `
+    + `${instanceLock.path} を引き継ぎました — その pid は居ないか、別のプロセスに再利用されています`,
+  );
+}
+// /restart の 42・SIGINT/SIGTERM・hardExit はどれも process.exit で終わるので、ここ 1 か所で消せる
+process.on('exit', () => releaseInstanceLock({ path: instanceLock.path }));
+
+// 起動の記録 (src/bridge/boots.js)。稼働中の版 (HEAD) を残す台帳はここにしか無い。記録で起動は止めない
+try {
+  recordBoot({
+    file: resolve(ROOT, 'data', 'boots.json'),
+    root: ROOT,
+    at: new Date(STARTED_AT).toISOString(),
+    pid: process.pid,
+    git: (args, cwd) => execFileSync('git', args, {
+      cwd, encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'],
+    }),
+  });
+} catch (err) {
+  console.error(`[boots] 起動の記録に失敗 (起動は続けます): ${err.message}`);
+}
+
 const store = new SessionStore(resolve(ROOT, 'data', 'sessions.json'));
 
 // スレッド別の編成 (/roster)。未設定のスレッドは制限なし。
@@ -118,11 +161,18 @@ const store = new SessionStore(resolve(ROOT, 'data', 'sessions.json'));
 // 片方だけだと「文脈に出ないのに呼べる」「呼べないのに文脈には出る」になる
 const roster = new RosterStore(resolve(ROOT, 'data', 'roster.json'));
 
-// 裁定の受信箱。台帳を持つのは記録の無かった
+// 裁定の受信箱 (docs/social-engineering.md §10)。台帳を持つのは記録の無かった
 // 停止通知だけで、稟議 (proposals) と要人間 (board) は /inbox の描画時に読む。
 // **ファイルは最初の [[notify:owner]] が届いたときに初めて書かれる** (JsonStore は
 // 構築では書かない) ので、通知を使わない配備に data/inbox.json は生えない
 const inbox = new InboxStore(resolve(ROOT, 'data', 'inbox.json'));
+// 閉じてから保持期間を過ぎた entry を捨てる (消すものが無ければ書かない)。掃除で起動は止めない
+try {
+  const pruned = inbox.pruneClosed();
+  if (pruned > 0) console.log(`[inbox] 閉じてから保持期間を過ぎた entry ${pruned} 件を消しました`);
+} catch (err) {
+  console.error(`[inbox] 閉じ済み entry の掃除に失敗 (起動は続けます): ${err.message}`);
+}
 
 // ---- 委譲契約 (T6) ----
 // role が `<!-- communitd-schema: ... -->` を宣言している bot だけが構造化出力を返し、
@@ -130,18 +180,21 @@ const inbox = new InboxStore(resolve(ROOT, 'data', 'inbox.json'));
 // 宣言の無い bot・チャンネルは完全に従来どおり動く (構造化を有効にしない限り不変)。
 const contracts = new ContractStore(resolve(ROOT, 'data', 'contracts.json'));
 
-// ---- 実行記録 ----
+// ---- 実行記録 (docs/implementation-plan.md P1) ----
 // job 1 本がどこまで進んだか (受付 → 起動 → モデル → 承認待ち → 検証 → 配送 → 終端) と、
 // どう終わったかの台帳。task の状態 (board) とは別の正本で、同じ値を両方で編集しない。
 // **受付の記録に失敗した job は起動しない** (記録の無い job は復旧の判断から漏れる)。
 // 実行後の記録に失敗したら「結果不明」として残し、自動復旧は止まる (P4)。
 const jobRuns = new JobRunStore(resolve(ROOT, 'data', 'job-runs.json'));
-reconcileJobRunsOnStartup(jobRuns);
+// job ごとのツール軌跡 (src/trace-store.js)。実行記録と同じ寿命で、ハーネスの成績が問題の手順を読む
+const TRACE_DIR = resolve(ROOT, 'data', 'traces');
+reconcileJobRunsOnStartup(jobRuns, { traceDir: TRACE_DIR });
 // runJob / runItem から実行記録へ書く口 (src/bridge/recorder.js)
 const runRecorder = createRunRecorder({ jobRuns });
 
 // ---- ツール権限の申請と承認 ----
-// エージェントは申請しかできない。承認は allowedUserIds の人間が Discord のボタンで行い、
+// エージェントは申請しかできない。承認は呼ぶ権限のある人間 (allowedUserIds / allowedRoleIds)
+// が Discord のボタンで行い、
 // 承認ぶんは config.json ではなく data/tools-extra.json へ積む (手書きの正本を機械が
 // 書き換えない)。
 //
@@ -152,7 +205,7 @@ const runRecorder = createRunRecorder({ jobRuns });
 //
 // 2 は 2026-07-31 に「実行中の job を止めて待つ MCP ブローカは Phase 2 送り」と裁定された
 // ものの実装 (T5)。**MCP ブローカではなく PreToolUse hook で成立した** —
-// hook は 60 秒以上ブロックでき、allow が実際に権限を付与する (実測 2026-08-02)。
+// hook は 60 秒以上ブロックでき、allow が実際に権限を付与する (T0 §1.4 実測 2026-08-02)。
 // これに伴い「承認済みルールは job 開始時点のスナップショット」という不変条件は、
 // hook 経路にかぎり意図的に更新される (下の runJob の allowedTools と src/broker.js)。
 const toolExtra = new ToolExtraStore(resolve(ROOT, 'data', 'tools-extra.json'));
@@ -206,7 +259,7 @@ const limits = Object.freeze({
   maxStdoutBytes: MAX_STDOUT_BYTES,
 });
 
-// ---- 組織提案 ----
+// ---- 組織提案 (docs/social-engineering.md §3.9) ----
 // initiative が有効なチャンネル設定でだけ台帳を持つ (使わない配備で data/proposals.json を作らない)。
 const INITIATIVE_ENABLED = isInitiativeEnabled(config);
 const EXEC_BOT_KEYS = resolveExecBotKeys(config);
@@ -220,7 +273,7 @@ console.log(
 );
 
 /**
- * duty を持つ bot。**起動時に 1 回だけ解決する** — 巡回の宛先は
+ * duty を持つ bot (§3.8)。**起動時に 1 回だけ解決する** — 巡回の宛先は
  * policy の静的な記述で、job の途中で動くものではない (動かすには `duty-edit`
  * 提案が採択され、適用されて、プロセスが上がり直す)。
  */
@@ -245,10 +298,10 @@ console.log(
 
 // ---- 自律運転の kill switch (/pause・/resume) ----
 // **再起動をまたいで残す。** プロセスを立て直したら勝手に動き出す作りだと、
-// 止めた理由が残っているのに社会が動き出す
+// 止めた理由が残っているのに社会が動き出す (docs/social-engineering.md §3.7)
 const pauseStore = new PauseStore(resolve(ROOT, 'data', 'pause.json'));
 if (pauseStore.broken) {
-  // 読めない = 「止めていない」ではない。退避もしないので、次の起動でも同じ判断になる
+  // 読めない = 「止めていない」ではない (§12.3 (1))。退避もしないので、次の起動でも同じ判断になる
   console.error(
     `[pause] pause.json が読めません (${pauseStore.broken.reason}) — **停止扱いで起動します**。`
     + '/resume では解けません (台帳を直すか手で退避してください)',
@@ -294,7 +347,7 @@ if (bots.size === 0) {
 // ready が揃わない bot がいても完了通知が出ないままにならないための保険
 setTimeout(() => void shutdownWiring.announceRestartComplete(), 60000).unref?.();
 
-// ---- 自律運転のスケジューラ ----
+// ---- 自律運転のスケジューラ (docs/social-engineering.md §3.1) ----
 //
 // **新しい実行経路を作らない。** ここがするのは「スレッドを作って起動メッセージを
 // 投稿する」ところまでで、以降は人間がメンションしたときと同じ MessageCreate →
@@ -310,7 +363,7 @@ const autonomyChannels = Object.keys(config.channels ?? {}).filter(
 /**
  * チャンネル名 → スケジューラの勘定。
  *
- * **台帳の部分だけディスクへ落とす**。巡回の最終実行時刻と日次の消費を
+ * **台帳の部分だけディスクへ落とす** (§3.9)。巡回の最終実行時刻と日次の消費を
  * in-memory のままにすると、再起動のたびに「間隔が明けた」と見なして巡回が連発する。
  * 何を持ち越すかは scheduler.js の `persistedState` / `restoreState` が決める
  * (バックオフは持ち越さない — 走っているプロセスの観測であって台帳ではない)。
@@ -324,11 +377,25 @@ const board = autonomyChannels.length > 0
   ? new TaskBoardStore(resolve(ROOT, 'data', 'tasks.json'))
   : null;
 
+// 終わってから保持期間を過ぎたタスクを月ごとのアーカイブ (data/archive/tasks-YYYY-MM.json) へ移す。
+// 起動時と 1 日 1 回。移すものが無ければ書かない。掃除で起動もボードも止めない
+const archiveEndedTasks = () => {
+  try {
+    const { moved, files, errors } = board.archiveEnded({ dir: resolve(ROOT, 'data', 'archive') });
+    if (moved > 0) console.log(`[board] 終わってから保持期間を過ぎたタスク ${moved} 件をアーカイブへ移しました (${files.join(' / ')})`);
+    if (errors.length > 0) console.error(`[board] アーカイブへ移せなかった月があります (ボードに残します): ${errors.join(' / ')}`);
+  } catch (err) {
+    console.error(`[board] タスクのアーカイブに失敗 (ボードはそのまま続けます): ${err.message}`);
+  }
+};
+
 if (board) {
+  archiveEndedTasks();
+  setInterval(archiveEndedTasks, 24 * 60 * 60 * 1000).unref?.();
   console.log(
     `[scheduler] 自律運転: ${autonomyChannels.join(' / ')} (ボード ${board.list().length} 件)`,
   );
-  // touch 不明のタスクは「何とでも競合する」ので、1 件でも open だと
+  // touch 不明のタスクは「何とでも競合する」ので (§3.9)、1 件でも open だと
   // そのボードでは組織提案が全件拒否される。黙って発議が通らない状態にしない
   const missingTouch = tasksMissingTouch(board.list());
   if (missingTouch.length > 0) {
@@ -343,13 +410,13 @@ if (board) {
   console.log('[scheduler] 自律運転が有効なチャンネルはありません (ボードは持ちません)');
 }
 
-// ---- 止まった仕事の検知と再開 ----
+// ---- 止まった仕事の検知と再開 (docs/social-engineering.md §11.2〜11.4) ----
 // 判定は純粋関数 (src/taskstatus.js / src/recovery.js)、順序は src/recovery-wiring.js。
 // ここは実体を結ぶだけ。通知はタスクのスレッドへ 1 通 (同じ問題につき 1 回)。
 // 再開世代と自動復旧の勘定は data/recovery.json (再起動・手動再開で自動枠をリセットしない)
 const recoveryStore = board ? new RecoveryStore(resolve(ROOT, 'data', 'recovery.json')) : null;
 
-// ---- 自律社会の台帳 ----
+// ---- 自律社会の台帳 (docs/society-ledger.md §1) ----
 // **`society` を書いていない配備では mode: off で、ここは fs に一切触れない** (受入 C15)。
 // observe / active で不在・破損なら「起動停止」の理由を持つが、**プロセスは止めない** —
 // 止まるのは社会由来の処理だけで、既存の受付・自律起動はそのまま動く。
@@ -413,11 +480,11 @@ const societyWiring = createSocietyWiring({
   availableBotKeys: () => [...bots.values()].filter((b) => b.userId).map((b) => b.key),
   // 走査も投稿も Discord が要る。**モジュール読込時には走らせない** (ready 後の最初の tick から)
   ready: () => [...bots.values()].some((b) => b.userId),
-  // 実効権限の材料 (`既存能力 ∩ Mandate ∩ Claim.scope`)。**判断は society-policy.js**
+  // 実効権限の材料 (§3 の `既存能力 ∩ Mandate ∩ Claim.scope`)。**判断は society-policy.js**
   // の純粋関数が持ち、ここは設定と実行状態という事実を渡すだけ
   botFacts: () => Object.fromEntries(
     Object.entries(config.bots ?? {}).map(([key, cfg]) => [key, {
-      runtime: cfg?.runtime ?? 'claude',
+      runtime: runtimeOf(cfg),
       online: Boolean(bots.get(key)?.userId),
     }]),
   ),
@@ -432,7 +499,7 @@ const societyWiring = createSocietyWiring({
   },
 });
 
-// ---- 読めない台帳の一覧 ----
+// ---- 読めない台帳の一覧 (docs/social-engineering.md §12.3 (1)) ----
 // **退避せず在処に残す**ので、起動のたびに同じ列挙が出る。
 //
 // **門になる台帳とそれ以外を分ける** (Opus2 レビュー 2026-09-07 Major1)。自律起動と自動復旧を
@@ -525,10 +592,12 @@ const scheduler = createSchedulerWiring({
   tickStates,
   saveTickState,
   findGuildChannel: discord.findGuildChannel,
-  // 自律起動の門: これらの台帳がどれか 1 つでも読めなければ tick は何も選ばない
+  // 自律起動の門 (§12.3 (1)): これらの台帳がどれか 1 つでも読めなければ tick は何も選ばない
   jobRuns,
   tickStateStore,
   recoveryStore,
+  // 改訂の解き直しが落ち着いたらレビューを呼ぶ (ボードの配線はこの下で作る)
+  settleReplays: (args) => boardWiring.settleReplays(args),
 });
 
 const proposalWiring = createProposalWiring({
@@ -563,6 +632,8 @@ const boardWiring = createBoardWiring({
   channelConfigFor: discord.channelConfigFor,
   safeProposalContext: proposalWiring.safeProposalContext,
   releaseApplyWorktree: (task) => orgApply.releaseApplyWorktree(task),
+  // レビューの証拠を測る子のテストから bot の token を外す (verify と同じ集合)
+  scrubEnvKeys: Object.values(config.bots).map((b) => b.tokenEnv),
 });
 
 const orgApply = createOrgApplyWiring({
@@ -595,6 +666,8 @@ const turn = createTurnWiring({
   botEntries: discord.botEntries,
   contractCwd: contractWiring.contractCwd,
   noteTaskCompletion: boardWiring.noteTaskCompletion,
+  // verify 最終 NG の板タスクをレビューへ回す経路 (§12.3 (3) の (ii))
+  taskVerifyRoute: boardWiring.taskVerifyRoute,
   postApprovalRequests: toolApprovals.postApprovalRequests,
 });
 
@@ -615,7 +688,36 @@ const jobRunner = createJobRunner({
   buildPrompt: prompt.buildPrompt,
   isInfraMessage: prompt.isInfraMessage,
   postTurn: turn.postTurn,
-  fileProposal: boardWiring.fileProposal,
+  // 巡回 (スカウト) の報告は提案の数を勘定へ入れる (0 件が続けば間隔を伸ばし、企画の巡回を前倒しする)。
+  // 数えるのは提案した数なので、起票の結果 (0 件・断り・失敗) に関わらず数える。本文は次の巡回の起動文の前に出す。
+  // 申し送り (carry) は起票と関係なく先に溜め、次の企画の巡回へ渡す (作者を直接呼ばない口)
+  fileProposal: async (args) => {
+    let carried = '';
+    try {
+      carried = scheduler.noteCarry({
+        channelName: args?.cc?.channelName,
+        botKey: args?.bot?.key,
+        items: args?.contract?.carry,
+      });
+    } catch (err) {
+      console.error(`[scheduler] 申し送りを溜められませんでした: ${err.message}`);
+    }
+    try {
+      const note = await boardWiring.fileProposal(args);
+      return carried ? `${note}\n${carried}` : note;
+    } finally {
+      try {
+        scheduler.noteScoutReport({
+          threadId: args?.thread?.id,
+          botKey: args?.bot?.key,
+          proposed: Array.isArray(args?.contract?.tasks) ? args.contract.tasks.length : 0,
+          body: args?.contract?.body ?? '',
+        });
+      } catch (err) {
+        console.error(`[scheduler] 巡回の報告を勘定へ入れられませんでした: ${err.message}`);
+      }
+    }
+  },
   applyApproval: boardWiring.applyApproval,
   applyReview: boardWiring.applyReview,
   applyProposalAdjudication: proposalWiring.applyProposalAdjudication,
@@ -624,6 +726,7 @@ const jobRunner = createJobRunner({
   society: societyWiring,
   decideApproval: toolApprovals.decideApproval,
   botEntries: discord.botEntries,
+  traceDir: TRACE_DIR,
 });
 
 const jobQueue = createJobQueueWiring({
@@ -636,6 +739,36 @@ const jobQueue = createJobQueueWiring({
   society: societyWiring,
 });
 
+// ---- 受付 (チャンネル直下の振り分け — docs/notes/2026-10-11-intake.md) ----
+// 受付 bot が居ない配備でも作っておく (呼ばれないだけ)。停止の口 (abortAll) を shutdown と /stop へ渡すので
+// shutdown より先に組む
+const intake = createIntakeWiring({
+  config,
+  root: ROOT,
+  jobRuns,
+  board,
+  lifecycle,
+  botEntries: discord.botEntries,
+});
+{
+  const intakeKey = intakeBotKeyOf(config);
+  const intakeChannels = Object.entries(config.channels ?? {})
+    .filter(([, cc]) => isIntakeChannel(cc))
+    .map(([name]) => name);
+  if (intakeKey && intakeChannels.length > 0) {
+    // **受付 bot が起動していないと、受付のチャンネルは黙って「メンションだけ」になる** —
+    // 直下の発言は誰にも拾われず、返信での起動も止まったまま。気付けるように起動時に言う
+    if (!bots.has(intakeKey)) {
+      console.error(
+        `[intake] 受付 bot ${intakeKey} が起動していません (トークン未設定) — ${intakeChannels.join(' / ')} の直下の発言は`
+        + ' 誰にも拾われません (bot へのメンションは今までどおり届きます)',
+      );
+    } else {
+      console.log(`[intake] 受付: ${intakeKey} が ${intakeChannels.join(' / ')} の直下の発言を振り分けます`);
+    }
+  }
+}
+
 const shutdownWiring = createShutdownWiring({
   root: ROOT,
   bots,
@@ -645,9 +778,27 @@ const shutdownWiring = createShutdownWiring({
   waitForJobsDrained: jobQueue.waitForJobsDrained,
   // 適用回路の verify は job ではない (tick から走る) ので、停止はここから別に伝える
   abortOrgApply: () => orgApply.abortVerify(),
+  // 受付も job ではない (レーンの外で走る) — 同じく別に伝える
+  abortIntake: () => intake.abortAll(),
 });
 
-// 上限で起動を見送ったことを受信箱へ。**bridge 同士は import しない**ので、
+// 再起動の依頼 (data/restart-request.json)。npm run new-project などが設定を書き換えたあと
+// 置いていく。job が 1 件も無いときにだけ /restart と同じ手順で落ちる (中断はしない)
+const restartRequests = createRestartRequestWiring({
+  root: ROOT,
+  startedAt: STARTED_AT,
+  jobs,
+  lifecycle,
+  waitForJobsDrained: jobQueue.waitForJobsDrained,
+  writeRestartNotice: (notice) => shutdownWiring.writeRestartNotice(notice),
+  shutdown: (...args) => shutdownWiring.shutdown(...args),
+  restartDrainMs: RESTART_DRAIN_MS,
+});
+setInterval(() => {
+  restartRequests.check().catch((err) => console.error('[restart-request] 確認に失敗', err));
+}, RESTART_REQUEST_POLL_MS).unref?.();
+
+// 上限で起動を見送ったことを受信箱へ (§10.3)。**bridge 同士は import しない**ので、
 // 実体はここで組んで messages へ渡す (turn.js の noteOwnerCall と同じ形)。
 // 閉じるのは人間の発言 = closeInboxForThread なので、通知の条件と閉じる条件がそろう
 const noteHopLimit = ({ threadId, channelName, botKey, reason, messageId }) => {
@@ -673,7 +824,7 @@ const messages = createMessageWiring({
   board,
   jobRuns,
   recovery,
-  // 印付きの起動を保存済みの Action と照合し、受付を台帳へ書く
+  // 印付きの起動を保存済みの Action と照合し、受付を台帳へ書く (§5)
   society: societyWiring,
   lifecycle,
   limits,
@@ -691,6 +842,8 @@ const messages = createMessageWiring({
   // 上限で見送ったときに知らせる相手 (空なら本文だけ出す) と、その記録先
   ownerTargets: OWNER_TARGETS,
   noteHopLimit,
+  // チャンネル直下の投稿を受付 bot が受けたときの行き先
+  intake,
 });
 
 process.on('SIGINT', () => void shutdownWiring.shutdown(130));
@@ -736,16 +889,18 @@ const onInteraction = createInteractionHandler({
   // 復旧待ち (`/inbox` の 4 節目)。判定は実行記録・契約・pause を読むので復旧の service が持つ
   // (ボードの無い配備では null なので関数で渡す)
   recoveryRows: () => (recovery ? recovery.rows() : []),
-  // `/retry` — 手動再開の実体。自動復旧も同じ入口を使う
+  // `/retry` (§11.3) — 手動再開の実体。自動復旧 (§11.4) も同じ入口を使う
   retryTask: (args) => (recovery
     ? recovery.retry(args)
     : { ok: false, reason: '自律運転の機能が無効です (ボードを持つチャンネルがありません)', warnings: [] }),
-  // `/status` — 集計と描画は純粋関数 (src/status.js)。材料をここで集める
+  // `/status` (§11.5) — 集計と描画は純粋関数 (src/status.js)。材料をここで集める
   statusReport: ({ channelName }) => statusReport(channelName),
   // `/case` — 台帳の読み書きと描画は society の配線が持つ。表示のエスケープだけここで挿す
   caseCommand: (request) => societyWiring.caseCommand({ ...request, escape: sanitizeForDisplay }),
-  // `/stop` の案件停止。job を止める前に呼ばれる — off / halted の判断は配線側
+  // `/stop` の案件停止 (§12.2 (g))。job を止める前に呼ばれる — off / halted の判断は配線側
   societyStop: (request) => societyWiring.stopCases(request),
+  // `/stop scope:all` で受付も止める (受付はキューに載らない)
+  stopIntake: () => intake.abortAll(),
 });
 
 /**
@@ -760,7 +915,8 @@ function statusReport(channelName) {
   const summary = summarizeStatus({
     channelName,
     tasks: board ? board.list({ channel: channelName }) : [],
-    statusOf: (task) => (recovery ? recovery.statusOf(task) : { status: 'unknown', reason: 'ボードなし', since: null, waitedMs: null, next: 'unknown', run: null }),
+    // 表示用 (復旧待ちの理由の先頭に自動復旧の判断が載る)。判断には使わない
+    statusOf: (task) => (recovery ? recovery.displayStatusOf(task) : { status: 'unknown', reason: 'ボードなし', since: null, waitedMs: null, next: 'unknown', run: null }),
     runs: jobRuns.list({ channel: channelName }),
     runsError: jobRuns.broken ?? (jobRuns.writeFailures.length > 0 ? `書き込みに失敗した記録がある (${jobRuns.writeFailures.length} 件)` : null),
     // 実行記録以外の台帳の異常も同じ 1 通で見せる (門かどうかは gate で区別する)
@@ -772,6 +928,8 @@ function statusReport(channelName) {
     backoffUntil: state?.backoffUntil ?? 0,
     dayJobsLeft: autonomy?.enabled ? Math.max(0, autonomy.maxJobsPerDay - (Number(state?.jobsToday) || 0)) : null,
     maxJobsPerDay: autonomy?.enabled ? autonomy.maxJobsPerDay : null,
+    // 承認済みが同時枠の空き待ちなら、枠を持っているタスクを運転の行に添える
+    maxConcurrentTasks: autonomy?.enabled ? autonomy.maxConcurrentTasks : null,
     // このチャンネルで自律運転が有効か (未設定のチャンネルに「動いています」と出さない)
     autonomy: autonomy?.enabled === true,
   });

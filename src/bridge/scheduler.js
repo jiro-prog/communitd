@@ -1,4 +1,4 @@
-// 自律運転のスケジューラの実体 (src/index.js から切り出し)。
+// 自律運転のスケジューラの実体 (docs/social-engineering.md §3.1。src/index.js から切り出し)。
 //
 // **新しい実行経路を作らない。** ここがするのは「スレッドを作って起動メッセージを
 // 投稿する」ところまでで、以降は人間がメンションしたときと同じ MessageCreate →
@@ -6,12 +6,23 @@
 // **enqueue / runJob をここから直接呼ばないこと** — 呼んだ時点で入口の認可を迂回する。
 //
 // 判断は src/scheduler.js の純粋関数が持ち、ここは選ばれた行動を Discord とボードへ落とすだけ。
-import { canSpendJob, scoutBoardView } from '../board.js';
+import { readFileSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
+
+import { approvalNote, canSpendJob, scoutBoardView } from '../board.js';
 import { channelConfigForName, resolveAutonomy } from '../config.js';
 import { formatSchemaTag } from '../contract.js';
+import { harnessGate, ledgerStartLines, revisionLedger, summarizeHarness, verdictLine } from '../harness.js';
 import {
+  approvalNoteMessages,
+  carryMessages,
+  harnessStartMessage,
+  harnessThreadName,
   initiativeStartMessage,
   initiativeThreadName,
+  planStartMessage,
+  planThreadName,
+  scoutReportMessages,
   scoutStartMessage,
   scoutThreadName,
   sendSafe,
@@ -21,29 +32,50 @@ import {
 import {
   INITIATIVE_JOB_BUDGET,
   SCOUT_JOB_BUDGET,
+  addCarry,
   backoffOutcomeFor,
   chargeInitiative,
+  dropCarry,
   dutiesForEvent,
   formatInitiativeTag,
   initialState,
+  parseLimitReset,
   persistedState,
   planTick,
   recordFailure,
+  recordScoutReport,
   recordSuccess,
+  resolveHarness,
   resolveInitiative,
+  resolvePlan,
   resolveScout,
   resolveStartTask,
   restoreState,
+  scoutPace,
 } from '../scheduler.js';
 import { brokenLedgers, formatBrokenLedgers } from '../store.js';
+import { parseThemes, themeCost, themeCostText, themeProgress, themesGate } from '../themes.js';
 
 /** tick の間隔。判断は純粋関数なので、何も起こさない tick は I/O もトークンも使わない */
 export const AUTONOMY_TICK_MS = 60 * 1000;
 
+/** 企画の起動文に行を出す主題の状態 (進行中と配備待ち — 完了 / 取り下げは数だけ) */
+const LISTED_THEME_STATES = Object.freeze(['active', 'waiting']);
+
+/**
+ * 終了理由 `failed(…)` の中身から、上限が明ける時刻を読む (読めなければ null)。
+ * **包みを剥いてから読む** — job.js が理由を 60 字で切るので、tz の閉じ括弧が落ちた形に
+ * `failed(…)` の `)` を当てると、切れた tz を読んでしまう (`Etc/GMT+10` → `Etc/GMT+1`)
+ */
+function limitResetOf(reason, now) {
+  const inner = /^failed\(([\s\S]*)\)$/.exec(reason ?? '')?.[1];
+  return inner === undefined ? null : parseLimitReset(inner, now);
+}
+
 /**
  * チャンネル名 → スケジューラの勘定。
  *
- * **台帳の部分だけディスクへ落とす**。巡回の最終実行時刻と日次の消費を
+ * **台帳の部分だけディスクへ落とす** (§3.9)。巡回の最終実行時刻と日次の消費を
  * in-memory のままにすると、再起動のたびに「間隔が明けた」と見なして巡回が連発する。
  * 何を持ち越すかは scheduler.js の `persistedState` / `restoreState` が決める
  * (バックオフは持ち越さない — 走っているプロセスの観測であって台帳ではない)。
@@ -86,14 +118,16 @@ export function createTickLedger({ tickStateStore, autonomyChannels }) {
  * @param {Map<string, object>} deps.tickStates
  * @param {(name: string, state: object) => void} deps.saveTickState
  * @param {(client: object, name: string) => object|null} deps.findGuildChannel
- * @param {object|null} [deps.jobRuns]        実行記録の台帳 (健全性だけ見る)
+ * @param {object|null} [deps.jobRuns]        実行記録の台帳 (健全性と、ハーネスの成績の材料)
  * @param {object|null} [deps.tickStateStore] 勘定の台帳 (同上)
  * @param {object|null} [deps.recoveryStore]  復旧世代の台帳 (同上)
+ * @param {((p: {channelName: string, autonomy: object, now: number}) => Promise<void>)|null} [deps.settleReplays]
+ *   改訂の解き直しが落ち着いたらレビューを呼ぶ (src/bridge/board.js — 後で作る配線なので関数で渡す)
  */
 export function createSchedulerWiring({
   config, board, bots, hops, proposals, dutyBots: DUTY_BOTS, pauseStore, lifecycle, recovery,
   autonomyChannels, tickStates, saveTickState, findGuildChannel,
-  jobRuns = null, tickStateStore = null, recoveryStore = null,
+  jobRuns = null, tickStateStore = null, recoveryStore = null, settleReplays = null,
 }) {
   /** pause 中のログを 60 秒ごとに撒かないための直近の状態 */
   let pauseNoticed = false;
@@ -101,7 +135,7 @@ export function createSchedulerWiring({
   let brokenNoticed = false;
 
   /**
-   * 自律起動が根拠にする台帳。**どれか 1 つでも読めなければ止める** —
+   * 自律起動が根拠にする台帳 (§12.3 (1))。**どれか 1 つでも読めなければ止める** —
    * 「停止していない」「記録が無い」「仕事が無い」は、読めなかっただけかもしれない。
    * 人間のメンション・handoff は従来どおり通る (止めているのは自律起動だけ)。
    */
@@ -110,7 +144,7 @@ export function createSchedulerWiring({
   }
 
   /**
-   * `thread:bot` → その**次の 1 job だけ**に使うスキーマ種別 (スカウト job)。
+   * `thread:bot` → その**次の 1 job だけ**に使うスキーマ種別 (§3.3 のスカウト job)。
    *
    * スカウトは「同じ bot が通常の役割のまま、その job だけ task-proposal で返す」必要が
    * あるので、役割文の宣言は据え置いて種別だけをかぶせる。**in-memory・1 回きり**で、
@@ -133,6 +167,76 @@ export function createSchedulerWiring({
   }
 
   /**
+   * チャンネル名 → いちばん新しい巡回 (スカウト) のスレッドと担当。巡回の報告を勘定へ入れるのに使う
+   * (noteScoutReport)。**in-memory・チャンネルごとに 1 件** — 新しい巡回で上書きするので増え続けず、
+   * 再起動の前に始まった巡回の報告は数えない (間隔を伸ばす材料が 1 回欠けるだけ)
+   */
+  const scoutThreadOf = new Map();
+
+  /**
+   * チャンネル名 → いちばん新しい巡回の報告 (`{ at, proposed, body }`)。次の巡回の起動文の前に出す
+   * (startScout)。**in-memory・チャンネルごとに 1 件** — 台帳 (tick-states.json) の形を変えずに済ませる
+   * 代わりに、再起動後の最初の巡回には出ない。出したあとも消さない (次の報告で上書きする)
+   */
+  const lastScoutReportOf = new Map();
+
+  /**
+   * 巡回 (スカウト) の job が返した task-proposal を勘定へ入れる (src/index.js が fileProposal を包んで呼ぶ)。
+   * 提案 0 件が続けばスカウトの間隔が伸び、企画の巡回が前倒しになる (src/scheduler.js の planTick)。
+   * 本文と件数は次の巡回へ「前回の巡回の報告」として渡す。
+   *
+   * 数えるのは**自分が起こした巡回のスレッドで、巡回の担当が出した最初の報告だけ** — タスク・ハーネス・
+   * 企画のスレッドの task-proposal や、巡回のスレッドで人が呼び直した 2 回目は巡回の結果ではない。
+   *
+   * @param {{threadId: string, botKey: string, proposed: number, body?: string, now?: number}} p
+   *   proposed = 契約の tasks の数 (ボードが載せた数ではない — recordScoutReport)。now = 終えた時刻
+   * @returns {boolean} 数えたか
+   */
+  function noteScoutReport({ threadId, botKey, proposed, body = '', now = Date.now() } = {}) {
+    for (const [channelName, scout] of scoutThreadOf) {
+      if (scout.threadId !== threadId || scout.botKey !== botKey) continue;
+      scoutThreadOf.delete(channelName);
+      lastScoutReportOf.set(channelName, { at: now, proposed, body: String(body ?? '') });
+      const state = recordScoutReport(tickStates.get(channelName) ?? initialState(), { proposed });
+      saveTickState(channelName, state);
+      if (state.scoutIdle > 0) {
+        const autonomy = resolveAutonomy(channelConfigForName(config, channelName));
+        const pace = scoutPace({ autonomy, idle: state.scoutIdle });
+        console.log(
+          `[scheduler] ${channelName}: 巡回の提案 0 件 (続けて ${state.scoutIdle} 回) — 次の巡回は`
+          + ` ${pace.intervalMin} 分後 (merge があれば ${pace.baseMin} 分に戻す)`
+          + `${state.scoutIdleSincePlan > 0 ? ` / 前の企画の巡回の後 ${state.scoutIdleSincePlan} 回` : ''}`,
+        );
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * 巡回の返答 (task-proposal) の申し送り (`carry`) を溜める (src/index.js が fileProposal を包んで呼ぶ)。
+   * 次の企画の巡回の起動文の前に出し、作者へ上げるかは企画の巡回がまとめて決める (startPlan)。
+   * 巡回のスレッドかは問わない — ハーネスの改訂や企画自身の申し送りも同じ置き場へ。
+   *
+   * @param {{channelName: string, botKey: string, items?: string[], now?: number}} p
+   * @returns {string} 巡回のスレッドへ添える 1 行 (申し送りが無ければ空文字)
+   */
+  function noteCarry({ channelName, botKey, items, now = Date.now() } = {}) {
+    if (!Array.isArray(items) || items.length === 0) return '';
+    if (!autonomyChannels.includes(channelName)) return '';
+    const autonomy = resolveAutonomy(channelConfigForName(config, channelName));
+    // 企画の巡回を置いていなければ回収する者が居ない — 溜めずに、届かないことをその場で言う
+    if (!autonomy.planner?.bot) {
+      return '⚠️ 申し送りを受け取りましたが、このチャンネルには企画の巡回が無いので届きません (必要なら本文で作者に)';
+    }
+    const { state, added, dropped } = addCarry(tickStates.get(channelName) ?? initialState(), { items, from: botKey, at: now });
+    if (added === 0) return '';
+    saveTickState(channelName, state);
+    return `📮 次の企画の巡回へ申し送り ${added} 件 (溜まっている ${state.carry.length} 件`
+      + `${dropped > 0 ? `、上限で古い ${dropped} 件を落とした` : ''})`;
+  }
+
+  /**
    * 1 tick 分の判断と適用。
    * **判断は src/scheduler.js の純粋関数**が持ち、ここは選ばれた行動を
    * Discord とボードへ落とすだけ。行動がゼロなら外へ 1 回も出ない。
@@ -145,7 +249,7 @@ export function createSchedulerWiring({
       console.log('[pause] 自律運転は停止中 — tick は日付の繰越だけ進めます (/resume で再開)');
     }
     pauseNoticed = paused; // 止めている間ログを撒かない / 再開したらまた 1 回だけ出す
-    // 制御台帳が読めないときも停止と同じ扱い。**pause より重い** — 人が押した
+    // 制御台帳が読めないときも停止と同じ扱い (§12.3 (1))。**pause より重い** — 人が押した
     // 停止は /resume で解けるが、こちらは台帳を直すか手で退避するまで解けない
     const brokenList = brokenControlLedgers();
     if (brokenList.length > 0 && !brokenNoticed) {
@@ -155,7 +259,7 @@ export function createSchedulerWiring({
       );
     }
     brokenNoticed = brokenList.length > 0;
-    // 止まった仕事の見回り。**pause 中も回す** — 止めているのは自律起動で、観測ではない。
+    // 止まった仕事の見回り (§11.2)。**pause 中も回す** — 止めているのは自律起動で、観測ではない。
     // ここが落ちても tick は続ける (見回りは起動の前提ではない)
     if (recovery) {
       try {
@@ -163,7 +267,7 @@ export function createSchedulerWiring({
       } catch (err) {
         console.error(`[recovery] 見回りに失敗 (tick は続けます): ${err.message}`);
       }
-      // 自動復旧。既定は観測 mode (判断をログに残すだけ)。`auto` のチャンネルでも
+      // 自動復旧 (§11.4)。既定は観測 mode (判断をログに残すだけ)。`auto` のチャンネルでも
       // 起こすのは副作用が始まっていないと実行記録で確認できる停止だけ。
       // **受付停止中・pause 中は planRecovery 側が止める** (pause は判定の材料として渡っている)
       if (lifecycle.accepting) {
@@ -176,6 +280,17 @@ export function createSchedulerWiring({
     }
     for (const name of autonomyChannels) {
       const autonomy = resolveAutonomy(channelConfigForName(config, name));
+      // 改訂の解き直し (src/replay.js) が落ち着いたらレビューを呼ぶ。着手の判断より先 — 落ち着いた改訂が
+      // 同時枠に戻るので。落ちても tick は続ける (見回りと同じく、起動の前提ではない)
+      if (settleReplays && brokenList.length === 0) {
+        try {
+          await settleReplays({ channelName: name, autonomy, now });
+        } catch (err) {
+          console.error(`[replay] ${name}: 解き直しの見回りに失敗 (tick は続けます): ${err.message}`);
+        }
+      }
+      const harness = autonomy.harness.bot ? measureHarness(autonomy, now) : null;
+      const themes = autonomy.planner.bot ? readThemes(name, autonomy) : null;
       const planned = planTick({
         tasks: board.list({ channel: name }),
         // **pause 中は「無効なチャンネル」として渡す。** 判断の層 (src/scheduler.js) に
@@ -188,6 +303,8 @@ export function createSchedulerWiring({
         // 判断の層に config の読み方を持ち込まずに、巡回だけを落とせる
         dutyBots: proposals ? DUTY_BOTS : [],
         proposals: proposals ? proposals.openList() : [],
+        harness: harness?.gate ?? null,
+        plan: themes?.gate ?? null,
         now,
         state: tickStates.get(name) ?? initialState(),
       });
@@ -196,7 +313,11 @@ export function createSchedulerWiring({
         if (action.kind === 'start-task') {
           await startTaskFromBoard({ channelName: name, autonomy, action });
         } else if (action.kind === 'scout') {
-          await startScout({ channelName: name, autonomy, action, now });
+          await startScout({ channelName: name, autonomy, action, now, themes });
+        } else if (action.kind === 'harness') {
+          await startHarness({ channelName: name, autonomy, action, now, measured: harness });
+        } else if (action.kind === 'plan') {
+          await startPlan({ channelName: name, autonomy, action, now, themes });
         } else if (action.kind === 'initiative') {
           await startInitiative({ channelName: name, autonomy, action, now });
         } else {
@@ -208,11 +329,13 @@ export function createSchedulerWiring({
 
   /**
    * `start-task` の適用。**順序が不変条件**:
-   * スレッド作成 → ボードの着手記録 → 予算の払い出し → 起動メッセージ。
+   * スレッド作成 → ボードの着手記録 → 予算の払い出し → 承認時の備考 → 起動メッセージ。
    *
    * - スレッド作成に失敗したらボードは触らない (approved のまま次の tick で再挑戦)
    * - 予算を投稿より先に配るのは、受け手の job が門番を通らないまま走らないため
    *   (予算未付与のスレッドは hops の門番ごと不在 = 実質無制限)
+   * - 承認時の備考は**メンションより前**に出す (後だと最初の job の文脈に入る保証が無い)。
+   *   出せなくても着手は止めない — 同じ備考はレビューの依頼にも載る
    * - 投稿に失敗したら blocked (要人間) へ落とす。in-progress のまま残すと、
    *   誰も居ないスレッドが同時実行の枠を占め続ける
    */
@@ -260,6 +383,22 @@ export function createSchedulerWiring({
       : autonomy.taskJobBudget;
     hops.grantTaskBudget(thread.id, budget);
 
+    const approval = approvalNote(started);
+    const noteTexts = approvalNoteMessages({
+      note: approval.note,
+      approver: bots.get(approval.by)?.cfg?.displayName ?? approval.by,
+    });
+    for (const text of noteTexts) {
+      try {
+        await sendSafe(thread, text);
+      } catch (err) {
+        console.error(
+          `[scheduler] ${channelName}: タスク ${task.id} の承認時の備考を出せません (着手は続けます): ${err.message}`,
+        );
+        break;
+      }
+    }
+
     try {
       await sendSafe(
         thread,
@@ -287,7 +426,7 @@ export function createSchedulerWiring({
   }
 
   /**
-   * `scout` の適用。start-task と同じ順序の約束:
+   * `scout` の適用 (§3.3)。start-task と同じ順序の約束:
    * スレッド作成 → 予算の払い出し → 起動メッセージ。
    *
    * ボードは触らない (スカウトが起票するのは job が返ってきてから — fileProposal)。
@@ -295,7 +434,7 @@ export function createSchedulerWiring({
    * 起動しなかった job のために種別を残すと、そのスレッドで次に走った
    * 別の job が task-proposal で検査されてしまう。
    */
-  async function startScout({ channelName, autonomy, action, now }) {
+  async function startScout({ channelName, autonomy, action, now, themes = null }) {
     const decided = resolveScout(action, {
       autonomy,
       availableBotKeys: [...bots.values()].filter((b) => b.userId).map((b) => b.key),
@@ -324,18 +463,39 @@ export function createSchedulerWiring({
 
     hops.grantTaskBudget(thread.id, SCOUT_JOB_BUDGET);
     setContractKindOverride(thread.id, scoutKey, 'task-proposal');
+    const weights = themes ? themeWeights(channelName, themes.gate.active) : null;
+    // 前回の巡回の報告は起動文より前に出す (承認時の備考と同じ — 前に置けば最初の job の文脈に入る)。
+    // 出せなくても巡回は続ける
+    let reportShown = false;
+    for (const text of scoutReportMessages({ report: lastScoutReportOf.get(channelName) ?? null })) {
+      try {
+        await sendSafe(thread, text);
+        reportShown = true;
+      } catch (err) {
+        console.error(`[scheduler] ${channelName}: 前回の巡回の報告を出せません (巡回は続けます): ${err.message}`);
+        break;
+      }
+    }
     try {
       await sendSafe(
         thread,
         scoutStartMessage({
           botUserId: scout.userId,
           directionFile: autonomy.directionFile,
-          // 重複起票を避ける材料 = 非終端すべてと、直近に着地したもの。
+          // 重複起票を避ける材料 (§9.1) = 非終端すべてと、直近に着地したもの。
           // 「着手前だけ」に絞ると、review 中の仕事が見えず同じものが再起票される。
           // **`now` は渡さない** — tick の now はスレッド作成を待つ前の時刻なので、
           // その間に着地した merge が「未来」扱いで隠れる (既定の Date.now() は
           // 引数の board.list を評価した後に読まれる)
           openTasks: scoutBoardView(board.list({ channel: channelName })),
+          // 企画の巡回を置いたチャンネルだけ、進行中の主題を優先させる (読めなければ渡さない)。
+          // 重さは添えるだけ (出せなければ今の文面のまま)
+          themes: themes
+            ? {
+              file: autonomy.planner.themesFile,
+              active: themes.gate.active.map((theme) => (weights ? { ...theme, weight: weights.get(theme.slug) } : theme)),
+            }
+            : null,
         }),
         { mentionUserIds: [scout.userId] },
       );
@@ -344,14 +504,283 @@ export function createSchedulerWiring({
       console.error(`[scheduler] ${channelName}: 巡回の起動に失敗: ${err.message}`);
       return;
     }
+    scoutThreadOf.set(channelName, { threadId: thread.id, botKey: scoutKey });
     console.log(
       `[scheduler] ${channelName}: 巡回を ${scoutKey} で起動`
-      + ` (thread ${thread.id} / 予算 ${SCOUT_JOB_BUDGET} job / 投稿は ${announcerKey})`,
+      + ` (thread ${thread.id} / 予算 ${SCOUT_JOB_BUDGET} job${reportShown ? ' / 前回の報告つき' : ''} / 投稿は ${announcerKey})`,
     );
   }
 
   /**
-   * `initiative` の適用 (発議 3 経路のうち (3) 定期巡回)。
+   * ハーネスの成績と門 (src/harness.js)。**役割文は全チャンネル共通**なので、実行記録とボードは
+   * チャンネルで絞らずに読む。読めなければ門を閉じる (記録が無いことを「測り終えた」と読まない)。
+   *
+   * 改訂の台帳 (役割文を触った merge 済みのタスク → その merge で始まった版) も一緒に出す。
+   *
+   * @returns {{summary: object, gate: object, ledger: object[]}|null}
+   */
+  function measureHarness(autonomy, now) {
+    if (!jobRuns) return null;
+    try {
+      const tasks = board.list();
+      const summary = summarizeHarness(jobRuns.list(), { tasks, minRuns: autonomy.harness.minRuns });
+      return {
+        summary,
+        gate: harnessGate(summary, { now, minRuns: autonomy.harness.minRuns }),
+        ledger: revisionLedger(summary, tasks),
+      };
+    } catch (err) {
+      console.error(`[scheduler] ハーネスの成績を出せません (改訂の巡回は見送り): ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * 主題ごとの重さの文面 (src/themes.js の themeCost → themeCostText)。企画とスカウトの起動文に
+   * 添えるだけなので、実行記録が無い・読めないときは null を返し、起動文は今の文面のまま巡回を続ける
+   * (measureHarness と同じ型)。task id はボード全体で一意なので、実行記録はチャンネルで絞らない
+   *
+   * @returns {Map<string, string>|null} slug → 文面
+   */
+  function themeWeights(channelName, themes) {
+    if (!jobRuns || themes.length === 0) return null;
+    try {
+      const runs = jobRuns.list();
+      const tasks = board.list({ channel: channelName });
+      return new Map(themes.map((theme) => [theme.slug, themeCostText(themeCost(tasks, runs, theme.slug))]));
+    } catch (err) {
+      console.error(`[scheduler] ${channelName}: 主題の重さを出せません (起動文は重さなしで続けます): ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * `harness` の適用 (ハーネスの改訂の巡回)。手順は startScout と同じ約束:
+   * スレッド作成 → 予算の払い出し → 種別の上書き → 起動メッセージ (失敗したら上書きを取り消す)。
+   * 起票は job が返ってきてから fileProposal が載せる — ここはボードを触らない。
+   */
+  async function startHarness({ channelName, autonomy, action, now, measured }) {
+    const decided = resolveHarness(action, {
+      autonomy,
+      availableBotKeys: [...bots.values()].filter((b) => b.userId).map((b) => b.key),
+    });
+    if (!decided.ok) {
+      console.error(`[scheduler] ${channelName}: ハーネスの改訂を見送り — ${decided.reason}`);
+      return;
+    }
+    if (!measured) {
+      console.error(`[scheduler] ${channelName}: ハーネスの改訂を見送り — 成績が出ていません`);
+      return;
+    }
+    const { botKey, announcerKey } = decided;
+    const bot = bots.get(botKey);
+    const channel = findGuildChannel(bots.get(announcerKey).client, channelName);
+    if (!channel?.threads) {
+      console.error(
+        `[scheduler] ${channelName}: チャンネルを取得できません (キャッシュ未取得・権限不足・改名)`,
+      );
+      return;
+    }
+
+    let thread;
+    try {
+      thread = await channel.threads.create({ name: harnessThreadName(now) });
+    } catch (err) {
+      console.error(`[scheduler] ${channelName}: ハーネスの改訂のスレッドの作成に失敗: ${err.message}`);
+      return;
+    }
+
+    hops.grantTaskBudget(thread.id, SCOUT_JOB_BUDGET);
+    setContractKindOverride(thread.id, botKey, 'task-proposal');
+    try {
+      await sendSafe(
+        thread,
+        harnessStartMessage({
+          botUserId: bot.userId,
+          verdictLines: measured.summary.bots.map(verdictLine),
+          gateReason: measured.gate.reason,
+          editable: harnessEditableFiles(measured.summary, botKey),
+          ledgerLines: ledgerStartLines(measured.ledger),
+          carry: Boolean(autonomy.planner?.bot),
+        }),
+        { mentionUserIds: [bot.userId] },
+      );
+    } catch (err) {
+      claimContractKindOverride(thread.id, botKey);
+      console.error(`[scheduler] ${channelName}: ハーネスの改訂の起動に失敗: ${err.message}`);
+      return;
+    }
+    console.log(
+      `[scheduler] ${channelName}: ハーネスの改訂を ${botKey} で起動`
+      + ` (thread ${thread.id} / ${measured.gate.reason} / 投稿は ${announcerKey})`,
+    );
+  }
+
+  /**
+   * 改訂してよい役割文 = 共通規定 + 成績に出ている bot の役割文。**提案役自身の役割文は外す** —
+   * 論文も提案役と解く側を分けている (自分の判断基準を自分で書き換えさせない)。
+   */
+  function harnessEditableFiles(summary, proposerKey) {
+    const own = config.bots?.[proposerKey]?.rolePromptFile ?? null;
+    const files = new Set(['roles/_common.md']);
+    for (const bot of summary.bots) {
+      const file = config.bots?.[bot.botKey]?.rolePromptFile;
+      if (typeof file === 'string' && file.trim() !== '' && file !== own) files.add(file.trim());
+    }
+    return [...files];
+  }
+
+  /**
+   * 主題ファイル (src/themes.js) を読んで門を出す。主題はチャンネルのリポジトリにあるので cwd 基準。
+   * **まだ無いのは「主題が 0 件」** (最初の巡回がファイルごと作る)。それ以外で読めなければ
+   * 門を閉じる — 読めないことを「主題が無い」と読むと、在る主題に重ねて足してしまう。
+   *
+   * @returns {{parsed: object, gate: object}|null}
+   */
+  function readThemes(channelName, autonomy) {
+    const file = autonomy.planner.themesFile;
+    const cwd = channelConfigForName(config, channelName)?.cwd;
+    const path = isAbsolute(file) || !cwd ? file : join(cwd, file);
+    let text = null;
+    try {
+      text = readFileSync(path, 'utf8');
+    } catch (err) {
+      if (err?.code !== 'ENOENT') {
+        console.error(`[scheduler] ${channelName}: 主題ファイルを読めません (企画の巡回は見送り): ${err.message}`);
+        return null;
+      }
+    }
+    const parsed = parseThemes(text);
+    return { parsed, gate: themesGate(parsed, { maxThemes: autonomy.planner.maxThemes, missing: text === null }) };
+  }
+
+  /**
+   * `plan` の適用 (企画の巡回)。手順は startHarness と同じ約束:
+   * スレッド作成 → 予算の払い出し → 種別の上書き → 起動メッセージ (失敗したら上書きを取り消す)。
+   * 起票は job が返ってきてから fileProposal が載せる — ここはボードを触らない。
+   */
+  async function startPlan({ channelName, autonomy, action, now, themes }) {
+    const decided = resolvePlan(action, {
+      autonomy,
+      availableBotKeys: [...bots.values()].filter((b) => b.userId).map((b) => b.key),
+    });
+    if (!decided.ok) {
+      console.error(`[scheduler] ${channelName}: 企画の巡回を見送り — ${decided.reason}`);
+      return;
+    }
+    if (!themes) {
+      console.error(`[scheduler] ${channelName}: 企画の巡回を見送り — 主題ファイルを読めていません`);
+      return;
+    }
+    const { botKey, announcerKey } = decided;
+    const bot = bots.get(botKey);
+    const channel = findGuildChannel(bots.get(announcerKey).client, channelName);
+    if (!channel?.threads) {
+      console.error(
+        `[scheduler] ${channelName}: チャンネルを取得できません (キャッシュ未取得・権限不足・改名)`,
+      );
+      return;
+    }
+
+    let thread;
+    try {
+      thread = await channel.threads.create({ name: planThreadName(now) });
+    } catch (err) {
+      console.error(`[scheduler] ${channelName}: 企画の巡回のスレッドの作成に失敗: ${err.message}`);
+      return;
+    }
+
+    hops.grantTaskBudget(thread.id, SCOUT_JOB_BUDGET);
+    setContractKindOverride(thread.id, botKey, 'task-proposal');
+    const weights = themeWeights(channelName, themes.parsed.themes.filter((t) => LISTED_THEME_STATES.includes(t.state)));
+    const early = action.early === true
+      ? ` / 前倒し (前の企画の巡回の後、スカウトの提案 0 件が続けて ${action.idleScouts ?? '?'} 回)`
+      : '';
+    // 申し送りは起動文より前に出す (承認時の備考と同じ — 前に置けば企画役の最初の job の文脈に入る)。
+    // 出せなくても巡回は続け、申し送りは消さずに次の企画の巡回へ回す
+    const carried = (tickStates.get(channelName) ?? initialState()).carry ?? [];
+    let carryShown = carried.length > 0;
+    for (const text of carryMessages({ items: carried })) {
+      try {
+        await sendSafe(thread, text);
+      } catch (err) {
+        console.error(`[scheduler] ${channelName}: 申し送りを出せません (巡回は続け、申し送りは次へ回します): ${err.message}`);
+        carryShown = false;
+        break;
+      }
+    }
+    try {
+      await sendSafe(
+        thread,
+        planStartMessage({
+          botUserId: bot.userId,
+          themesFile: autonomy.planner.themesFile,
+          directionFile: autonomy.directionFile,
+          mode: themes.gate.mode,
+          reason: `${themes.gate.reason}${early}`,
+          themeLines: themeLines(themes.parsed, board.list({ channel: channelName }), weights),
+          loopLines: loopLines(channelName, autonomy),
+          carryCount: carryShown ? carried.length : 0,
+        }),
+        { mentionUserIds: [bot.userId] },
+      );
+    } catch (err) {
+      claimContractKindOverride(thread.id, botKey);
+      console.error(`[scheduler] ${channelName}: 企画の巡回の起動に失敗: ${err.message}`);
+      return;
+    }
+    // 渡し終えた分だけ消す (投稿を待つ間に増えた申し送りは残る)
+    if (carryShown) saveTickState(channelName, dropCarry(tickStates.get(channelName) ?? initialState(), carried));
+    console.log(
+      `[scheduler] ${channelName}: 企画の巡回を ${botKey} で起動`
+      + ` (thread ${thread.id} / ${themes.gate.reason}${early}`
+      + `${carryShown ? ` / 申し送り ${carried.length} 件` : ''} / 投稿は ${announcerKey})`,
+    );
+  }
+
+  /**
+   * 回し方の数字 (企画の巡回の材料 — 変えた方がよい設定を、申し送りと合わせて 1 通で作者に上げさせる)。
+   * ブリッジの勘定だけを出す。日次上限で止まった時間などは企画役が実行記録から数える
+   */
+  function loopLines(channelName, autonomy) {
+    const state = tickStates.get(channelName) ?? initialState();
+    const lines = [];
+    if (autonomy.scout?.bot) {
+      const pace = scoutPace({ autonomy, idle: state.scoutIdle });
+      lines.push(
+        `スカウト: 続けて提案 0 件 ${state.scoutIdle} 回 — 間隔 ${pace.intervalMin} 分 (設定 ${pace.baseMin} 分。`
+        + '0 件が続くと伸び、merge で戻る)',
+      );
+    }
+    lines.push(`自律起動: 今日 ${state.jobsToday} / ${autonomy.maxJobsPerDay} job (着手・巡回・自動復旧の数。レビュー・承認は数えない)`);
+    return lines;
+  }
+
+  /**
+   * 主題の行 = 進行中と配備待ちの主題と進み具合 (と重さ) → 完了 / 取り下げの数 → 読めない見出し。
+   * 配備待ち (`waiting`) も出す — 配備の後に確かめて `done` / `dropped` にするのは企画役。
+   * weights (themeWeights) が null なら重さを付けない
+   */
+  function themeLines(parsed, tasks, weights = null) {
+    const lines = [];
+    for (const state of LISTED_THEME_STATES) {
+      for (const theme of parsed.themes.filter((t) => t.state === state)) {
+        const p = themeProgress(tasks, theme.slug);
+        lines.push(
+          `[${state}] ${theme.slug} — ${theme.title || '(題なし)'} (タスク merged ${p.merged} / 進行中 ${p.open} / 捨てた ${p.dropped})`
+          + (weights?.get(theme.slug) ?? ''),
+        );
+      }
+    }
+    const done = parsed.themes.filter((t) => t.state === 'done').length;
+    const dropped = parsed.themes.filter((t) => t.state === 'dropped').length;
+    if (done + dropped > 0) lines.push(`これまで: 完了 ${done} / 取り下げ ${dropped} (結果はファイルに)`);
+    for (const problem of parsed.problems) lines.push(`⚠️ ${problem}`);
+    return lines;
+  }
+
+  /**
+   * `initiative` の適用 (§3.9 の発議 3 経路のうち (3) 定期巡回)。
    * 手順は startScout と同じ約束: スレッド作成 → 予算の払い出し → 起動メッセージ。
    *
    * **種別は `report` を被せる。** 発議は report の任意フィールドなので、
@@ -422,7 +851,7 @@ export function createSchedulerWiring({
   }
 
   /**
-   * イベントを duty へ配る (発議 3 経路のうち (2))。
+   * イベントを duty へ配る (§3.9 の発議 3 経路のうち (2))。
    *
    * `block` / `send-back` / `backoff` は「社会がうまく回っていない」の観測点で、
    * report と定期巡回だけだと**次の巡回まで誰も見ない**。宣言した duty
@@ -449,8 +878,8 @@ export function createSchedulerWiring({
     eventKind, channelName, detail = '', excludeBotKeys = [], now = Date.now(),
   }) {
     if (!proposals || DUTY_BOTS.length === 0) return;
-    // kill switch。止めている間に発議 job だけが立ち上がらないように。
-    // 制御台帳が読めないときも同じ (イベント経由だけが自律起動の抜け道にならないように)
+    // kill switch (§3.7)。止めている間に発議 job だけが立ち上がらないように。
+    // 制御台帳が読めないときも同じ (§12.3 (1) — イベント経由だけが自律起動の抜け道にならないように)
     if (pauseStore.paused || !lifecycle.accepting || brokenControlLedgers().length > 0) return;
     const autonomy = resolveAutonomy(channelConfigForName(config, channelName));
     if (autonomy.enabled !== true) return;
@@ -487,7 +916,7 @@ export function createSchedulerWiring({
   }
 
   /**
-   * bot 起点 job を 1 本通した = そのタスクの job 予算を 1 使った (記帳)。
+   * bot 起点 job を 1 本通した = そのタスクの job 予算を 1 使った (§3.5 の記帳)。
    * 実行時の門番は hops が持ち、**台帳はボード**が持つ — 人間が覗いたときに
    * 「あと何本走れるか」がボードだけで読める。
    */
@@ -504,7 +933,7 @@ export function createSchedulerWiring({
   }
 
   /**
-   * 自律スレッドの job の成否をチャンネルの勘定へ記録する (バックオフ)。
+   * 自律スレッドの job の成否をチャンネルの勘定へ記録する (§3.7 のバックオフ)。
    * **予算を配ったスレッドだけが対象** — 人間が回している job の失敗で社会を止めない。
    *
    * **発議 job も対象外** (sol 指摘 2026-08-30)。バックオフはチャンネル単位の勘定なので
@@ -523,17 +952,21 @@ export function createSchedulerWiring({
     });
     if (!outcome || !item?.channelName) return;
     const state = tickStates.get(item.channelName) ?? initialState();
+    const now = Date.now();
     // バックオフは持ち越さない勘定なので、ここではディスクへ落とさない
-    // (saveTickState を通すと、走っているプロセスの観測が台帳に混ざる)
+    // (saveTickState を通すと、走っているプロセスの観測が台帳に混ざる)。
+    // 上限が明ける時刻が読めれば、着手・巡回・起こし直しはそこまで待つ (読めなければ従来の倍々)
     tickStates.set(
       item.channelName,
-      outcome === 'failure' ? recordFailure(state, { now: Date.now() }) : recordSuccess(state),
+      outcome === 'failure'
+        ? recordFailure(state, { now, until: limitResetOf(reason, now) })
+        : recordSuccess(state),
     );
     if (outcome === 'failure') {
       console.error(
         `[scheduler] ${item.channelName}: 自律 job が失敗 (${reason}) — 自律起動をバックオフします`,
       );
-      // ランタイムが動かなかったことも組織の観測点。**待たない** —
+      // ランタイムが動かなかったことも組織の観測点 (§3.9)。**待たない** —
       // job の後始末の途中なので、発議の起動で終了理由の記録を遅らせない
       void notifyDutyEvent({
         eventKind: 'backoff',
@@ -548,10 +981,14 @@ export function createSchedulerWiring({
     autonomyTick,
     startTaskFromBoard,
     startScout,
+    startHarness,
+    startPlan,
     startInitiative,
     notifyDutyEvent,
     noteJobSpent,
     noteAutonomyOutcome,
+    noteScoutReport,
+    noteCarry,
     setContractKindOverride,
     claimContractKindOverride,
   };

@@ -46,7 +46,7 @@ function harness(over = {}) {
       exists: (p) => Object.hasOwn(files, String(p).replaceAll('\\', '/')),
       realpath: (p) => { if ((over.missingDirs ?? []).includes(p)) throw new Error('ENOENT'); return p; },
       // 実物 (scripts/doctor.mjs の readFileSync) と同じく errno の code を載せる —
-      // doctor は「無い (ENOENT)」と「読めない (EACCES 等)」を code で分ける
+      // doctor は「無い (ENOENT)」と「読めない (EACCES 等)」を code で分ける (§12.3 (1))
       readFile: (raw) => {
         const p = String(raw).replaceAll('\\', '/'); // exists と同じく / に揃える
         if (Object.hasOwn(over.unreadable ?? {}, p)) {
@@ -83,7 +83,7 @@ test('全部そろっていれば ok で、fail が無い', () => {
   assert.equal(out.ok, true, JSON.stringify(out.findings.filter((f) => f.level !== 'ok')));
   assert.ok(out.findings.some((f) => f.scope === 'cli' && /claude --version/.test(f.message)));
   assert.ok(out.findings.some((f) => f.scope === 'channels.kt' && /\.worktrees\/ は Git の無視対象/.test(f.message)));
-  assert.ok(out.findings.some((f) => f.scope === 'channels.kt' && /自動復旧は observe/.test(f.message)));
+  assert.ok(out.findings.some((f) => f.scope === 'channels.kt' && /自動復旧は auto \(猶予 5 分 \/ 上限 3 回\)/.test(f.message)));
   assert.ok(out.findings.some((f) => f.scope === 'discord' && /診断では行わない/.test(f.message)));
   const text = formatDiagnosis(out);
   assert.match(text, /^✅ \[config\]/);
@@ -156,6 +156,27 @@ test('設定例のまま残っている ID と cwd は ❌ (検証は通って�
   assert.deepEqual(real.findings.filter((f) => f.level === 'fail'), []);
 });
 
+test('allowedRoleIds は非空のときだけ 1 行出す (例のままの ❌ / ⚠️ 件数を動かさない)', () => {
+  // publish-snapshot の門は「❌ は設定例のままの 4 件だけ」を見ている。同梱の例は空配列なので、
+  // 写しただけの手元で診断の見え方が変わらないことを固定する。
+  // 逆に書いてあるときは出す — 「誰が呼べるか」が ID の列挙だけでは読めなくなるため
+  const base = {
+    guildId: 'G', allowedUserIds: ['U'], ownerUserId: 'U', claudeBin: 'claude',
+    bots: { fable: { tokenEnv: 'FABLE_TOKEN', rolePromptFile: 'roles/fable.md' } },
+    channels: { kt: { cwd: 'C:/work/kt' } },
+  };
+  const roleLines = (over) => harness({ config: { ...base, ...over }, env: { FABLE_TOKEN: 'x' } })
+    .findings.filter((f) => /allowedRoleIds/.test(f.message));
+
+  assert.deepEqual(roleLines({}), []);                     // 未設定
+  assert.deepEqual(roleLines({ allowedRoleIds: [] }), []); // 同梱の例のまま
+
+  const shown = roleLines({ allowedRoleIds: ['R1', 'R2'] });
+  assert.equal(shown.length, 1, JSON.stringify(shown));
+  assert.equal(shown[0].level, 'ok', '❌ / ⚠️ の件数を増やさない');
+  assert.match(shown[0].message, /2 件/);
+});
+
 test('トークンは有無だけ見て値を出さない。未設定は fail', () => {
   const out = harness({ env: { FABLE_TOKEN: 'super-secret-token-value' } });
   const fable = out.findings.find((f) => f.scope === 'bots.fable' && /FABLE_TOKEN/.test(f.message));
@@ -216,7 +237,7 @@ test('data/ の壊れた JSON は fail (自律起動が止まる、と書く)。
   const fails = out.findings.filter((f) => f.scope === 'data' && f.level === 'fail');
   assert.equal(fails.length, 1);
   assert.match(fails[0].message, /data\/job-runs\.json が JSON として読めない/);
-  // 2026-09-07 から退避しない = 直さないかぎり自律起動は止まったまま
+  // 2026-09-07 (§12.3 (1)) から退避しない = 直さないかぎり自律起動は止まったまま
   assert.match(fails[0].message, /自律起動が止まる \(fail-closed\)。直すか手で退避する/);
   assert.equal(/退避されて空から始まる/.test(fails[0].message), false);
   assert.equal(out.ok, false, '壊れた data のまま起動できることにしている');
@@ -355,7 +376,7 @@ test('codex を起動できないときは codexCmd の設定を案内する', (
   assert.match(cli.message, /codexCmd/, '直し方 (codexCmd) を書かないと原因に辿り着けない');
 });
 
-// ---- 社会台帳 ----
+// ---- 社会台帳 (docs/society-ledger.md §1・S2-1) ----
 // **他の台帳と唯一違うのは「不在」の意味**。既存は不在 = 初回だが、society は
 // observe / active で不在なら起動停止 (初回と推測しない)。
 

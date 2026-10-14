@@ -14,7 +14,7 @@
 // ## 二層にしない (T0 実測による設計変更)
 //
 // 当初案は「result (散文) を投稿し、structured_output を別に受け取る」だったが、
-// 実測で **`--json-schema` を渡すと `result` は structured_output と同じ
+// T0 §4.1 の実測で **`--json-schema` を渡すと `result` は structured_output と同じ
 // JSON 文字列になる**ことが分かった。散文の置き場が無いので、**両スキーマに必須の
 // `本文` を持たせ、Discord へはそれを投稿する** (作者裁定 2026-08-02)。
 // 制御フッターも `本文` の末尾に置かれるので、投稿テキスト側で従来どおり発火する。
@@ -26,7 +26,9 @@
 // その部分集合。元が読み取り専用なら touch 集合を書いても書込みは付かない。
 
 import { WAITING_REASONS } from './cases.js';
+import { MAX_CARRY_CHARS, MAX_CARRY_PER_REPORT } from './config.js';
 import { PROPOSAL_KINDS, REMEDIES, TARGET_OPS } from './proposals.js';
+import { canRuntime, capabilitiesOf } from './runtime.js';
 import { describePathRule } from './toolrules.js';
 
 /** role ファイルが宣言できるスキーマ種別 */
@@ -57,11 +59,12 @@ export function readContractKind(text) {
  * この job で実際に使うスキーマ種別。役割文の宣言に**チャンネル設定とランタイムを重ねた**結果。
  *
  * 宣言があっても null になる経路が 2 つある:
- * - codex は `--json-schema` を持たない
+ * - 構造化出力を返せないランタイム (能力表の `schema` — src/runtime.js)。claude は
+ *   `--json-schema`、codex は `--output-schema` で受けるので、現表ではどちらも返せる
  * - チャンネルが `structuredOutput: false` で切っている (成果物へ向かわない場)
  *
  * 判断を index.js に置くとテストが書けないので、ここへ集める
- * (判断ロジックは配線層に書かない)。
+ * (「判断ロジックは配線層に書かない」— docs/tickets/README.md の設計制約)。
  *
  * `override` は**その 1 job だけ種別を差し替える**口 (スカウト job が使う —
  * 同じ bot の通常の役割のまま、その job の応答だけ task-proposal で検査したい)。
@@ -78,7 +81,7 @@ export function readContractKind(text) {
 export function resolveContractKind({
   roleText, runtime = 'claude', structuredOutput = true, override = null,
 } = {}) {
-  if ((runtime ?? 'claude') === 'codex') return null;
+  if (!capabilitiesOf(runtime).schema) return null;
   if (structuredOutput === false) return null;
   const declared = readContractKind(roleText);
   if (!declared || !override) return declared;
@@ -111,6 +114,7 @@ export const FIELD_LABELS = {
   rationale: '理由',
   touch: 'touch集合',
   job_budget: 'job予算',
+  carry: '申し送り',
   approve: '承認',
   drop: '破棄',
   pending: '承認待ちのタスク',
@@ -122,13 +126,14 @@ export const FIELD_LABELS = {
   verdict: '判定',
   branch: 'ブランチ',
   merge_commit: 'マージコミット',
+  remarks: '指摘',
   adjudication: '組織提案の裁定',
   proposal_id: '提案 ID',
   decision: '採否',
-  // 発議。**キー名は src/proposals.js の INPUT_KEYS と同じ綴り**にしてある —
+  // 発議 (§3.9)。**キー名は src/proposals.js の INPUT_KEYS と同じ綴り**にしてある —
   // 検証を通った値をそのまま ProposalStore.raise() へ渡すので、ここで名前を変えると
   // 契約とゲートの間に翻訳層が要る (翻訳層は綴りの取り違えを黙って通す)
-  // 案件の 1 ターン。**bot の自由文を権限の根拠にしない**
+  // 案件の 1 ターン (docs/society-ledger.md §3〜§6・S2-3a)。**bot の自由文を権限の根拠にしない**
   // ための欄で、ここに書いたものだけが台帳へ写る
   result: '成果',
   artifact: '成果物',
@@ -176,9 +181,9 @@ export const FIELD_LABELS = {
 };
 
 /**
- * レビューの判定。この 4 値以外は検査で落とす。
+ * レビューの判定 (§3.6)。この 4 値以外は検査で落とす。
  *
- * `drop` は後から足した「対象が不要」の判定。無かった頃は、重複と分かったタスクを
+ * `drop` は §9.4 で足した「対象が不要」の判定。無かった頃は、重複と分かったタスクを
  * 落とす言葉が無く、契約を消費して判定なしで終わっていた (#46 が review で 2 時間 40 分)。
  */
 export const REVIEW_VERDICTS = ['merge', 'send-back', 'block', 'drop'];
@@ -216,14 +221,14 @@ export const MAX_ITEM_CHARS = 1000;
 export const MAX_DID_ITEMS = 3;
 
 /**
- * 1 回のスカウトが起票できるタスクの上限。
+ * 1 回のスカウトが起票できるタスクの上限 (docs/social-engineering.md §3.3)。
  * **0 件も正しい報告** (「今回は起票なし」) なので下限は無い。上限があるのは、
  * 1 回の巡回で承認待ちの山を作らせないため — 溜まった分は承認側の負担になる。
  */
 export const MAX_PROPOSED_TASKS = 5;
 
 /**
- * 1 発議が指せる対象の数 (`targets[]`)。
+ * 1 発議が指せる対象の数 (§3.9 の `targets[]`)。
  * 異動や兼務解消は複数の bot にまたがるので 1 件には縛れないが、
  * 数十を一度に動かす提案は 1 回の裁定で読める大きさを超えている。
  */
@@ -297,7 +302,7 @@ export const SCHEMAS = {
       did: stringArray('やったこと — 3 件以内', MAX_DID_ITEMS),
       verification: prose('検証結果 — 実行したコマンドと結果'),
       remaining: stringArray('残課題 — 要実機確認の項目を含む。無ければ空配列'),
-      // 組織提案の裁定。**bot が裁定できるのは work / process だけ**で、
+      // 組織提案の裁定 (§3.9)。**bot が裁定できるのは work / process だけ**で、
       // 権限判定はブリッジの canAdjudicate が持つ — ここに書けたから通るのではない
       adjudication: {
         type: 'object',
@@ -316,7 +321,7 @@ export const SCHEMAS = {
           rationale: prose('裁定理由 — 記録に残る。自分の起草分を裁定するときも必ず書く'),
         },
       },
-      // 発議 (3 経路のうち (1))。**任意** — 全 report に提案や
+      // 発議 (§3.9 の 3 経路のうち (1))。**任意** — 全 report に提案や
       // 「問題なし」の作文を書かせない。見落としはイベントと定期巡回が補う。
       // ここに書けたから通るのではなく、保存の可否は checkProposal (src/proposals.js)
       // が決める。class・subjectKeys・追跡責任者はブリッジが付与するので書けない
@@ -457,7 +462,7 @@ export const SCHEMAS = {
       },
     },
   },
-  // 案件の 1 ターン。案件に結ばれた job の戻り。
+  // 案件の 1 ターン (docs/society-ledger.md §3〜§6・S2-3a)。案件に結ばれた job の戻り。
   //
   // **bot の自由文を権限の根拠にしない。** 台帳へ写るのはこの欄に書かれたものだけで、
   // 本文に「次は opus へ」と書いても Action にはならない (次の起動は `next.plan` だけ)。
@@ -477,7 +482,7 @@ export const SCHEMAS = {
         required: ['observed'],
         description:
           '成果 — この job で分かったこと (無ければ丸ごと省く)。'
-          + '**観測と主張を分ける** — 検収は observed にだけ結ばれる',
+          + '**観測と主張を分ける** — 検収は observed にだけ結ばれる (§6)',
         properties: {
           artifact: {
             type: 'string',
@@ -502,7 +507,7 @@ export const SCHEMAS = {
         maxProperties: 1,
         description:
           '次の一手 — **plan か waiting のどちらか一方だけ**書く (両方・空はどちらも不可)。'
-          + '案件は「次に何が起きたら動くか」を必ず 1 つ持つ (不変条件)',
+          + '案件は「次に何が起きたら動くか」を必ず 1 つ持つ (§3 の不変条件)',
         properties: {
           plan: {
             type: 'object',
@@ -580,7 +585,7 @@ export const SCHEMAS = {
       },
     },
   },
-  // スカウトの起票。ボードの propose へ機械が流す前提なので、
+  // スカウト (§3.3) の起票。ボードの propose へ機械が流す前提なので、
   // タスク 1 件を散文ではなくオブジェクトで受ける — 本文を人が読んで転記する形にすると、
   // 起票が人手を介さないと進まなくなる (自律運転の意味が無い)
   'task-proposal': {
@@ -613,7 +618,7 @@ export const SCHEMAS = {
               maxLength: MAX_ITEM_CHARS,
               description: '理由 — 方向性ドキュメントのどこに効くのか。承認する側はここを見る',
             },
-            // **起票の時点で必須** — touch 不明のタスクが open にあると、
+            // §3.9 の末尾。**起票の時点で必須** — touch 不明のタスクが open にあると、
             // 発議側は「触っているかもしれない」と見なして全件拒否する (fail-closed)
             touch: {
               type: 'array',
@@ -633,9 +638,22 @@ export const SCHEMAS = {
           },
         },
       },
+      // 申し送り (src/config.js の MAX_CARRY_*)。起票しない気づきを次の企画の巡回へ渡す —
+      // 作者を直接呼ぶ ([[notify:owner]]) 代わりの口。作者へ上げるかは企画の巡回がまとめて決める
+      carry: {
+        type: 'array',
+        maxItems: MAX_CARRY_PER_REPORT,
+        // 字数の検査は他の文字列の配列と同じ MAX_ITEM_CHARS。溜めるときに MAX_CARRY_CHARS で切る —
+        // 申し送りが長いだけで起票ごと様式不履行にしない
+        items: { type: 'string', maxLength: MAX_ITEM_CHARS },
+        description:
+          `申し送り — ${MAX_CARRY_PER_REPORT} 件以内。起票しない気づき `
+          + '(回し方の無駄・詰まり、作者の手が要るもの: 配備・/retry・設定の変更) を数字を添えて 1 件 1〜2 文で '
+          + `(溜めるときは ${MAX_CARRY_CHARS} 字で切る)。次の企画の巡回がまとめてさばき、作者へ上げるかを決める。無ければ省く`,
+      },
     },
   },
-  // 承認 (proposed → approved | dropped)。**この種別だけ往復で形が違う**:
+  // 承認 (§3.2 の proposed → approved | dropped)。**この種別だけ往復で形が違う**:
   // ブリッジは `pending` を埋めて保存し、承認する側は `body` / `approve` / `drop` を返す。
   // 同じスキーマに両方を置いてあるのは、契約の保存と検査が種別 1 つで完結するため。
   'task-approval': {
@@ -688,7 +706,7 @@ export const SCHEMAS = {
             id: { type: 'string', maxLength: MAX_ITEM_CHARS, description: 'ボードのタスク id' },
             title: { type: 'string', maxLength: MAX_ITEM_CHARS, description: 'タイトル' },
             rationale: { type: 'string', maxLength: MAX_ITEM_CHARS, description: '起票時の理由' },
-            // **重複を見つける材料**は touch — タイトルの言い換えは見抜けないが、
+            // §9.3。**重複を見つける材料**は touch — タイトルの言い換えは見抜けないが、
             // 同じファイルを掴んでいるかは参考欄と突き合わせれば分かる
             touch: {
               type: 'array',
@@ -700,7 +718,7 @@ export const SCHEMAS = {
           },
         },
       },
-      // 承認する側は pending しか見えず、**重複を見つける材料がなかった**
+      // §9.3。承認する側は pending しか見えず、**重複を見つける材料がなかった**
       // (#46 の重複が 1〜9 分で全部通った)。ボードの現状を同じ契約に載せる
       board: {
         type: 'array',
@@ -727,7 +745,7 @@ export const SCHEMAS = {
       },
     },
   },
-  // レビュー → 昇格。承認と同じ非対称の形: ブリッジは `target` を埋めて保存し、
+  // レビュー → 昇格 (§3.6)。承認と同じ非対称の形: ブリッジは `target` を埋めて保存し、
   // レビューする側は `verdict` (+ 理由 / マージコミット) を返す。
   // **merge の実行はレビュー担当の shell 仕事**で、ブリッジは git を持たない。
   'task-review': {
@@ -763,6 +781,16 @@ export const SCHEMAS = {
           'マージコミット — merge のとき必須。マージコミットの SHA (7〜40 桁の 16 進)。'
           + 'ブリッジが base への取り込みを git で照合する。照合できなければ merged にならない',
       },
+      // 任意。merge のときに数えてボードの履歴へ残す (src/bridge/board.js の applyReview)。
+      // 判定にも門にも使わない — 差し戻しの条件はこの欄では変わらない
+      remarks: {
+        type: 'array',
+        maxItems: 10,
+        description:
+          '指摘 —merge で通すが直せる点 (1 件 1 文)。無ければ書かない。'
+          + '差し戻すほどではない点だけを書く (差し戻しの条件は変わらない)',
+        items: { type: 'string', maxLength: MAX_ITEM_CHARS },
+      },
       target: {
         type: 'array',
         maxItems: 1,
@@ -791,7 +819,7 @@ export const SCHEMAS = {
 function kindInvariant(kind, contract) {
   if (kind === 'case-turn') {
     // **断るなら理由が要る。** 辞退は責任の空白を作る操作で、次に誰へ声を掛けるかを
-    // 決めるのは理由を読んだ側 (「declined に落ちて理由が残る」と同じ要求)
+    // 決めるのは理由を読んだ側 (§4 の「declined に落ちて理由が残る」と同じ要求)
     if (contract.claim?.decision === 'decline' && String(contract.claim.reason ?? '').trim() === '') {
       return `${label('claim')} が decline のときは理由 (reason) が必要です`;
     }
@@ -810,7 +838,7 @@ function kindInvariant(kind, contract) {
     return `${label('verdict')} が ${contract.verdict} のときは理由 (reason) が必要です`;
   }
   // **merge は「もう base へ入れた」の宣言**なので、照合できる形の SHA が無ければ受け取らない
-  //。ブリッジは取り込みを git で確かめてから merged にするので、SHA が無い判定は
+  // (§12.3 (2))。ブリッジは取り込みを git で確かめてから merged にするので、SHA が無い判定は
   // 「確かめようがない完了」= 無関係な commit と区別が付かない
   if (contract.verdict === 'merge') {
     const sha = String(contract.merge_commit ?? '').trim();
@@ -1050,6 +1078,18 @@ export function bodyOf(contract) {
   return typeof contract?.body === 'string' ? contract.body : '';
 }
 
+/**
+ * レビューの指摘 (task-review の remarks)。trim して空でない文字列だけを返し、配列でなければ空。
+ * **様式の検査は空白の要素を落とさない**ので、数えるときはここを通す (数と中身をずらさない)
+ */
+export function reviewRemarks(contract) {
+  if (!Array.isArray(contract?.remarks)) return [];
+  return contract.remarks
+    .filter((item) => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter((item) => item !== '');
+}
+
 // ---- touch 集合 → 実権限 ----
 
 /**
@@ -1066,7 +1106,7 @@ const WRITE_TOOLS = ['Edit', 'Write', 'NotebookEdit'];
  *   `Bash(git *)` のような前置き許可でも同じ (照合前に wrapper が外れる — src/grants.js)
  * - `Write` / `NotebookEdit` — `Write(パス)` は受理されても照合されない (再実測済み) ため、
  *   パス限定に絞れない。書込みは `Edit(パス)` に一本化する
- * - `Agent` / `Task` — **省略では止まらない** (`--allowedTools` と無関係に呼べる)。
+ * - `Agent` / `Task` — **省略では止まらない** (`--allowedTools` と無関係に呼べる — T0 §6c)。
  *   さらに custom subagent 定義は `permissionMode` を上書きできる (T0-results の訂正)。
  *   明示的に落とす必要がある
  */
@@ -1118,7 +1158,7 @@ function toolNameOf(rule) {
  * @param {string[]} p.allowedTools チャンネルの実効権限 (resolveAllowedTools の戻り)
  * @param {string} p.cwd canonical cwd
  * 外部 settings も落とす: `permissions.allow` は `--allowedTools` に**勝って権限を付与する**
- * ので、作者の user settings に 1 行足すだけで絞り込みが破れる
+ * (T0 §2.4) ので、作者の user settings に 1 行足すだけで絞り込みが破れる
  * (実測 2026-08-03: 実際に破れた)。`--setting-sources ''` で user / project / local を
  * すべて読ませない — job 専用の `--settings` (hooks) は別枠なので残る (実測済み)。
  *
@@ -1276,13 +1316,16 @@ export function narrowForTouchSet({
 export function canDelegateTo(kind, contract, runtime) {
   // 縛るのは委譲の touch 制限だけ。報告は権限を持たないのでどの担当へでも渡せる
   if (kind !== 'delegation' || !isTouchRestricted(contract)) return { ok: true };
-  if ((runtime ?? 'claude') === 'claude') return { ok: true };
+  // **知らない綴りは渡さない側へ倒す。** `capabilitiesOf` ではなく `canRuntime` を使うのは
+  // そのため — あちらは不明値を既定 (claude) へ倒すので、権限の判定に使うと
+  // 「絞れるか分からない担当」が許可側に入る (Opus2 指摘 2026-09-18)
+  if (canRuntime(runtime, 'pathScopedPermissions')) return { ok: true };
   return {
     ok: false,
     reason:
       `touch 制限つきの委譲は ${runtime} ランタイムの担当へ渡せません `
       + '(パス単位に権限を絞る口が無く、作業ツリー全体を書けてしまう)。'
-      + 'touch 制限を解除して渡すか、claude ランタイムの担当へ委譲してください',
+      + 'touch 制限を解除して渡すか、パス単位に絞れるランタイム (claude / pi) の担当へ委譲してください',
   };
 }
 
@@ -1350,7 +1393,7 @@ export function classifyExternalSettings(sources = []) {
     const permissions = isPlainObject(settings.permissions) ? settings.permissions : {};
     // deny / ask はどちらも「そのままでは実行させない」= 制限
     const limits = ['deny', 'ask'].filter((k) => Array.isArray(permissions[k]) && permissions[k].length > 0);
-    // PreToolUse hook は実行前に deny を返せる
+    // PreToolUse hook は実行前に deny を返せる (T0 §1.3)
     const hooks = isPlainObject(settings.hooks) && Array.isArray(settings.hooks.PreToolUse)
       && settings.hooks.PreToolUse.length > 0;
     if (limits.length > 0 || hooks) {
@@ -1580,7 +1623,7 @@ export function renderReport(contract) {
 /**
  * スカウトの起票をプロンプトへ載せる形 (承認する側が読む)。
  *
- * **承認するまで着手されない** (タスクボードの proposed → approved)。
+ * **承認するまで着手されない** (docs/social-engineering.md §3.2 の proposed → approved)。
  * 検収と同じで、ここに出るのは提案そのものであって既に決まったことではない —
  * 承認側が見るべき軸 (方向性との整合・重複・粒度) を渡す側からも書いておく。
  */
@@ -1609,7 +1652,7 @@ export function renderProposal(contract) {
 }
 
 /**
- * ボードのタスク → 承認契約の参考欄。**純粋** — 呼び出し側が渡した並びを保つ。
+ * ボードのタスク → 承認契約の参考欄 (§9.3)。**純粋** — 呼び出し側が渡した並びを保つ。
  *
  * 今回の承認待ち (`pending` に出ているもの) は `excludeIds` で外す — 参考欄に自分自身が
  * 並ぶと「既に同じタスクがある」に見える。`MAX_ITEMS` を超える分は末尾を落とす:
@@ -1650,7 +1693,7 @@ export function approvalBoard(tasks, { excludeIds = [] } = {}) {
  * **ボードの id をそのまま出す**のが要点。承認の応答は id で返ってくるので、
  * ここに出ていない id は「今回の起票ではない」として弾ける (src/scheduler.js)。
  *
- * 後から足したのは **touch と参考欄**。承認する側が見ていたのは id / title / 理由 /
+ * §9.3 で足したのは **touch と参考欄**。承認する側が見ていたのは id / title / 理由 /
  * 予算だけで、重複を見つける材料が無かった (#46 の重複がそのまま通った)。
  * 逆に**予算は判断材料から外す** — 下限 (`MIN_TASK_JOB_BUDGET`) と上限
  * (`taskJobBudget`) は機構が見ているので、承認者が読むと二重の門になる。
@@ -1691,6 +1734,8 @@ export function renderApproval(contract) {
     '通すものの id を `approve` に、落とすものを理由つきで `drop` に書くこと。',
     '**どちらにも書かなかった id は自動で破棄される** (幽霊の承認待ちを残さないため)。',
     '本当に要るものを落としても、次の巡回で改めて起票される。',
+    '着手する人への注意 (触る範囲・設計の穴) は**本文に書く** — 承認した本文はタスクの記録に残り、'
+      + '着手の起動とレビューの依頼に載る。',
   );
   return lines.join('\n');
 }
@@ -1703,7 +1748,7 @@ function touchLine(touch) {
 }
 
 /**
- * レビュー依頼をプロンプトへ載せる形。
+ * レビュー依頼をプロンプトへ載せる形 (§3.6)。
  *
  * **手順まで書く。** ここが「1 タスク = 1 マージコミット」を守れる唯一の場所で、
  * ブリッジは git を持たない — merge を実行するのはレビューする側の shell 仕事。
@@ -1729,6 +1774,8 @@ export function renderReview(contract) {
     '- **適用 task (org-apply) だけは例外**: merge を打つのはブリッジ自身なので、検収の時点で',
     '  マージコミットはまだ無い。`merge_commit` には**検収した commit** (依頼の案内に出ている',
     '  適用 commit の OID = 作業ツリーの HEAD) を書く。ブリッジが receipt と一致するか確かめる',
+    '- merge で通すときも直せる点があれば `remarks` に 1 件 1 文で書く (上限 10 件)。',
+    '  **差し戻しの条件は変わらない** — 差し戻すべきものを remarks へ逃がさない',
     '- 直させるなら `verdict: "send-back"` + 理由。**理由は必須**で、',
     '  直す側がそのまま作業に移れる具体さで書く (ファイル:行 / 失敗シナリオ / 推奨する直し方)',
     '- 詰んだ (原因不明で落ち続ける・仕様の裁定が要る) なら `verdict: "block"` + 理由',
@@ -1749,7 +1796,6 @@ export function renderForKind(kind, contract, narrowed = null) {
   return '';
 }
 
-/** @param {unknown} v @returns {v is Record<string, any>} */
 function isPlainObject(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
